@@ -96,7 +96,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const summary = (opts?.summary || task || '').slice(0, 120);
   const ac = new AbortController();
   const scheduledCtx = getScheduledContext();
-  const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
+  const silentScheduled = Boolean(scheduledCtx?.originTaskId || opts?.originScheduledTaskId);
   // Coordinator-declared forward pipeline (produce → hand off → consume): both
   // stages run inside this ONE background task — one chip, one journal entry,
   // one AbortController covering the whole chain. `handoff.agent` is the real
@@ -119,7 +119,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const rootWatcherId = opts?.rootWatcherId || (rootTaskId === taskId ? null : parentWatcherId);
   const spanId = opts?.spanId || `${rootTaskId}:${_slug(agentName)}:${taskId}`;
   const parentTurnCtx = getTurnContext() || {};
-  const suppressLearning = parentTurnCtx.suppressLearning === true;
+  const suppressLearning = silentScheduled || parentTurnCtx.suppressLearning === true;
   activeTasks.set(taskId, {
     checkpoint: taskCheckpoint(scopedAgent, task, {
       userId, note: opts?.extraSystemNote || null,
@@ -1022,7 +1022,7 @@ async function completeInProject(taskId, userId, coordinatorAgentId, agentName, 
   //    Include the original task summary so the user (and the LLM on its next
   //    turn) can see WHICH task the specialist is replying to — important when
   //    multiple background tasks are in flight at once.
-  if (!rec?.originScheduledSilent) {
+  if (!rec?.originScheduledTaskId && !rec?.originScheduledSilent) {
     try {
       const reportAgentId = await _resolveRuntimeSessionKey(
       userId,

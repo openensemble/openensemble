@@ -55,6 +55,10 @@ export function orchestrationPolicyForClient(userId) {
 // ── Broadcast helpers ────────────────────────────────────────────────────────
 export function broadcast(msg) {
   if (!getMainWss()) return;
+  if (msg?.type === 'task_ledger_updated') {
+    if (String(msg.ownerId || '').startsWith('user_')) sendToUser(msg.ownerId, msg);
+    return;
+  }
   const context = projectContext.getStore();
   if (context?.projectId && msg?.agent) { sendToUser(context.userId, projectEvent(context.userId, msg)); return; }
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);

@@ -216,7 +216,7 @@ export async function bootRecoverInterruptedTasks() {
       : recoveredError;
     const recentOutcome = recoveredStatus === 'done' ? 'done'
       : (recoveredStatus === 'cancelled' ? 'stopped' : 'error');
-    const silentScheduled = Boolean(e.originScheduledTaskId) && e.originScheduledSilent === true;
+    const silentScheduled = Boolean(e.originScheduledTaskId);
 
     // 1. Terminal fact for check_workers (the rings are in-memory, also lost).
     if (e.kind === 'worker') {
@@ -1443,7 +1443,7 @@ export function registerSyncDelegation({
   if (!taskId || !userId) return null;
   const rTask = rootTaskId || taskId;
   const scheduledCtx = getScheduledContext();
-  const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
+  const silentScheduled = Boolean(scheduledCtx?.originTaskId);
   activeTasks.set(taskId, {
     agentId, userId, agentName, agentEmoji,
     provider: typeof provider === 'string' ? provider.trim().slice(0, 100) : null,

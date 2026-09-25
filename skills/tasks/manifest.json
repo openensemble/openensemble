@@ -92,7 +92,7 @@
       "type": "function",
       "function": {
         "name": "schedule_task",
-        "description": "Schedule THIS agent to run a prompt at a specific time. Use ONLY when no `[scheduler]` outcome was prepended this turn. The user is NOT present at fire time — write `prompt` as a self-contained instruction the agent can act on directly.",
+        "description": "Schedule THIS agent to run a prompt at a specific time. Results appear in Tasks → Ledger, outside chat history and chat context. Use ONLY when no `[scheduler]` outcome was prepended this turn. The user is NOT present at fire time — write `prompt` as a self-contained instruction the agent can act on directly.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -101,8 +101,7 @@
             "datetime": { "type": "string", "description": "ISO 8601 timestamp for one-shot tasks. Required when repeat is 'once' or omitted." },
             "time":     { "type": "string", "description": "HH:MM 24-hour for daily tasks. Required when repeat is 'daily'." },
             "interval_minutes": { "type": "integer", "description": "For repeat:'interval', minutes between runs: 60 = hourly, 5 = every 5 minutes, 30 = every half hour, 1440 = every day. Minimum 1. Use for sub-daily or fixed-cadence schedules instead of a clock time." },
-            "repeat":   { "type": "string", "enum": ["once", "daily", "interval"], "description": "Defaults to 'once'. 'daily' fires at clock `time` each day; 'interval' fires every `interval_minutes` regardless of clock time — use for 'every hour', 'every 5 minutes', etc." },
-            "silent":   { "type": "boolean", "description": "If true, the task fires without writing anything to chat — no header, no prompt, no agent reply. Confirmation appears as a 'Last run' line in the tasks drawer with a short summary of what the agent did. Only use for low-risk information-gathering/background work. Silent tasks that send/post/buy/delete/terminate/etc. are rejected; schedule those visible with silent=false. Defaults to false." }
+            "repeat":   { "type": "string", "enum": ["once", "daily", "interval"], "description": "Defaults to 'once'. 'daily' fires at clock `time` each day; 'interval' fires every `interval_minutes` regardless of clock time — use for 'every hour', 'every 5 minutes', etc." }
           },
           "required": ["label", "prompt"]
         }

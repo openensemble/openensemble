@@ -2239,7 +2239,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   let background;
   const enclosingTaskOwner = currentTaskContext();
   const scheduledOwner = getScheduledContext();
-  const silentScheduledOwner = scheduledOwner?.originTaskId && scheduledOwner?.silent === true;
+  const silentScheduledOwner = Boolean(scheduledOwner?.originTaskId);
   const mustAwaitOwnedTask = enclosingTaskOwner != null && !scheduledOwner?.originTaskId;
   if (doHandoff) {
     // A declared forward pipeline is by construction long (produce, then

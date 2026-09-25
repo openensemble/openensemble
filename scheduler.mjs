@@ -1,14 +1,13 @@
 import { projectContext, currentProjectId } from './lib/project-context.mjs';
 /**
  * OpenEnsemble Scheduler
- * Runs tasks at set times, saves results to agent sessions.
+ * Runs tasks at set times, saves results to the task ledger.
  */
 
 import { readFileSync, readdirSync, unlinkSync, mkdirSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { streamChat } from './chat.mjs';
-import { appendToSession, appendSessionReportOnce } from './sessions.mjs';
 import { withLock, atomicWriteSync, resolveRuntimeAgentForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
@@ -19,11 +18,23 @@ import { tryAcquireUserTurnLease } from './chat-dispatch/slot-registry.mjs';
 // Run-history is only meaningful for user-owned tasks — system tasks (owned
 // by the 'system' pseudo-owner) live outside any user's directory and have
 // no per-user drawer to read this back from.
-function recordTaskRun(task, row) {
+async function recordTaskRun(task, row) {
   if (!task?.ownerId || !String(task.ownerId).startsWith('user_')) return;
-  return appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label, projectId: task.projectId || null,
-    agent: task.agent || null, repeat: task.repeat || null, timezone: task.timezone || null, ...row })
-    .catch(e => console.warn('[scheduler] appendTaskRun failed:', e.message));
+  try {
+    await appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label, projectId: task.projectId || null,
+      agent: task.agent || null, repeat: task.repeat || null, timezone: task.timezone || null, ...row });
+  } catch (error) {
+    // The ledger is the only result surface. Stop future fires if it cannot
+    // be written, and retain a fallback on the schedule for repair/review.
+    await updateTask(task.id, {
+      enabled: false,
+      lastError: `Task ledger could not be saved: ${error.message}`,
+      disabledReason: 'Ledger storage failed. Review completed actions before re-enabling this task.',
+      ...(row.output ? { lastOutput: String(row.output).slice(0, 16000) } : {}),
+    }, task.ownerId);
+    if (_broadcast) _broadcast({ type: 'task_ledger_updated', ownerId: task.ownerId, taskId: task.id });
+    throw error;
+  }
 }
 
 async function deviceAlarmLifecycle(method, task, deadlineIso) {
@@ -540,7 +551,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
         const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][day];
         console.log(`[scheduler] Task "${task.label}" skipped — dow="${task.dow}", today is ${dayName}`);
         await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: `Skipped: ${dayName} not in dow=${task.dow}` }, task.ownerId);
-        recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: `Skipped: ${dayName} not in dow=${task.dow}` });
+        await recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: `Skipped: ${dayName} not in dow=${task.dow}` });
         return;
       }
       // Legacy boolean fallback for tasks created before the dow field was added.
@@ -548,13 +559,13 @@ async function runTaskInProject(task, broadcast, opts = {}) {
         if (task.weekdaysOnly && (day === 0 || day === 6)) {
           console.log(`[scheduler] Task "${task.label}" skipped — weekdaysOnly, today is ${day === 0 ? 'Sunday' : 'Saturday'}`);
           await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: weekend (weekdaysOnly)' }, task.ownerId);
-          recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: 'Skipped: weekend (weekdaysOnly)' });
+          await recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: 'Skipped: weekend (weekdaysOnly)' });
           return;
         }
         if (task.weekendsOnly && day >= 1 && day <= 5) {
           console.log(`[scheduler] Task "${task.label}" skipped — weekendsOnly, today is a weekday`);
           await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: weekday (weekendsOnly)' }, task.ownerId);
-          recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: 'Skipped: weekday (weekendsOnly)' });
+          await recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: 'Skipped: weekday (weekendsOnly)' });
           return;
         }
       }
@@ -566,13 +577,19 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     if (!manual && task.ownerId && isUserTimeBlocked(task.ownerId)) {
       console.log(`[scheduler] Task "${task.label}" skipped — owner ${task.ownerId} is in scheduled blocked hours.`);
       log.info('scheduler', 'task skipped (time-blocked)', { taskId: task.id, label: task.label, ownerId: task.ownerId });
-      recordTaskRun(task, { scheduledFor: task.datetime ?? task.time ?? null, status: 'skipped', error: 'Skipped: access restricted at this time' });
+      await recordTaskRun(task, { scheduledFor: task.datetime ?? task.time ?? null, status: 'skipped', error: 'Skipped: access restricted at this time' });
       // One-shot tasks vanish after firing (or being skipped); daily tasks
       // keep their lastRun/lastOutput so the user can see they ran.
       if (task.repeat === 'once') await removeTask(task.id, task.ownerId);
       else await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: access restricted at this time' }, task.ownerId);
       return;
     }
+
+    await recordTaskRun(task, {
+      runId: scheduledRunRootId, status: 'running', firedAt: startedAt,
+      scheduledFor: task.datetime ?? task.time ?? null, manual,
+    });
+    if (broadcast) broadcast({ type: 'task_ledger_updated', ownerId: task.ownerId, taskId: task.id });
 
     if (task.type === 'builtin' || task.type === 'reminder') {
       const handler = _builtins[task.handler];
@@ -600,7 +617,6 @@ async function runTaskInProject(task, broadcast, opts = {}) {
         lastRun: new Date().toISOString(), lastOutput: output, lastError: null,
         ...(!manual && task.consecutiveFailures ? { consecutiveFailures: 0 } : {}),
       }, task.ownerId);
-      if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent ?? 'system' });
       return;
     }
 
@@ -635,26 +651,12 @@ async function runTaskInProject(task, broadcast, opts = {}) {
         enabled: false,
         disabledReason: `agent "${task.agent}" not found`,
       }, task.ownerId);
-      if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent });
       return;
     }
 
     // Scope agent ID to user session, matching the interactive chat path
     const sessionKey = `${userId}_${resolved.id}`;
     const scopedAgent = { ...resolved, id: sessionKey };
-
-    // Write a visible task header into the session before running. Silent
-    // tasks skip this — they leave no chat trail at all; the user sees
-    // confirmation as a "Last run" line in the tasks drawer instead.
-    if (!task.silent) {
-      appendToSession(sessionKey, {
-        role: 'system',
-        content: task.label || task.prompt,
-        scheduled: true,
-        taskId: task.id,
-        ts: Date.now(),
-      });
-    }
 
     // The agent is firing on a schedule with no human present. Without this
     // note, "send me an email" makes the agent ask "what address?" or show a
@@ -692,7 +694,8 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       `Any "in N minutes" / "tomorrow" / "at HH:MM" phrases in the request are the trigger time that has already arrived — do not try to re-schedule. ` +
       `The user's original scheduling message IS the confirmation: execute every action directly and do NOT show drafts, ask "are you sure?", or wait for "send it"/"confirm" — there is no one here to answer. ` +
       `This overrides any "show draft and wait for approval" rule from skill prompts (email, finance, etc) for this run. ` +
-      `Use reasonable defaults for anything unspecified, complete the task, and report in your final message what you did (including a Message ID if a tool returned one).` +
+      `Use reasonable defaults for anything unspecified, complete the task, and report in your final message what you did (including a Message ID if a tool returned one). ` +
+      `Your output is saved in Tasks → Ledger, separate from the user's chat. Do not send a chat notification unless the task explicitly requests one.` +
       userEmailLine + briefingNote;
 
     // Run with shared retry helper. Failure shapes handled there:
@@ -714,10 +717,9 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       originTaskId: task.id,
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
-      // Silent is a per-fire visibility contract, not just a flag for the
-      // main stream. Background children and the barrier reaction inherit it
-      // through scheduledContext so they cannot re-introduce chat output.
-      silent: task.silent === true,
+      // The internal silent flag prevents chat persistence and delivery.
+      // All scheduled work is visible in the ledger, including legacy tasks.
+      silent: true,
       // Per-fire nonce for the child barrier — overlapping fires of the same
       // recurring task must not share a barrier group (see keyFor).
       runId: scheduledRunRootId,
@@ -736,7 +738,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       scopedAgent, userText: task.prompt, systemNote: scheduledNote, userId, streamChat,
       maxAttempts: MAX_ATTEMPTS,
       context: 'scheduler',
-      silent: !!task.silent,
+      silent: true,
       originTaskId: task.id,
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
@@ -752,30 +754,11 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     if (succeeded) log.info('scheduler', 'task main complete', { taskId: task.id, label: task.label, durationMs });
     else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts, errorCode, err: lastError });
 
-    // A schedule the user set up has now given up entirely. Until this, that
-    // was a log line only — the task simply stopped producing output and
-    // nothing said why. Deduped per task so an hourly schedule that keeps
-    // failing reports once per window, not every run.
-    if (!succeeded && userId && userId !== 'default') {
-      import('./lib/user-alerts.mjs')
-        .then(({ alertUserOfFailure }) => alertUserOfFailure(userId, {
-          title: errorCode === 'persistence_failed' ? `Task reply could not be saved: ${task.label}` : `Scheduled task failed: ${task.label}`,
-          detail: errorCode === 'persistence_failed'
-            ? 'OE finished the reply, but could not save its chat history. Actions may already have completed. They were not repeated.'
-            : `It stopped after ${attempts} attempt(s).${lastError ? ` Last error: ${String(lastError).slice(0, 200)}` : ''}`,
-          remedy: task.repeat === 'once' || manual
-            ? 'Review the task history and any completed actions before running it again.'
-            : 'Review the task history. The recurring task will run at its next scheduled time unless it is disabled.',
-          dedupKey: `scheduled-task-failed:${task.id}`,
-          meta: { taskId: task.id, attempts, errorCode },
-        }))
-        .catch(e => log.warn('scheduler', 'failure alert failed', { taskId: task.id, err: e?.message || String(e) }));
-    }
-
     // Hand finalization to the barrier. `onContinue` reacts to background
     // results (no-op when nothing backgrounded); `onFinalize` stamps the task
     // exactly once when the group truly drains. A scheduled task "succeeded"
     // only if the main turn succeeded AND no background child errored.
+    let reactionOutput = '';
     if (useChildBarrier) {
       completeScheduledMain({
         userId,
@@ -783,18 +766,18 @@ async function runTaskInProject(task, broadcast, opts = {}) {
         resultText: assistantContent || '',
         errorMsg: succeeded ? null : (lastError || 'unknown'),
         meta: { manual },
-        onContinue: (aggregate, continuationInfo = {}) => runScheduledReaction({
-          task,
-          scheduledCtx,
-          userId,
-          aggregate,
-          cumulativeAggregate: continuationInfo.cumulativeAggregate || aggregate,
-        }),
+        onContinue: async (aggregate, continuationInfo = {}) => {
+          const result = await runScheduledReaction({
+            task, scheduledCtx, userId, aggregate,
+            cumulativeAggregate: continuationInfo.cumulativeAggregate || aggregate,
+          });
+          if (result) reactionOutput = result;
+        },
         onFinalize: (aggregate, info = {}) => finalizeScheduledTask(task, {
           succeeded: succeeded && !info.timedOut && (info.errorCount || 0) === 0,
-          output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
+          output: [reactionOutput, aggregate?.trim() || assistantContent].filter(Boolean).join('\n\n'),
           lastError: lastError || (info.errorCount ? 'background work failed' : null),
-          manual, sessionKey, broadcast, briefingAcknowledgements, briefingUserId: userId,
+          manual, broadcast, briefingAcknowledgements, briefingUserId: userId,
           runId: scheduledCtx.runId, attempts, errorCode, startedAt,
         }),
       });
@@ -802,7 +785,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       // Barrier bypassed: no reaction turn, finalize directly after the main
       // turn (pre-barrier behavior). Background work, if any, runs detached.
       await finalizeScheduledTask(task, {
-        succeeded, output: assistantContent, lastError, manual, sessionKey, broadcast,
+        succeeded, output: assistantContent, lastError, manual, broadcast,
         briefingAcknowledgements, briefingUserId: userId, runId: scheduledCtx.runId, attempts, errorCode, startedAt,
       });
     }
@@ -818,7 +801,8 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     // needs a resolved agent we may not have here). Best-effort: a stamp failure
     // must not mask the original throw.
     try {
-      recordTaskRun(task, {
+      await recordTaskRun(task, {
+        runId: scheduledRunRootId, firedAt: startedAt, durationMs: Date.now() - startedAt,
         scheduledFor: task.datetime ?? task.time ?? null,
         status: 'error',
         error: errMsg,
@@ -846,6 +830,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     }
   } finally {
     topologyLease?.release();
+    if (broadcast) broadcast({ type: 'task_ledger_updated', ownerId: task.ownerId, taskId: task.id });
   }
 }
 
@@ -856,21 +841,20 @@ async function runTaskInProject(task, broadcast, opts = {}) {
 async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cumulativeAggregate = aggregate }) {
   if (!task?.agent || !aggregate?.trim()) return;
   const { handleChatMessage } = await import('./chat-dispatch.mjs');
-  const { sendToUser } = await import('./ws-handler.mjs');
   const { scheduledContext } = await import('./lib/scheduled-context.mjs');
   const {
     buildScheduledReactionPrompt,
     createScheduledReactionTerminalCapture,
   } = await import('./lib/scheduled-reaction.mjs');
   const prompt = buildScheduledReactionPrompt({ task, aggregate, cumulativeAggregate });
-  const silent = task.silent === true || scheduledCtx?.silent === true;
-  const reactionScheduledCtx = { ...scheduledCtx, silent };
-  // A silent scheduled task still needs the hidden reaction to consume worker
-  // results and drive any dependent steps, but none of its streaming frames
-  // belong on the live chat surface.
-  const terminalCapture = createScheduledReactionTerminalCapture(
-    silent ? () => {} : e => sendToUser(userId, e),
-  );
+  const reactionScheduledCtx = { ...scheduledCtx, silent: true };
+  // Capture the final reaction for the ledger without forwarding chat frames.
+  let output = '';
+  const terminalCapture = createScheduledReactionTerminalCapture(event => {
+    if (event?.type === 'token') output += event.text || '';
+    if (event?.type === 'replace') output = event.text || '';
+    if (event?.type === '__content') output = event.content || '';
+  });
   await scheduledContext.run(reactionScheduledCtx, () => handleChatMessage({
     userId,
     agentId: task.agent,
@@ -883,10 +867,11 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cum
     _hiddenUser: true,
     _isBackgroundContinuation: true,
     _isolatedTaskRun: true,
-    _silent: silent,
+    _silent: true,
     ...scheduledReactionTraceOptions(reactionScheduledCtx),
   }));
   terminalCapture.assertSucceeded();
+  return output.trim();
 }
 
 // Stamp/remove a scheduled task at TRUE completion (main turn + all background
@@ -894,15 +879,10 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cum
 // former inline finalize in runTask so a delegating task can't be double-stamped
 // or have a one-shot removed out from under its own pending background work.
 async function finalizeScheduledTask(task, {
-  succeeded, output, lastError, manual, sessionKey, broadcast,
+  succeeded, output, lastError, manual, broadcast,
   briefingAcknowledgements = [], briefingUserId = task.ownerId, runId = null,
   attempts = null, errorCode = null, startedAt = null,
 }) {
-  const completionUserId = task.ownerId ?? 'default';
-  const completionAgent = resolveRuntimeAgentForUser(completionUserId, task.agent)?.id ?? task.agent;
-  const completionSessionKey = completionAgent
-    ? `${completionUserId}_${completionAgent}`
-    : sessionKey;
   if (succeeded && briefingAcknowledgements.length) {
     try {
       const { acknowledgeBriefingSection } = await import('./lib/personalization/reflect.mjs');
@@ -912,32 +892,6 @@ async function finalizeScheduledTask(task, {
       console.warn('[scheduler] personalization briefing acknowledgement failed:', e.message);
     }
   }
-  // On failure, append a visible error message to the session so the chat shows
-  // what happened instead of an orphan header. Manual test fires skip this (the
-  // "will retry on its next run" copy is wrong for an out-of-band run; the
-  // drawer's lastError covers it). Silent tasks skip it by contract.
-  if (!succeeded && !task.silent && !manual) {
-    try {
-      const failureRow = {
-        role: 'assistant',
-        content: errorCode === 'persistence_failed'
-          ? '⚠️ The task reply finished, but chat history could not be saved. Actions may already have completed; they were not repeated. Review task history before running it again.'
-          : `⚠️ Scheduled task failed. Last error: ${lastError || 'unknown'}.\n\n${task.repeat === 'once' ? 'This one-time task will not run again automatically. Review its history before retrying.' : 'The recurring task will run at its next scheduled time unless it is disabled.'}`,
-        scheduled: true,
-        taskId: task.id,
-        taskFailed: true,
-        ts: Date.now(),
-      };
-      if (runId) await appendSessionReportOnce(completionSessionKey, {
-        ...failureRow,
-        reportId: `scheduled:${runId}:failure`,
-      });
-      else await appendToSession(completionSessionKey, failureRow);
-    } catch (e) {
-      console.warn('[scheduler] Failed to append failure message to session:', e.message);
-    }
-  }
-
   await recordTaskRun(task, {
     ...(runId ? { runId } : {}),
     scheduledFor: task.datetime ?? task.time ?? null,
@@ -971,45 +925,26 @@ async function finalizeScheduledTask(task, {
       if (patch.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         patch.enabled = false;
         patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
-        if (!task.silent) {
-          try {
-            const disabledRow = {
-              role: 'assistant',
-              content: `⛔ Scheduled task "${task.label}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires. Last error: ${lastError || 'unknown'}.\n\nRe-enable it from the tasks drawer once the underlying issue is fixed.`,
-              scheduled: true,
-              taskId: task.id,
-              taskAutoDisabled: true,
-              ts: Date.now(),
-            };
-            if (runId) await appendSessionReportOnce(completionSessionKey, {
-              ...disabledRow,
-              reportId: `scheduled:${runId}:auto-disabled`,
-            });
-            else await appendToSession(completionSessionKey, disabledRow);
-          } catch (e) {
-            console.warn('[scheduler] Failed to append auto-disable message:', e.message);
-          }
-        }
         log.warn('scheduler', 'task auto-disabled', { taskId: task.id, label: task.label, streak: patch.consecutiveFailures, lastError });
       }
     } else {
       patch.lastError = null; // clear stale error on next success
       if (prevStreak) patch.consecutiveFailures = 0;
       // Capture the final reply as lastOutput so the tasks drawer can show what
-      // happened — the only feedback channel for silent runs.
+      // happened, with the full saved result available in the ledger.
       patch.lastOutput = (output || '').trim().slice(0, 280);
     }
     await updateTask(task.id, patch, task.ownerId);
   }
 
-  if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: completionAgent });
+  if (broadcast) broadcast({ type: 'task_ledger_updated', ownerId: task.ownerId, taskId: task.id });
 }
 
 /**
  * Crash recovery for a scheduled run whose producer was journaled but whose
  * in-memory child barrier never durably acknowledged finalization. Replaying
  * the continuation could repeat an external side effect, so recovery fails the
- * occurrence honestly, preserves its producer result in chat, and stamps the
+ * occurrence honestly, preserves its producer result in the ledger, and stamps the
  * schedule exactly once using the run id tombstone.
  */
 export async function recoverInterruptedScheduledBackground({
@@ -1018,7 +953,6 @@ export async function recoverInterruptedScheduledBackground({
   originTaskOwnerId = null,
   originScheduledRunId = null,
   manual = false,
-  silent = null,
   aggregate = '',
 }) {
   const ownerId = originTaskOwnerId || userId;
@@ -1028,16 +962,11 @@ export async function recoverInterruptedScheduledBackground({
     return { ok: true, alreadyFinalized: true };
   }
   const reason = 'Server restarted after background work finished but before the scheduled continuation was durably finalized. The producer was not rerun; its result was preserved for review.';
-  // Visibility belongs to the interrupted fire. A user may have toggled the
-  // recurring task after that fire started; recovery must not retroactively
-  // turn a quiet occurrence into a visible chat failure (or vice versa).
-  const recoveryTask = typeof silent === 'boolean' ? { ...task, silent } : task;
-  await finalizeScheduledTask(recoveryTask, {
+  await finalizeScheduledTask(task, {
     succeeded: false,
     output: aggregate,
     lastError: reason,
     manual: manual === true,
-    sessionKey: task.agent ? `${userId}_${task.agent}` : null,
     broadcast: _broadcast,
     runId: originScheduledRunId || `recovery_${originTaskId}`,
   });
@@ -1190,7 +1119,7 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
         }
         if (isLateOnce) {
           log.warn('scheduler', 'one-shot task armed past its due time — firing immediately', { taskId: task.id, label: task.label, lateByMs });
-          recordTaskRun(current, { scheduledFor: current.datetime ?? null, firedAt, status: 'late', lateByMs });
+          await recordTaskRun(current, { scheduledFor: current.datetime ?? null, firedAt, status: 'late', lateByMs });
         }
         await runTask(current, broadcast, { occurrenceId: occurrenceAt });
       }

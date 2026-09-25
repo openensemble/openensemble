@@ -832,7 +832,7 @@ export async function handle(req, res) {
     }
     try {
       const body = JSON.parse(await readBody(req));
-      const { label, agent, cron, prompt, timezone, enabled, silent, repeat, time, dow, intervalMs, datetime } = body;
+      const { label, agent, cron, prompt, timezone, enabled = true, silent, repeat, time, dow, intervalMs, datetime } = body;
       if (silent != null && typeof silent !== 'boolean') {
         res.writeHead(400); res.end(JSON.stringify({ error: 'silent must be a boolean' })); return true;
       }
@@ -863,7 +863,7 @@ export async function handle(req, res) {
       }
       const task = await addTask({
         label, agent, ...(cron != null ? { cron } : {}), ...fields,
-        prompt, timezone, enabled, silent: silent === true, ownerId: authId,
+        prompt, timezone, enabled, ownerId: authId,
       });
       scheduleNewTask(task);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -990,7 +990,7 @@ export async function handle(req, res) {
 
   // ── POST /api/tasks/:id/run — run a task NOW (manual test fire) ────────────
   // Manual flag: does NOT delete a one-shot or touch the consecutive-failure
-  // counter, so testing a task can't disable or consume it. Streams to chat.
+  // counter, so testing a task can't disable or consume it. Results go to the ledger.
   const taskRunMatch = req.url?.match(/^\/api\/tasks\/([^/?]+)\/run$/);
   if (taskRunMatch && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
@@ -998,9 +998,7 @@ export async function handle(req, res) {
     if (!t) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
     try {
       const { runTaskNow } = await import('../scheduler.mjs');
-      // Fire-and-forget: the run streams into the agent's session over WS like a
-      // scheduled fire. Respond immediately so the UI button doesn't hang on a
-      // long agent turn.
+      // Respond immediately; the ledger tracks progress and completion.
       runTaskNow(t.id, authId).catch(e => console.warn('[tasks] manual run failed:', e?.message || e));
       res.writeHead(202, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, started: true, taskId: t.id }));

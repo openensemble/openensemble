@@ -32,6 +32,7 @@ import {
 import { listRoles } from '../roles.mjs';
 import { resolveValidatedSkillExecutionForTurn } from '../lib/skill-execution.mjs';
 import { voiceContext } from '../lib/voice-context.mjs';
+import { getScheduledContext } from '../lib/scheduled-context.mjs';
 import { iterateInDetachedTurn } from '../lib/turn-trace-iterator.mjs';
 import { composeSkillSpaBlock } from '../lib/skill-prompt-composer.mjs';
 import { learnToolPlanFromTurn } from '../lib/tool-plan-memory.mjs';
@@ -115,6 +116,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 }
 
 async function* streamChatInTurn(agent, userText, signal, emit, userId, attachment, systemNote, silent, voiceCtx, turnOpts) {
+  // Enforce the ledger boundary for every nested scheduled turn, even if an
+  // older caller omits the internal persistence/isolation flags.
+  const scheduledLedgerRun = Boolean(getScheduledContext()?.originTaskId);
+  if (scheduledLedgerRun) {
+    silent = true;
+    turnOpts = { ...turnOpts, isolatedTaskRun: true };
+  }
   const projectId = currentProjectId(userId);
   if (projectId) systemNote = `${systemNote || ''}${buildProjectContext(userId, projectId)}`;
   try { systemNote = `${systemNote || ''}${buildWorkContext(userId, projectId)}`; }
@@ -147,7 +155,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const inheritedLabVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
     && getTurnContext()?.suppressLearning === true;
   const labVerifierTurn = inheritedLabVerifierTurn;
-  const suppressLearning = readOnlyTurn || labVerifierTurn || !!projectId;
+  const suppressLearning = scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId;
   // Foreground verifier turns honor the dispatcher-authenticated 1..4 cap.
   // Detached verifier work gets two bounded extra rounds so a multi-step task
   // can correct one lookup and still produce a final answer.

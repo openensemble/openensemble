@@ -8,8 +8,11 @@ let expandedHistoryId = null;
 const watcherDetails = new Map();
 const nodeHealthDetails = new Map();
 const taskHistoryDetails = new Map();
-let taskArchiveOpen = false;
-let taskArchive = null;
+let taskLedger = null;
+let taskLedgerError = '';
+let taskLedgerFilter = 'all';
+const taskViews = { taskList: 'ledger', settingsTaskList: 'ledger' };
+let taskListRequest = 0;
 const taskSchedulePreviews = new Map();
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -76,32 +79,37 @@ function formatTaskCadenceLabel(t) {
 }
 
 async function loadTaskList() {
-  try {
-    const r = await fetch('/api/tasks');
-    if (r.ok) {
-      const data = await r.json();
-      if (Array.isArray(data)) tasks = data;
-    }
-  } catch { /* Keep the last task list and open drafts during a connection loss. */ }
-  try {
-    const r = await fetch('/api/watchers');
-    watchers = await r.json();
-    if (!watchers || typeof watchers !== 'object') watchers = { active: [], recent: [] };
-    if (!Array.isArray(watchers.active)) watchers.active = [];
-    if (!Array.isArray(watchers.recent)) watchers.recent = [];
-  } catch { watchers = { active: [], recent: [] }; }
-  if (taskArchiveOpen) {
-    try {
-      const response = await fetch('/api/tasks/history');
-      if (response.ok) taskArchive = await response.json();
-    } catch { /* Keep the last archive while offline. */ }
+  const request = ++taskListRequest;
+  const historyId = expandedHistoryId;
+  const urls = ['/api/tasks', '/api/watchers', '/api/tasks/history'];
+  if (historyId) urls.push(`/api/tasks/${encodeURIComponent(historyId)}/runs`);
+  const results = await Promise.allSettled(urls.map(async url => {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Could not refresh (${response.status}).`);
+    return response.json();
+  }));
+  if (request !== taskListRequest) return;
+  const [scheduleResult, monitorResult, ledgerResult, historyResult] = results;
+  if (scheduleResult.status === 'fulfilled' && Array.isArray(scheduleResult.value)) tasks = scheduleResult.value;
+  if (monitorResult.status === 'fulfilled') {
+    watchers = {
+      active: Array.isArray(monitorResult.value?.active) ? monitorResult.value.active : [],
+      recent: Array.isArray(monitorResult.value?.recent) ? monitorResult.value.recent : [],
+    };
+  }
+  if (ledgerResult.status === 'fulfilled' && Array.isArray(ledgerResult.value?.runs)) {
+    taskLedger = ledgerResult.value;
+    taskLedgerError = '';
+  } else taskLedgerError = 'Could not refresh the ledger. Try again when connected.';
+  if (historyId && historyResult?.status === 'fulfilled' && Array.isArray(historyResult.value)) {
+    taskHistoryDetails.set(historyId, { runs: historyResult.value });
   }
   renderTasks(); updateTasksBadge();
 }
 
 // Trailing-debounced wrapper for high-frequency callers. The WS status
 // handler fires once per tool_progress chunk, and each loadTaskList call is
-// two fetches + a full drawer re-render — a request-per-second loop during
+// task, monitor, and ledger fetches + a drawer re-render — a request-per-second loop during
 // any streaming delegation, even with the drawer closed. Structural
 // transitions (a watcher finishing) refresh immediately.
 let _taskListDebounce = null;
@@ -292,7 +300,9 @@ function _friendlyLocalTime(value) {
 function _renderRunRow(run) {
   const when = _friendlyLocalTime(run.firedAt ?? run.ts) || '?';
   let statusText;
-  if (run.status === 'ok') statusText = '✓ ok';
+  if (run.status === 'ok') statusText = '✓ Completed';
+  else if (run.status === 'running') statusText = '◷ Running';
+  else if (run.status === 'interrupted') statusText = '⚠ Interrupted';
   else if (run.status === 'error') statusText = `⚠ error${run.error ? ' — ' + String(run.error).slice(0, 140) : ''}`;
   else if (run.status === 'warning') statusText = `⚠ ${String(run.error || 'Completed with a recording problem').slice(0, 140)}`;
   else if (run.status === 'skipped') statusText = `⊘ ${String(run.error || 'skipped').slice(0, 140)}`;
@@ -300,6 +310,7 @@ function _renderRunRow(run) {
   else statusText = String(run.status || '?');
   const manualTag = run.manual ? ' <span style="opacity:.7">(manual)</span>' : '';
   return `<div class="task-edit-meta">${escHtml(when)} — ${escHtml(statusText)}${manualTag}${run.attempts ? ` · ${escHtml(run.attempts)} attempt(s)` : ''}</div>
+    ${run.error ? `<p class="task-run-error">${escHtml(run.error)}</p>` : ''}
     ${run.output ? `<details class="task-run-output"><summary>View result${run.outputTruncated ? ' (excerpt)' : ''}</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;font:inherit">${escHtml(run.output)}</pre></details>` : ''}`;
 }
 
@@ -323,24 +334,45 @@ async function loadTaskSchedulePreview(id) {
   renderTasks();
 }
 
-async function toggleTaskArchive() {
-  taskArchiveOpen = !taskArchiveOpen;
-  renderTasks();
-  if (!taskArchiveOpen) return;
-  try {
-    const res = await fetch('/api/tasks/history', { cache: 'no-store' });
-    if (!res.ok) throw new Error(`Could not load task history (${res.status}).`);
-    taskArchive = await res.json();
-  } catch (error) { taskArchive = { error: error.message }; }
+function setTaskView(view, tab) {
+  if (!(view in taskViews) || !['ledger', 'schedules', 'monitors'].includes(tab)) return;
+  taskViews[view] = tab;
   renderTasks();
 }
 
-function renderTaskArchive() {
-  const button = `<button class="cdraw-btn" data-action="toggleTaskArchive">${taskArchiveOpen ? 'Hide' : 'View'} completed task history</button>`;
-  if (!taskArchiveOpen) return button;
-  const content = !taskArchive ? 'Loading…' : taskArchive.error ? escHtml(taskArchive.error)
-    : (taskArchive.runs || []).map(run => `<details class="task-run-archive"><summary>${escHtml(run.taskName || run.taskId)}${run.archived ? ' · archived' : ''}</summary>${_renderRunRow(run)}</details>`).join('') || 'No task runs in the last 30 days.';
-  return `${button}<p class="task-edit-meta">Most recent 200 runs from the last 30 days. Results remain here after a one-time task finishes or a schedule is deleted.</p>${content}`;
+function filterTaskLedger(value) {
+  taskLedgerFilter = value;
+  renderTasks();
+}
+
+function renderTaskLedger() {
+  const labels = { running: 'Running', ok: 'Completed', error: 'Failed', warning: 'Needs attention', interrupted: 'Interrupted', skipped: 'Skipped', late: 'Late' };
+  const runs = (taskLedger?.runs || []).filter(run => taskLedgerFilter === 'all'
+    || (taskLedgerFilter === 'attention' ? ['error', 'warning', 'interrupted'].includes(run.status) : run.status === taskLedgerFilter));
+  const controls = `<div class="task-ledger-controls"><label>Show <select aria-label="Filter task ledger" data-change-action="filterTaskLedger" data-change-args='["$value"]'>${[['all', 'All runs'], ['running', 'Running'], ['ok', 'Completed'], ['attention', 'Needs attention']].map(([value, label]) => `<option value="${value}"${taskLedgerFilter === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label><button class="cdraw-btn" data-action="loadTaskList">Refresh</button></div>`;
+  const content = runs.map(run => {
+    const status = labels[run.status] ? run.status : 'warning';
+    const agent = agents.find(a => a.id === run.agent);
+    const runner = agent?.name || run.agent;
+    const key = run.runId || `${run.taskId}:${run.ts}:${run.status}`;
+    const preview = String(run.error || run.output || (status === 'running' ? 'This run is in progress.' : 'No text result.')).replace(/\s+/g, ' ').slice(0, 180);
+    const duration = Number.isFinite(run.durationMs) ? ` · ${Math.max(1, Math.round(run.durationMs / 1000))}s` : '';
+    return `<details class="task-ledger-entry" data-task-run="${escHtml(key)}">
+      <summary><div class="task-ledger-heading"><span class="task-ledger-name">${escHtml(run.taskName || run.taskId)}</span><span class="task-run-status task-run-status-${status}">${labels[status]}</span></div>
+        <div class="task-ledger-meta">${escHtml(_friendlyLocalTime(run.firedAt ?? run.ts) || '?')}${runner ? ' · ' + escHtml(runner) : ''}${run.manual ? ' · Manual' : ''}${duration}${run.archived ? ' · Archived schedule' : ''}</div>
+        <div class="task-ledger-preview">${escHtml(preview)}</div>
+      </summary>
+      <div class="task-ledger-result">${run.error ? `<p class="task-run-error">${escHtml(run.error)}</p>` : ''}
+        ${run.attempts ? `<div class="task-edit-meta">${escHtml(run.attempts)} attempt(s)</div>` : ''}
+        ${run.output ? `${run.outputTruncated ? '<p class="task-edit-meta">Saved excerpt · first 16,000 characters</p>' : ''}<pre>${escHtml(run.output)}</pre>` : `<p class="task-edit-meta">${status === 'running' ? 'The result will appear here when this run finishes.' : 'No text result was recorded.'}</p>`}
+      </div>
+    </details>`;
+  }).join('');
+  const empty = taskLedger ? (taskLedgerFilter === 'all' ? 'No task runs yet. Create a task in Schedules; its results will appear here.' : 'No runs match this filter.') : (taskLedgerError ? 'Ledger unavailable.' : 'Loading ledger…');
+  return `<p class="task-ledger-intro">Task results live here, separate from your chat and its context.</p>${controls}
+    ${taskLedgerError ? `<p class="task-run-error" role="status">${escHtml(taskLedgerError)}${taskLedger ? ' Showing the last loaded results.' : ''}</p>` : ''}
+    ${content || `<p class="task-ledger-empty">${empty}</p>`}
+    <p class="task-ledger-retention">Latest ${taskLedger?.limit || 200} runs · ${taskLedger?.retentionDays || 30} days · Results stay after schedules are removed.</p>`;
 }
 
 function renderTaskHistoryPanel(taskId) {
@@ -360,11 +392,7 @@ function renderTaskRow(t, view = 'taskList') {
   const statusSuffix = (t.repeat === 'once' && !t.enabled && t.lastRun) ? ' · ✓ done' : (t.lastRun ? ' · last run ' + new Date(t.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '');
   const isReminder = t.type === 'reminder';
   const runner = isReminder ? '🔔 Reminder' : (agents.find(a=>a.id===t.agent)?.name ?? t.agent);
-  const silentBadge = t.silent ? '🔕 ' : '';
-  // For silent tasks the tasks drawer is the only feedback channel — surface
-  // last run's reply (lastOutput) or error (lastError) so the user knows the
-  // run actually did something.
-  const silentTail = t.silent && (t.lastOutput || t.lastError)
+  const resultTail = (t.lastOutput || t.lastError)
     ? `<div class="task-item-meta" style="color:${t.lastError ? 'var(--red)' : 'var(--muted)'};font-style:italic;margin-top:2px">${t.lastError ? '⚠ ' + escHtml(t.lastError) : escHtml(t.lastOutput)}</div>`
     : '';
   const isOpen = expandedTaskId === t.id;
@@ -392,9 +420,9 @@ function renderTaskRow(t, view = 'taskList') {
   const header = `
     <div class="task-item${isOpen ? ' task-item-open' : ''}">
       <div class="task-item-info" data-action="toggleTaskExpanded" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' title="Click to view / edit details" style="cursor:pointer">
-        <div class="task-item-label">${expandToggle} ${silentBadge}${escHtml(t.label)}</div>
+        <div class="task-item-label">${expandToggle} ${escHtml(t.label)}</div>
         <div class="task-item-meta">${schedStr} · ${runner}${statusSuffix}</div>
-        ${silentTail}
+        ${resultTail}
         ${nextLine}
         ${failWarn}
         ${historyToggle}
@@ -429,10 +457,7 @@ function renderTaskRow(t, view = 'taskList') {
       <label>Prompt (what to ask the agent at fire time)
         <textarea data-task-field="pr" id="${escHtml(controlId('pr'))}" rows="3">${escHtml(t.prompt||'')}</textarea>
       </label>
-      <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;align-self:flex-start">
-        <input type="checkbox" data-task-field="si" id="${escHtml(controlId('si'))}" ${t.silent ? 'checked' : ''} style="margin:0;padding:0;width:auto;background:transparent;border:none;appearance:auto">
-        Silent — run without showing in chat
-      </label>`;
+      <div class="task-edit-meta">Results are saved in the Ledger tab, outside chat.</div>`;
   const lastOutput = t.lastOutput ? `<div class="task-edit-meta">Last run: ${escHtml(String(t.lastOutput).slice(0, 200))}</div>` : '';
   const editor = `
     <div class="task-edit-panel" data-task-editor="${escHtml(t.id)}">
@@ -456,7 +481,11 @@ function replaceTaskList(list, html) {
   const selection = focused && typeof focused.selectionStart === 'number'
     ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
   const scrollTop = list.scrollTop;
+  const openRuns = new Set([...list.querySelectorAll('details[data-task-run][open]')].map(el => el.dataset.taskRun));
   list.innerHTML = html;
+  for (const el of list.querySelectorAll('details[data-task-run]')) {
+    if (openRuns.has(el.dataset.taskRun)) el.open = true;
+  }
   const replacement = list.querySelector('[data-task-editor]');
   if (editor && replacement?.dataset.taskEditor === editor.dataset.taskEditor) {
     replacement.replaceWith(editor);
@@ -518,13 +547,17 @@ function renderTasks() {
       }).join('')
     : '';
 
-  const html = view =>
-    sectionHeader('⏰ Scheduled tasks') + tasksHtml(view) + renderTaskArchive() +
-    sectionHeader('📡 Active monitors') + watchersHtml +
-    (recentHtml ? sectionHeader('Recent') + recentHtml : '');
+  const html = view => `<nav class="task-tabs" aria-label="Task views">${[['ledger', 'Ledger'], ['schedules', 'Schedules'], ['monitors', 'Monitors']].map(([tab, label]) => `<button class="task-tab${taskViews[view] === tab ? ' active' : ''}" aria-pressed="${taskViews[view] === tab}" data-action="setTaskView" data-args='${JSON.stringify([view, tab])}'>${label}</button>`).join('')}</nav>
+    <section class="task-view" ${taskViews[view] === 'ledger' ? '' : 'hidden'}>${renderTaskLedger()}</section>
+    <section class="task-view" ${taskViews[view] === 'schedules' ? '' : 'hidden'}>${sectionHeader('Scheduled tasks')}${tasksHtml(view)}</section>
+    <section class="task-view" ${taskViews[view] === 'monitors' ? '' : 'hidden'}>${sectionHeader('Active monitors')}${watchersHtml}${recentHtml ? sectionHeader('Recent') + recentHtml : ''}</section>`;
 
   replaceTaskList($('taskList'), html('taskList'));
   replaceTaskList($('settingsTaskList'), html('settingsTaskList'));
+  for (const view of Object.keys(taskViews)) {
+    const form = $(view)?.parentElement?.querySelector('.task-form');
+    if (form) form.hidden = taskViews[view] !== 'schedules';
+  }
 }
 
 function toggleTaskExpanded(id) {
@@ -598,8 +631,6 @@ async function saveTaskEdits(id, source) {
     if (ag && ag.value && ag.value !== t.agent) patch.agent = ag.value;
     const pr = field('pr');
     if (pr && pr.value !== (t.prompt||'')) patch.prompt = pr.value;
-    const si = field('si');
-    if (si && !!si.checked !== !!t.silent) patch.silent = !!si.checked;
   }
   if (!Object.keys(patch).length) { expandedTaskId = null; renderTasks(); return; }
   try {
@@ -663,7 +694,7 @@ async function deleteTask(id) {
 
 // Run a task once, right now, to test it. The server fires it out of band
 // (doesn't disturb the schedule, delete a one-shot, or count failures). The
-// run streams into the agent's chat session like a scheduled fire.
+// result appears in the ledger like a scheduled fire.
 async function runTaskNow(id, source) {
   const btn = source?.matches?.('.btn-task-run') ? source
     : document.querySelector(`.btn-task-run[data-args*='"${id}"']`);
@@ -672,7 +703,7 @@ async function runTaskNow(id, source) {
   try {
     const r = await fetch(`/api/tasks/${id}/run`, { method: 'POST' });
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
-    if (btn) btn.textContent = '✓ Started — check chat';
+    if (btn) btn.textContent = '✓ Started — see Ledger';
     // Give the run a moment, then refresh so the "Last run" line updates.
     setTimeout(async () => {
       await loadTaskList();

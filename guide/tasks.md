@@ -40,28 +40,17 @@ Scheduled tasks always use the agent's **current** model — there's no model sn
 
 If a scheduled run fails before calling an action tool, OE can make up to three attempts with a 30-second gap. Permanent errors stop sooner. Once an action tool has run, OE does not repeat the whole task automatically, because the action may already have completed. Failure details show the actual attempt count. Recurring tasks can try again at their next scheduled time; one-time tasks finish their single occurrence.
 
-If the agent finishes but its chat reply cannot be saved, OE reports **Task reply could not be saved** and preserves the available output in task history. This is a recording problem: actions may already have completed. Check the result before running the task again.
+## Task ledger
 
-## Results and upcoming runs
+Open **Sidebar → Tasks → Ledger** (or **Settings → Tasks → Ledger**) to review task runs. The ledger is the default view, with newest entries first. Each entry shows the task name, time, status, runner, and saved result or error. Running tasks stay visible until all their background work finishes. An interrupted entry means OE restarted before completion was recorded; review any completed actions before running it again.
 
-Open a task's **History** in **Tasks** to see its previous runs and the next five scheduled times, displayed in that task's timezone. The preview follows its interval, weekday filters, and daylight-saving changes. **Run now** is a separate manual run and does not move the recurring schedule. Previews assume OE is running and your account's access schedule permits execution.
+All scheduled agent tasks, including **Run now** and existing tasks previously marked silent or visible, use the ledger. Their prompts, replies, progress cards, and failures stay out of chat history and future chat context. Background workers and restart recovery follow the same rule. There is no longer a chat/silent switch. Opening a ledger result does not send it to an agent.
 
-Choose **View completed task history** to review the most recent 200 runs from the past 30 days. Results remain available after a one-time task finishes or a schedule is deleted. Expand a run, then **View result**, for its saved output. Long outputs are labeled as excerpts; the archive stores up to 16,000 characters per result and 5,000 run records per profile.
+Use **Schedules** to edit, enable, disable, delete, or run a task. Expand a schedule and choose **History** for past results and an **Upcoming runs** preview. Preview times use the task's timezone (or the server timezone when unset); actual firing also depends on whether OE is running and the account's access schedule permits execution.
 
-## Silent runs
+The ledger shows the most recent 200 runs from the past 30 days, and keeps results after a one-time task finishes or a schedule is deleted. Long outputs are labeled as excerpts; storage retains up to 16,000 characters per result and 5,000 run records per profile. Existing chat messages from older runs are preserved.
 
-By default a scheduled fire writes three things to the agent's chat: a 📋 task header, the prompt itself as a user bubble, and the agent's reply. That's useful while you're tuning a new task. Once a task is running cleanly and delivers via side effects (Telegram, email, a doc that lands in **Documents**), the chat echo is just clutter.
-
-Mark any agent task **silent** to suppress the entire run from chat — header, prompt, and reply all skipped. The task still fires, the agent still calls its tools, the email still gets sent. Confirmation comes from the tasks drawer instead: the row gets a 🔕 badge, an updated `last run` timestamp, and a one-line italic summary of what the agent reported (or the error if it failed).
-
-Two ways to turn it on:
-
-- **In chat** — drop an adverb into the request: *"silently send my news briefing at 10am"*, *"every morning at 7 quietly run my inbox sweep"*, *"at 5pm post the weekly metrics — don't show this in chat"*. The interceptor recognises *silently / quietly / in the background / without putting it in chat / don't show in chat* and creates the task with silent already on.
-- **In the editor** — open Settings → Tasks (or the sidebar drawer), expand a task, and tick **Silent — run without showing in chat**. Same effect for tasks created loud that you've decided are noisy.
-
-Silent failures don't escape into chat either — the **⚠️ Scheduled task failed** message is suppressed and the failure shows as a red line under the task row in the drawer. The task still retries on its next normal fire.
-
-This is for **scheduled agent tasks** specifically. Reminder-type tasks (the chime + banner kind) ignore the flag — silencing a reminder just means turning it off. Watch tasks ignore it too.
+Reminder tasks still deliver their configured chime, banner, email, Telegram, or voice notification. A task that explicitly asks for an email, document, or notification still performs that action. Condition-triggered watches retain their configured delivery and are managed in **Monitors**.
 
 ## Watch tasks — fire on a condition, not a clock
 

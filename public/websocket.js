@@ -1431,6 +1431,7 @@ function handleServerMessage(msg) {
     case 'task_complete':
       handleTaskComplete(msg); break;
     case 'task_created':
+    case 'task_ledger_updated':
       if (typeof loadTaskList === 'function') loadTaskList();
       break;
     case 'doc_changed':

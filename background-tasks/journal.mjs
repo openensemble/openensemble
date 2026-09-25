@@ -131,7 +131,7 @@ export function _journalAdd(taskId) {
     originScheduledTaskAgent: rec.originScheduledTaskAgent || null,
     originScheduledRunId: rec.originScheduledRunId || null,
     originScheduledManual: rec.originScheduledManual === true,
-    originScheduledSilent: rec.originScheduledSilent === true,
+    originScheduledSilent: Boolean(rec.originScheduledTaskId) || rec.originScheduledSilent === true,
     // Nonsecret restart guard only. The verifier lease capability itself is
     // memory-only and is intentionally absent from this explicit serializer.
     verifierLeaseRequired: rec.verifierLeaseRequired === true,

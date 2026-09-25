@@ -180,7 +180,7 @@ export function spawnWorker({
   // is needed. Falls back to null for an interactive (non-scheduled) worker,
   // which must NOT link to any barrier group.
   const scheduledCtx = getScheduledContext();
-  const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
+  const silentScheduled = Boolean(scheduledCtx?.originTaskId);
   // A worker is the completion owner for its own bounded team. Keep its task
   // graph rooted at the worker id so two coordinators spawned from one chat
   // turn can never share children, claims, status, or cancellation. Preserve
@@ -192,7 +192,7 @@ export function spawnWorker({
   );
   const rootTaskId = taskId;
   const parentTurnCtx = getTurnContext() || {};
-  const suppressLearning = parentTurnCtx.suppressLearning === true;
+  const suppressLearning = silentScheduled || parentTurnCtx.suppressLearning === true;
   // Missing capability never downgrades a verifier-started worker to an
   // ordinary completion: the required bit remains true and completion fails
   // closed to the deterministic zero-model notice.
