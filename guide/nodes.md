@@ -83,6 +83,10 @@ For a server install (OE running on a Pi or NAS away from your daily-driver mach
 
 `node_exec` is the right tool for one-off shell commands. For ongoing management of a *service* running on a node — Pi-hole, Home Assistant, nginx, MariaDB, etc. — use **service profiles**. They give you researched runbooks, automatic rollback, health monitoring, and incident tracking on top of the raw exec layer. See the **Service profiles** page.
 
+Commands that take longer than 10 seconds move to a background task. Updated node agents (v2.1.0+) track the process locally and send running status every five seconds, including when a command has no output. OE keeps the task running until the node reports its output and exit status. A brief connection loss resumes tracking the same job; the node retains completed results for up to ten minutes, subject to a bounded result cache, until OE acknowledges them. These updates show elapsed time and output activity, not an invented completion percentage.
+
+Omit `timeout` to let a tracked command run until it exits. An explicit value from 1 to 86400 seconds sets a hard execution deadline; `0` explicitly requests no deadline. Older agents use a 24-hour fallback when the timeout is omitted and should be updated for progress tracking. If job status is unavailable for 90 seconds, OE reports an unknown outcome without automatically restarting the work. Tracking survives a temporary node connection loss, but an OE server or node-agent process restart can still interrupt monitoring.
+
 ## Checking node + service health
 
 Each row in the Nodes drawer shows two things:

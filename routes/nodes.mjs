@@ -39,6 +39,7 @@ import { handlePairingRoutes } from './nodes/pairing.mjs';
 import { initNodeWss, getNodeWss } from './nodes/websocket.mjs';
 import { initTerminalWss, getTerminalWss, handleTerminalPage, handleTerminalTicket } from './nodes/terminal.mjs';
 import nodesSkill from '../skills/nodes/execute.mjs';
+import { parseNodeExecTimeout } from '../skills/nodes/command-timeout.mjs';
 
 export { initNodeWss, getNodeWss, initTerminalWss, getTerminalWss };
 
@@ -687,7 +688,7 @@ export async function handle(req, res) {
       const result = await sendCommand(nodeId, userId, {
         type: 'exec',
         command: body.command,
-        timeout: Math.min(body.timeout || 60, 300),
+        timeout: parseNodeExecTimeout(body.timeout, node),
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -733,7 +734,7 @@ export async function handle(req, res) {
       const result = await sendCommandStreaming(nodeId, userId, {
         type: 'exec',
         command: body.command,
-        timeout: Math.min(body.timeout || 60, 300),
+        timeout: parseNodeExecTimeout(body.timeout, node),
       }, (stream, data) => {
         // Send each chunk as an SSE event
         res.write(`data: ${JSON.stringify({ stream, data })}\n\n`);

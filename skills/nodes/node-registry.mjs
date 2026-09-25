@@ -10,6 +10,7 @@ import { BASE_DIR } from '../../lib/paths.mjs';
 import { signManifestString, supportsSecureUpdates, getUpdatePublicKeyPem } from '../../lib/node-update-signing.mjs';
 import { resolveWriteTargetSync } from '../../lib/write-target.mjs';
 import { turnTraceContext } from '../../lib/turn-trace-context.mjs';
+import { MAX_NODE_EXEC_TIMEOUT_SECONDS, NODE_EXEC_RESULT_GRACE_SECONDS, NODE_EXEC_STATUS_TIMEOUT_MS, supportsNodeExecTracking } from './command-timeout.mjs';
 
 // ── State ────────────────────────────────────────────────────────────────────
 // Connected AND disconnected nodes both live in `nodes`. Disconnected entries
@@ -396,7 +397,7 @@ export function registerNode(ws, userId, info) {
   // beat our unregister), force-close it before accepting the new socket.
   if (oldEntry?.ws && oldEntry.ws !== ws) {
     try { oldEntry.ws.close(4000, 'Replaced by new connection'); } catch {}
-    rejectPendingForNode(nodeId, userId);
+    rejectPendingForNode(nodeId, userId, { allowResume: true });
   }
 
   const now = Date.now();
@@ -441,6 +442,20 @@ export function registerNode(ws, userId, info) {
 
   nodes.set(registryKey, entry);
   persistNodes();
+
+  const resumeIds = [];
+  for (const [cmdId, cmd] of pendingCommands) {
+    if (!cmd.tracked || cmd.nodeId !== nodeId || cmd.userId !== userId) continue;
+    if (supportsNodeExecTracking(entry)) resumeIds.push(cmdId);
+    else {
+      clearTimeout(cmd.timer);
+      pendingCommands.delete(cmdId);
+      cmd.reject(unknownCommandOutcome('The reconnected agent cannot resume job tracking.'));
+    }
+  }
+  if (resumeIds.length) {
+    try { ws.send(JSON.stringify({ type: 'exec_resume', cmdIds: resumeIds })); } catch { /* liveness deadline remains armed */ }
+  }
 
   console.log(`[nodes] ${isReconnect ? 'Reconnected' : 'Registered'}: ${nodeId} (${info.hostname}) for user ${userId}`);
 
@@ -540,7 +555,7 @@ export function unregisterNode(nodeId, userId = null, sourceWs = null) {
   persistNodes();
 
   // Clean up pending commands
-  rejectPendingForNode(nodeId, entry.userId);
+  rejectPendingForNode(nodeId, entry.userId, { allowResume: true });
 
   // Tear down any live terminal (PTY) sessions bound to this node so the
   // browser xterm gets a real error/close instead of sitting "Connected" but
@@ -593,9 +608,23 @@ function looksLikeInteractivePrompt(text) {
   return null;
 }
 
-function rejectPendingForNode(nodeId, userId) {
+function unknownCommandOutcome(message) {
+  const error = new Error(`${message} Command status unknown; the remote job may still be running. Do not restart it automatically.`);
+  error.code = 'NODE_EXEC_STATUS_UNKNOWN';
+  return error;
+}
+
+function rejectPendingForNode(nodeId, userId, { allowResume = false } = {}) {
   for (const [cmdId, cmd] of pendingCommands) {
     if (cmd.nodeId === nodeId && cmd.userId === userId) {
+      if (allowResume && cmd.tracked) {
+        if (!cmd.disconnected) {
+          cmd.disconnected = true;
+          cmd.timer.refresh();
+          cmd.onChunk?.('status', 'Node connection lost; command status unknown. Waiting for the node to reconnect and resume reporting.\n');
+        }
+        continue;
+      }
       clearTimeout(cmd.timer);
       cmd.reject(new Error('Node disconnected'));
       pendingCommands.delete(cmdId);
@@ -848,12 +877,34 @@ function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
     }
 
     const cmdId = genCmdId();
-    const timeout = Math.min(payload.timeout || 60, 300);
+    const isExec = payload.type === 'exec';
+    const tracked = isExec && supportsNodeExecTracking(entry);
+    // Internal health/status callers retain their short default. node_exec
+    // supplies its own job deadline; send the same limit to the remote node.
+    const requestedTimeout = payload.timeout ?? 60;
+    if (!Number.isInteger(requestedTimeout) || requestedTimeout < (tracked ? 0 : 1)) {
+      return reject(new Error('Command timeout must be an integer in seconds; zero requires a node with job tracking'));
+    }
+    const timeout = Math.min(requestedTimeout, isExec ? MAX_NODE_EXEC_TIMEOUT_SECONDS : 300);
+    const resultWaitSeconds = timeout + (isExec ? NODE_EXEC_RESULT_GRACE_SECONDS : 0);
 
     const timer = setTimeout(() => {
       pendingCommands.delete(cmdId);
-      reject(new Error(`Command timed out after ${timeout}s`));
-    }, timeout * 1000);
+      if (tracked) {
+        const partial = pending.chunks.join('').slice(-2000).trim();
+        reject(unknownCommandOutcome(`No job status received from the node for ${NODE_EXEC_STATUS_TIMEOUT_MS / 1000}s.${partial ? `\nLast output:\n${partial}\n` : ''}`));
+        return;
+      }
+      if (!isExec) {
+        reject(new Error(`Command timed out after ${timeout}s`));
+        return;
+      }
+      const partial = pending.chunks.join('').slice(-2000).trim();
+      reject(unknownCommandOutcome(
+        `No final command result received after the ${timeout}s execution limit and ${NODE_EXEC_RESULT_GRACE_SECONDS}s reporting grace. `
+        + (partial ? `\nLast output:\n${partial}` : '')
+      ));
+    }, tracked ? NODE_EXEC_STATUS_TIMEOUT_MS : resultWaitSeconds * 1000);
 
     // Track pending under the canonical nodeId (entry.nodeId), not the
     // caller's possibly-hostname input. Otherwise rejectPendingForNode
@@ -863,6 +914,7 @@ function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
       resolve,
       reject,
       timer,
+      tracked,
       nodeId: entry.nodeId,
       userId: entry.userId,
       chunks: [],
@@ -871,7 +923,7 @@ function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
     pendingCommands.set(cmdId, pending);
 
     try {
-      entry.ws.send(JSON.stringify({ ...payload, cmdId }));
+      entry.ws.send(JSON.stringify({ ...payload, timeout, cmdId, ...(isExec ? { track: tracked } : {}) }));
     } catch (e) {
       clearTimeout(timer);
       pendingCommands.delete(cmdId);
@@ -897,6 +949,33 @@ export function handleNodeMessage(nodeId, msg, userId = null, sourceWs = null) {
   const ownerId = entry.userId;
 
   switch (msg.type) {
+    case 'cmd_progress': {
+      const cmd = pendingCommands.get(msg.cmdId);
+      if (!cmd?.tracked || cmd.nodeId !== nodeId || cmd.userId !== ownerId) return;
+      if (msg.state === 'unknown') {
+        clearTimeout(cmd.timer);
+        pendingCommands.delete(msg.cmdId);
+        cmd.reject(unknownCommandOutcome('The node no longer has a record of this job (its agent may have restarted).'));
+        return;
+      }
+      if (msg.state !== 'running' || !Number.isFinite(msg.elapsedMs) || msg.elapsedMs < 0) return;
+      cmd.timer.refresh();
+      cmd.disconnected = false;
+      // Quiet commands still supply liveness. Only emit a user-facing status
+      // every 15s; never add these status messages to the command's stdout.
+      const now = Date.now();
+      if (cmd.lastProgressAt == null || now - cmd.lastProgressAt >= 15_000) {
+        cmd.lastProgressAt = now;
+        const seconds = Math.floor(msg.elapsedMs / 1000);
+        const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+        const output = Number.isFinite(msg.outputBytes) && msg.outputBytes > 0
+          ? `${msg.outputBytes} bytes of output received by the node`
+          : 'no command output yet';
+        cmd.onChunk?.('status', `Node reports command still running (${elapsed}; ${output}).\n`);
+      }
+      break;
+    }
+
     case 'cmd_result': {
       const cmd = pendingCommands.get(msg.cmdId);
       // Ownership check: a paired node must only resolve its OWN pending
@@ -905,6 +984,9 @@ export function handleNodeMessage(nodeId, msg, userId = null, sourceWs = null) {
       if (!cmd || cmd.nodeId !== nodeId || cmd.userId !== ownerId) return;
       clearTimeout(cmd.timer);
       pendingCommands.delete(msg.cmdId);
+      if (cmd.tracked) {
+        try { entry.ws.send(JSON.stringify({ type: 'cmd_result_ack', cmdId: msg.cmdId })); } catch { /* node retains result until expiry */ }
+      }
       cmd.resolve({
         stdout: msg.stdout ?? '',
         stderr: msg.stderr ?? '',
@@ -918,6 +1000,7 @@ export function handleNodeMessage(nodeId, msg, userId = null, sourceWs = null) {
       const cmd = pendingCommands.get(msg.cmdId);
       // Ownership check (see cmd_result) — reject forged streams from other nodes.
       if (!cmd || cmd.nodeId !== nodeId || cmd.userId !== ownerId) return;
+      if (cmd.tracked) cmd.timer.refresh();
       // Bound the accumulated chunk buffer so a noisy command (journalctl -f,
       // cat /dev/urandom) can't grow server memory without limit.
       cmd._chunkBytes = (cmd._chunkBytes || 0) + (msg.data?.length || 0);
@@ -935,8 +1018,8 @@ export function handleNodeMessage(nodeId, msg, userId = null, sourceWs = null) {
       // a closed stdin — they just sit there waiting for nothing.
       // Heuristic: prompt-shaped ending (no trailing newline, ends with a
       // known phrase) → reject immediately so the agent gets a real error.
-      // The remote process is still alive and will timeout naturally; we
-      // just don't make the user wait for it.
+      // Tracked jobs can have no execution deadline, so cancel those rather
+      // than leaving an interactive process orphaned on the node.
       if (!cmd._promptDetected) {
         cmd._streamBuf = ((cmd._streamBuf || '') + msg.data).slice(-2048);
         const prompt = looksLikeInteractivePrompt(cmd._streamBuf);
@@ -944,6 +1027,9 @@ export function handleNodeMessage(nodeId, msg, userId = null, sourceWs = null) {
           cmd._promptDetected = true;
           clearTimeout(cmd.timer);
           pendingCommands.delete(msg.cmdId);
+          if (cmd.tracked) {
+            try { entry.ws.send(JSON.stringify({ type: 'exec_cancel', cmdId: msg.cmdId })); } catch {}
+          }
           cmd.reject(new Error(
             `Command is waiting for interactive input ("${prompt.trim()}"). ` +
             `node_exec has no terminal so this would hang until timeout. ` +

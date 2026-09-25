@@ -55,7 +55,7 @@ const __dirname = path.dirname(__filename);
 // at install/pair time and refuses any update whose signed manifest doesn't
 // verify (see handleUpdateMessage). Must match SECURE_MIN_VERSION in
 // lib/node-update-signing.mjs — the server gates auto-updates on version >= it.
-const AGENT_VERSION = '2.0.3';
+const AGENT_VERSION = '2.1.0';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const CONFIG_DIR = process.platform === 'win32'
@@ -766,6 +766,10 @@ function gatherFullStatus() {
 
 // ── Command Execution ────────────────────────────────────────────────────────
 const _activeProcs = new Map(); // cmdId → child process
+const _commandJobs = new Map(); // tracked jobs, retained until result acknowledgement
+const EXEC_PROGRESS_INTERVAL_MS = 5000;
+const EXEC_RESULT_RETENTION_MS = 10 * 60_000;
+const EXEC_RETAINED_RESULTS_MAX = 10;
 const EXEC_OUTPUT_CAP = 10 * 1024 * 1024;
 // Max bytes streamed live over the WS per command (see streamChunk). Smaller
 // than EXEC_OUTPUT_CAP: the live feed is a preview, the full (capped) buffers
@@ -792,26 +796,101 @@ function terminateProcessTree(proc) {
   try { proc.kill('SIGTERM'); } catch {}
 }
 
-function executeCommand(cmdId, command, timeout, ws) {
+function sendJobMessage(job, message) {
+  if (job.ws?.readyState !== WebSocket.OPEN) return;
+  try { job.ws.send(JSON.stringify(message)); } catch { /* replay after reconnect */ }
+}
+
+function reportCommandJob(job) {
+  sendJobMessage(job, job.result || {
+    type: 'cmd_progress', cmdId: job.cmdId, state: 'running',
+    elapsedMs: Date.now() - job.startedAt,
+    outputBytes: job.outputBytes,
+  });
+}
+
+function acknowledgeCommandResult(cmdId) {
+  const job = _commandJobs.get(cmdId);
+  if (!job?.result) return;
+  clearTimeout(job.retentionTimer);
+  _commandJobs.delete(cmdId);
+}
+
+function resumeCommandReports(ws, cmdIds) {
+  for (const cmdId of Array.isArray(cmdIds) ? cmdIds.slice(0, 100) : []) {
+    const job = _commandJobs.get(cmdId);
+    if (job) {
+      job.ws = ws;
+      reportCommandJob(job);
+    } else {
+      sendJobMessage({ ws }, { type: 'cmd_progress', cmdId, state: 'unknown' });
+    }
+  }
+}
+
+function executeCommand(cmdId, command, timeout, ws, tracked = false) {
+  // Retrying the same job id attaches to its existing status/result; it must
+  // never start a second copy of a command after a connection interruption.
+  if (_commandJobs.has(cmdId)) {
+    resumeCommandReports(ws, [cmdId]);
+    return;
+  }
   const isWindows = process.platform === 'win32';
   const startTime = Date.now();
-
-  const proc = isWindows
-    ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], {
-        timeout: timeout * 1000,
-        maxBuffer: 10 * 1024 * 1024,
-        windowsHide: true,
-      })
-    : spawn('bash', ['-c', command], {
-        timeout: timeout * 1000,
-        maxBuffer: 10 * 1024 * 1024,
-        detached: true,
-      });
-
-  _activeProcs.set(cmdId, proc);
-
+  const job = { cmdId, ws, startedAt: startTime, outputBytes: 0, result: null };
+  if (tracked) _commandJobs.set(cmdId, job);
   let stdout = '', stderr = '';
   let finished = false;
+  let deadlineTimer = null, hardKillTimer = null, progressTimer = null;
+  let timedOut = false;
+  const finish = (exitCode, errorText = '') => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(deadlineTimer);
+    clearTimeout(hardKillTimer);
+    clearInterval(progressTimer);
+    _activeProcs.delete(cmdId);
+    job.result = {
+      type: 'cmd_result', cmdId, stdout,
+      stderr: [stderr, errorText, timedOut ? `Process stopped: exceeded ${timeout}s execution limit` : '', job.cancelled ? 'Command cancelled by server' : ''].filter(Boolean).join('\n'),
+      exitCode: timedOut ? 124 : job.cancelled ? 130 : (exitCode ?? 1),
+      duration: Date.now() - startTime,
+    };
+    if (tracked) {
+      // Bound completed-output memory even if OE never reconnects or acks.
+      job.retentionTimer = setTimeout(() => acknowledgeCommandResult(cmdId), EXEC_RESULT_RETENTION_MS);
+      job.retentionTimer.unref?.();
+      const completed = [..._commandJobs.values()].filter(item => item.result);
+      while (completed.length > EXEC_RETAINED_RESULTS_MAX) acknowledgeCommandResult(completed.shift().cmdId);
+    }
+    reportCommandJob(job);
+  };
+
+  let proc;
+  try {
+    proc = isWindows
+      ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], {
+          maxBuffer: 10 * 1024 * 1024,
+          windowsHide: true,
+        })
+      : spawn('bash', ['-c', command], {
+          maxBuffer: 10 * 1024 * 1024,
+          detached: true,
+        });
+  } catch (error) {
+    finish(1, error.message);
+    return;
+  }
+
+  _activeProcs.set(cmdId, proc);
+  // Commands are non-interactive. Close stdin rather than leaving a process
+  // waiting indefinitely for input that this protocol cannot supply.
+  proc.stdin.end();
+  if (tracked) {
+    reportCommandJob(job);
+    progressTimer = setInterval(() => reportCommandJob(job), EXEC_PROGRESS_INTERVAL_MS);
+    progressTimer.unref?.();
+  }
 
   // Cap the bytes we *stream live* over the WS. spawn's maxBuffer doesn't apply
   // to our own 'data' handlers, so without this a noisy command (journalctl -f,
@@ -820,18 +899,19 @@ function executeCommand(cmdId, command, timeout, ws) {
   let streamedBytes = 0;
   let streamCapped = false;
   const streamChunk = (stream, data) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    job.outputBytes += Buffer.byteLength(data);
+    if (job.ws?.readyState !== WebSocket.OPEN) return;
     if (streamCapped) return;
     streamedBytes += data.length;
     if (streamedBytes > EXEC_STREAM_CAP) {
       streamCapped = true;
-      ws.send(JSON.stringify({
+      sendJobMessage(job, {
         type: 'cmd_stream', cmdId, stream: 'stderr',
         data: `\n[live output truncated after ${EXEC_STREAM_CAP} bytes — full result delivered on completion]\n`,
-      }));
+      });
       return;
     }
-    ws.send(JSON.stringify({ type: 'cmd_stream', cmdId, stream, data }));
+    sendJobMessage(job, { type: 'cmd_stream', cmdId, stream, data });
   };
 
   // Stream partial output
@@ -847,57 +927,18 @@ function executeCommand(cmdId, command, timeout, ws) {
     streamChunk('stderr', data);
   });
 
-  // Hard kill if process doesn't exit after timeout + grace period
-  const hardKillTimer = setTimeout(() => {
-    if (!finished) {
+  // An explicit execution deadline is independent of liveness reporting.
+  // With timeout 0, periodic status keeps OE attached for as long as needed.
+  if (timeout > 0) {
+    deadlineTimer = setTimeout(() => {
+      timedOut = true;
       terminateProcessTree(proc);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'cmd_result', cmdId,
-          stdout,
-          stderr: `Process killed: exceeded ${timeout}s timeout`,
-          exitCode: 137,
-          duration: Date.now() - startTime,
-        }));
-      }
-      _activeProcs.delete(cmdId);
-      finished = true;
-    }
-  }, (timeout + 5) * 1000);
+      hardKillTimer = setTimeout(() => finish(124), 5000);
+    }, timeout * 1000);
+  }
 
-  proc.on('close', (exitCode) => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(hardKillTimer);
-    _activeProcs.delete(cmdId);
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'cmd_result', cmdId,
-        stdout,
-        stderr,
-        exitCode: exitCode ?? 1,
-        duration: Date.now() - startTime,
-      }));
-    }
-  });
-
-  proc.on('error', (err) => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(hardKillTimer);
-    _activeProcs.delete(cmdId);
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'cmd_result', cmdId,
-        stdout,
-        stderr: err.message,
-        exitCode: 1,
-        duration: Date.now() - startTime,
-      }));
-    }
-  });
+  proc.on('close', exitCode => finish(exitCode));
+  proc.on('error', err => finish(1, err.message));
 }
 
 // ── PTY Sessions ────────────────────────────────────────────────────────────
@@ -1028,7 +1069,7 @@ function runAgent(config) {
         shell: info.shell,
         packageManager: info.packageManager,
         nodeId: config.nodeId || info.hostname,
-        capabilities: config.capabilities || [],
+        capabilities: [...new Set([...(config.capabilities || []), 'exec-progress-v1'])],
         accessLevel: config.accessLevel || 'unknown',
         accessLocked: !!config.accessLocked,
         version: AGENT_VERSION,
@@ -1099,8 +1140,25 @@ function runAgent(config) {
 
         case 'exec':
           log(`Exec [${msg.cmdId}]: ${msg.command.slice(0, 100)}${msg.command.length > 100 ? '...' : ''}`);
-          executeCommand(msg.cmdId, msg.command, msg.timeout || 60, ws);
+          executeCommand(msg.cmdId, msg.command, msg.track ? (msg.timeout ?? 0) : (msg.timeout || 60), ws, msg.track === true);
           break;
+
+        case 'exec_resume':
+          resumeCommandReports(ws, msg.cmdIds);
+          break;
+
+        case 'cmd_result_ack':
+          acknowledgeCommandResult(msg.cmdId);
+          break;
+
+        case 'exec_cancel': {
+          const job = _commandJobs.get(msg.cmdId);
+          if (job && !job.result) {
+            job.cancelled = true;
+            terminateProcessTree(_activeProcs.get(msg.cmdId));
+          }
+          break;
+        }
 
         case 'push_tar':
           handlePushTar(msg, ws).catch(e => {

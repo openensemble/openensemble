@@ -15,6 +15,7 @@ import path from 'path';
 import { shouldDetachNodeExec } from './background-policy.mjs';
 import { toolError } from '../../lib/tool-error.mjs';
 import { parseCompletionCheck, waitForNodeCompletion } from './completion-check.mjs';
+import { parseNodeExecTimeout } from './command-timeout.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -24,7 +25,9 @@ export function setNodesBroadcastFn(fn) { _broadcast = fn; }
 function nodeExecReportText({ status, hostname, cmdPreview, output }) {
   const header = status === 'done'
     ? `Finished on ${hostname}.`
-    : `Command failed on ${hostname}.`;
+    : /status unknown|outcome is unknown/i.test(output || '')
+      ? `Command status unknown on ${hostname}.`
+      : `Command failed on ${hostname}.`;
   const body = output?.trim() || 'No output.';
   return `${header}\n\nCommand: ${cmdPreview}\n\n${body}`.trim();
 }
@@ -211,15 +214,21 @@ async function runNodeExec(nodeId, userId, command, timeout, onChunk, onReconnec
   const startedAt = Date.now();
   try {
     result = await sendCommandStreaming(nodeId, userId, {
-      type: 'exec', command, timeout: Math.min(timeout, 300),
+      type: 'exec', command, timeout,
     }, (stream, data) => {
       outputTail = (outputTail + data).slice(-1800);
       onChunk(stream, data);
     });
   } catch (error) {
-    if (!/Node disconnected/i.test(error.message || '') || !isAgentRestartCommand(command)) throw error;
+    if ((!/Node disconnected/i.test(error.message || '') && error.code !== 'NODE_EXEC_STATUS_UNKNOWN')
+        || !isAgentRestartCommand(command)) throw error;
     onReconnecting();
-    const recon = await waitForNodeReconnect(nodeId, userId, 90_000);
+    // A tracked command can learn that its job record was lost only after
+    // the replacement agent has already reconnected.
+    const currentNode = getNode(nodeId, userId);
+    const recon = currentNode?.health !== 'disconnected' && currentNode?.recoveredAt >= startedAt
+      ? { ok: true }
+      : await waitForNodeReconnect(nodeId, userId, 90_000);
     if (!recon.ok) throw new Error(`Agent disconnected and did not reconnect within 90s: ${recon.reason}`);
     const tail = truncate(outputTail.trim());
     // Reconnection confirms the agent is back, not the interrupted shell's
@@ -434,12 +443,17 @@ export async function* executeSkillTool(name, args, userId, agentId) {
   }
 
   if (name === 'node_exec') {
-    const { node_id, command, timeout = 60, label: providedLabel = null } = args;
+    const { node_id, command, label: providedLabel = null } = args;
     if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
 
+    const node = getNode(node_id, userId);
+    if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
+
     let completionCheck;
+    let timeout;
     try {
+      timeout = parseNodeExecTimeout(args.timeout, node);
       completionCheck = parseCompletionCheck(args.completion_check, command);
     } catch (error) {
       yield { type: 'result', text: toolError(error.message), isError: true };
@@ -454,9 +468,6 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     import('../../lib/node-exec-paths.mjs').then(m =>
       m.appendNodeExec(userId, { nodeId: node_id, command })
     ).catch(e => console.warn('[node-exec-paths] log failed:', e.message));
-
-    const node = getNode(node_id, userId);
-    if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
 
     // Explicit background requests get an immediate task card. Otherwise the
     // dispatcher awaits output and detaches only if the command actually runs
@@ -527,8 +538,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
           let cmdResult = null;
           try {
             cmdResult = await runNodeExec(node.nodeId, userId, command, timeout, (stream, data) => {
-              if (stream === 'stderr') chunks.stderr += data;
-              else                     chunks.stdout += data;
+              if (stream === 'stderr') chunks.stderr = (chunks.stderr + data).slice(-2000);
+              else                     chunks.stdout = (chunks.stdout + data).slice(-2000);
               // Throttled status update — last 200 chars of stdout/stderr
               const tail = ((chunks.stdout + chunks.stderr).slice(-200)).replace(/\s+/g, ' ').trim();
               if (tail) pushWatcherStatus(userId, watcherId, `running… ${tail}`, {
@@ -546,7 +557,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
           } catch (e) {
             completeWatcher(userId, watcherId, {
               status: 'error',
-              finalText: `⚠ Command failed: ${e.message}`,
+              finalText: `⚠ ${e.code === 'NODE_EXEC_STATUS_UNKNOWN' ? 'Command status unknown' : 'Command failed'}: ${e.message}`,
             });
             await publishNodeExecReport({
               userId,
@@ -638,7 +649,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
         yield { type: 'tool_progress', name: 'node_exec', text: drainBuf() };
       }
       if (cmdError) {
-        yield { type: 'result', text: toolError(`Command failed: ${cmdError.message}`), isError: true };
+        const prefix = cmdError.code === 'NODE_EXEC_STATUS_UNKNOWN' ? 'Command status unknown' : 'Command failed';
+        yield { type: 'result', text: toolError(`${prefix}: ${cmdError.message}`), isError: true };
         return;
       }
       const output = nodeExecResultText(cmdResult);

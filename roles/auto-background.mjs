@@ -201,13 +201,14 @@ export function normalizeAutoBgCompletion(value, displayName = 'Tool') {
   const text = compactCompletionText(normalized.text);
   const content = text || (isError ? 'Tool error: Tool failed' : `${displayName} completed.`);
   const status = isError ? 'error' : 'done';
+  const outcomeUnknown = isError && /^Tool error: Command status unknown\b/i.test(content);
   return {
     text,
     content,
     isError,
     status,
     watcherFinalText: isError
-      ? `⚠ ${displayName} failed: ${compactCompletionText(content, AUTO_BG_WATCHER_TEXT_MAX)}`
+      ? `⚠ ${displayName} ${outcomeUnknown ? 'status unknown' : 'failed'}: ${compactCompletionText(content, AUTO_BG_WATCHER_TEXT_MAX)}`
       : `✓ ${displayName} done${text ? `: ${text.slice(-AUTO_BG_WATCHER_TEXT_MAX)}` : ''}`,
     observation: { resultText: text, ok: !isError },
     report: { content, status },
