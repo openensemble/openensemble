@@ -295,10 +295,10 @@ async function respondToAttachmentDecision(el, decisionId, fileId, decision, kee
 function appendApprovalPendingBubble(pending, scroll = true) {
   const kind = pending.kind;
   if (!kind) return;
-  // De-dupe by kind — at most one staged op per family. A re-emit for a kind
-  // that's already showing (e.g. persisted-session replay racing a live
-  // push) refreshes the existing pill's text instead of stacking a second.
+  // Reuse one card per family. A new operation belongs beside its current
+  // request; duplicate events for the same operation stay in place.
   const existing = document.querySelector(`.msg.approval-pending[data-approval-kind="${CSS.escape(kind)}"]`);
+  const newOperation = existing && pending.opId && existing.dataset.opId !== pending.opId;
   const el = existing || document.createElement('div');
   if (el._approvalExpiryTimer) {
     clearTimeout(el._approvalExpiryTimer);
@@ -347,7 +347,7 @@ function appendApprovalPendingBubble(pending, scroll = true) {
   actions.appendChild(cancelBtn);
 
   el.appendChild(actions);
-  if (!existing) insertBefore(el);
+  if (!existing || newOperation) insertBefore(el);
 
   // Watcher approvals currently carry a five-minute expiry. Disable the card
   // at that deadline (including immediately on replay of an already-expired
