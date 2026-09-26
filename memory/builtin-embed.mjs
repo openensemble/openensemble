@@ -40,12 +40,10 @@ export async function initBuiltinEmbed() {
   return _pipelinePromise;
 }
 
-export async function builtinEmbed(text) {
+export async function builtinEmbed(text, { purpose = 'document' } = {}) {
   const pipe = await initBuiltinEmbed();
-  // nomic-embed-text requires a task prefix; `search_document:` is the right
-  // choice for both stored facts and queries (symmetric retrieval works well
-  // enough for a personal memory system of this size).
-  const prefixed = `search_document: ${text ?? ''}`;
+  const prefix = purpose === 'query' ? 'search_query' : 'search_document';
+  const prefixed = `${prefix}: ${text ?? ''}`;
   const output = await pipe(prefixed, { pooling: 'mean', normalize: true });
   // output.data is a Float32Array of length 768 — convert to a plain Array so
   // LanceDB's node binding serializes it cleanly.

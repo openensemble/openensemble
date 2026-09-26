@@ -20,9 +20,9 @@ function _embedKey(text, model) {
   return createHash('sha1').update(`${model}\0${text}`).digest('hex');
 }
 
-export async function embed(text) {
+export async function embed(text, { purpose = 'document' } = {}) {
   const { embedUrl, embedModel, embedProvider } = getCortexConfig();
-  const key = _embedKey(text ?? '', embedModel);
+  const key = _embedKey(text ?? '', `${embedProvider}:${embedModel}:${purpose}`);
   const cached = _embedCache.get(key);
   if (cached) {
     _embedCache.delete(key);
@@ -34,7 +34,7 @@ export async function embed(text) {
 
   if (embedProvider === 'builtin') {
     try {
-      const vec = await builtinEmbed(text ?? '');
+      const vec = await builtinEmbed(text ?? '', { purpose });
       if (vec.length && !vec.every(v => v === 0)) {
         _embedCache.set(key, vec);
         if (_embedCache.size > EMBED_CACHE_MAX) {

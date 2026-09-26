@@ -46,6 +46,14 @@ async function init() {
   try { _gpuDevices = await _llama.getGpuDeviceNames(); } catch { _gpuDevices = []; }
   _model = await _llama.loadModel({ modelPath: MODEL_PATH, gpuLayers: GPU ? 'max' : 0 });
   _context = await _model.createContext({ contextSize: CTX_SIZE });
+  // GPU kernels compile lazily. Do this before advertising readiness, so the
+  // first relevance check does not spend its entire deadline warming up.
+  const started = Date.now();
+  for (const words of [16, 128, Math.min(768, Math.floor(CTX_SIZE / 4))]) {
+    await generate({ messages: [{ role: 'user', content: 'warmup '.repeat(words) }],
+      temperature: 0, maxTokens: 1 });
+  }
+  console.log(`[llama-node-server] warm-up complete in ${Date.now() - started}ms`);
   console.log(`[llama-node-server] loaded ${MODEL_NAME} on gpu=${_llama.gpu} devices=${JSON.stringify(_gpuDevices)} port=${PORT}`);
 }
 
@@ -68,7 +76,8 @@ function buildPrompt(messages) {
   return `<|im_start|>system\n${sys}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n`;
 }
 
-async function generate({ messages, temperature, maxTokens }) {
+async function generate({ messages, temperature, maxTokens, signal }) {
+  signal?.throwIfAborted();
   const prompt = buildPrompt(messages || []);
   const tokens = _model.tokenize(prompt, true);
   const sequence = _context.getSequence();
@@ -77,6 +86,7 @@ async function generate({ messages, temperature, maxTokens }) {
     const out = await completion.generateCompletion(tokens, {
       maxTokens: maxTokens ?? 512,
       temperature: temperature ?? 0.01,
+      signal,
     });
     return typeof out === 'string' ? out.trim() : '';
   } finally {
@@ -85,6 +95,7 @@ async function generate({ messages, temperature, maxTokens }) {
 }
 
 function send(res, code, obj) {
+  if (res.destroyed || res.writableEnded) return;
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(body);
@@ -100,6 +111,9 @@ function readBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const controller = new AbortController();
+  req.once('aborted', () => controller.abort());
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
     if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
       return send(res, 200, { ok: true, model: MODEL_NAME, gpu: _llama?.gpu ?? false, gpuDevices: _gpuDevices });
@@ -114,6 +128,7 @@ const server = http.createServer(async (req, res) => {
         messages: body.messages,
         temperature: body.temperature,
         maxTokens: body.max_tokens,
+        signal: controller.signal,
       }));
       return send(res, 200, {
         id: `chatcmpl-${Date.now()}`,
@@ -124,6 +139,7 @@ const server = http.createServer(async (req, res) => {
     }
     return send(res, 404, { error: 'not found' });
   } catch (e) {
+    if (controller.signal.aborted) return;
     console.error('[llama-node-server] request error:', e.message);
     return send(res, 500, { error: e.message });
   }

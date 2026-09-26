@@ -1,26 +1,18 @@
 /**
- * Cortex recall — vector search with Ebbinghaus reranking, spaced repetition,
+ * Cortex recall — relevance-gated context, explicit search, spaced repetition,
  * and soft-deletion (forget / forgetByText).
  */
 
 import {
-  UUID_RE, assertId, safeLanceVal, queuedWrite,
-  calcRetention, recencyScore, TOKEN_BUDGET,
+  assertId, safeLanceVal, queuedWrite,
+  calcRetention, recencyScore, TOKEN_BUDGET, getCortexConfig,
 } from './shared.mjs';
 import { softForgetValues } from './forgotten-state.mjs';
 import { embed } from './embedding.mjs';
 import { getTable } from './lance.mjs';
-import { getTurnContext } from '../lib/turn-abort-context.mjs';
-
-// Upper bound on `stability` (hours). Recall multiplies stability by 1.8 each
-// time; with no cap a hot memory grew geometrically until it overflowed JS
-// doubles to Infinity. node-lancedb then serialized that into the UPDATE
-// expression as a bare `Infinity` token, which Datafusion parsed as a COLUMN
-// reference → "No field named Infinity", failing the write on every recall
-// (and `new Date(Infinity).toISOString()` in the review path throws outright).
-// 999999 is the codebase's existing "effectively immortal" stability sentinel
-// (see lance.mjs initialStability / signals.mjs), so a heavily-recalled memory
-// just asymptotes to permanent — the intended behavior — without overflowing.
+import { selectContextCandidates, filterContextRelevance, CONTEXT_CANDIDATE_THRESHOLD, CONTEXT_SIMILARITY_THRESHOLD } from './relevance.mjs';
+// Explicit reviews can strengthen a memory, bounded to keep dates and Lance
+// numeric expressions finite. Retrieval itself never changes memory strength.
 const MAX_STABILITY = 999999;
 
 // ── Temporal query detection ─────────────────────────────────────────────────
@@ -51,10 +43,8 @@ function scopeClause(myRoles) {
   return ` AND (role_scope = '' OR role_scope IN (${list}))`;
 }
 
-// Immortal user_facts bypass the vector top-K (they're always injected), so a
-// user who pins many facts inflates every prompt with no bound. Cap the set to
-// a token budget, keeping the most salient (then most recently recalled) — the
-// same way episodeHistory is trimmed in context.mjs.
+// Explicit memory search still returns pins. Bound that result separately;
+// automatic chat context instead gates pins on relevance before its budget.
 function capImmortalFacts(rows, tokenBudget) {
   if (!Array.isArray(rows) || rows.length <= 1) return rows;
   const sorted = rows.slice().sort((a, b) => {
@@ -75,17 +65,16 @@ function capImmortalFacts(rows, tokenBudget) {
 }
 
 // ── recall — vector search with Ebbinghaus reranking ─────────────────────────
-// Retrieval remains identical in non-learning mode, but recall must not queue
-// count/stability writes that can land after the owning turn has terminated.
-export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec = undefined, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null, suppressLearning = false }) {
-  const readOnlyRecall = suppressLearning || getTurnContext()?.suppressLearning === true;
-  const queryVec = precomputedVec ?? await embed(query);
+// All retrieval is read-only, including callers using the legacy
+// suppressLearning option. Only explicit reviews update count/stability.
+export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec = undefined, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null, suppressLearning = false, forContext = false }) {
+  const queryVec = precomputedVec ?? await embed(query, { purpose: forContext ? 'query' : 'document' });
   // A zero/empty query vector means embed() failed (usually a misconfigured
   // embed model). vectorSearch with a zero vector returns arbitrary "nearest"
-  // rows by distance — injecting unrelated high-salience facts AND strengthening
-  // them via the recall-stat update below. Detect it and skip semantic recall;
-  // immortals (which don't need the query vector) still return normally.
-  const queryVecBad = !queryVec?.length || queryVec.every(v => v === 0);
+  // rows by distance. Skip semantic recall; the context gate also excludes
+  // pins unless they are explicitly marked as standing instructions.
+  const queryVecBad = !queryVec?.length || queryVec.some(v => !Number.isFinite(v))
+    || queryVec.every(v => v === 0);
   const tableName = type === 'user_facts' ? 'user_facts' : `${agentId}_${type}`;
   const table = await getTable(tableName, userId);
 
@@ -111,6 +100,19 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
       ? Promise.resolve([])
       : table.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${activeStatus}${notSuperseded}${dateFilter}${scopeFilter}`).limit(searchLimit).toArray().catch(() => []),
   ]);
+  if (forContext) {
+    // The caller retrieves each table separately. All pins compete on topic
+    // relevance before the token budget; importance cannot rescue weak hits.
+    const rerank = getCortexConfig().relevanceTask;
+    const candidates = selectContextCandidates([
+      ...immortals, ...semantic.filter(row => calcRetention(row) > 0.08),
+    ], queryVec, {
+      topK: rerank ? Math.min(24, topK * 3) : topK,
+      threshold: rerank ? CONTEXT_CANDIDATE_THRESHOLD : CONTEXT_SIMILARITY_THRESHOLD,
+      rerank,
+    });
+    return filterContextRelevance(query, candidates, { userId, agentId, limit: topK });
+  }
   // Cap pinned facts so a heavily-pinned user doesn't blow up every prompt.
   if (type === 'user_facts') immortals = capImmortalFacts(immortals, TOKEN_BUDGET.userContext);
 
@@ -129,7 +131,7 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
 
   const reranked = [...semantic, ...sharedFacts]
     .map(m => {
-      const semSim = 1 - (m._distance || 0.5);
+      const semSim = 1 - (m._distance ?? 0.5);
       const salience = m.salience_composite || 0.5;
       const retention = calcRetention(m);
       const confidence = m.confidence || 0.9;
@@ -145,33 +147,8 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
     .sort((a, b) => b.final_score - a.final_score)
     .slice(0, topK);
 
-  // Normal recalls strengthen memory via the spacing effect. Verifier reads
-  // return the same ranking without turning observation into a queued write.
-  if (!readOnlyRecall) {
-    reranked.forEach(m => {
-      if (!UUID_RE.test(m.id)) return; // skip legacy non-UUID IDs
-      const tName = m.agent_id === 'shared' ? 'user_facts' : `${m.agent_id}_${type}`;
-      queuedWrite(tName, async () => {
-        const t = await getTable(tName, userId);
-        // Access frequency is not evidence that a fact is true. In particular,
-        // repeatedly retrieving a stale personalization inference must not make
-        // it progressively harder to correct or forget. Keep the spacing-effect
-        // stability boost for episodic/parameter memories, but not user facts.
-        const values = {
-          recall_count: (m.recall_count || 0) + 1,
-          retention_score: 1.0,
-          last_recalled_at: new Date().toISOString(),
-          ...(tName === 'user_facts' ? {} : {
-            stability: Math.min(MAX_STABILITY, (m.stability || 24) * 1.8),
-          }),
-        };
-        await t.update({
-          where: `id = '${assertId(m.id)}'`,
-          values,
-        }).catch(e => console.debug('[cortex] LanceDB update error:', e.message));
-      }, userId).catch(e => console.debug('[cortex] Recall update failed:', e.message));
-    });
-  }
+  // Search is observation, not evidence of importance or truth. Spaced
+  // repetition updates belong to explicit reviews below, never retrieval.
 
   const immortalIds = new Set(immortals.map(m => m.id));
   return [...immortals, ...reranked.filter(m => !immortalIds.has(m.id))].slice(0, topK + immortals.length);

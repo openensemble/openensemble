@@ -13,6 +13,7 @@ import {
   getAnthropicKey, getFireworksKey, getGrokKey, getOpenRouterKey, getOllamaKey,
 } from '../chat/providers/_shared.mjs';
 import { reportRuntimeFailure, clearRuntimeFailure } from '../lib/runtime-warn.mjs';
+import { isTrainedReasonModel, reasonTaskInput } from './reason-prompts.mjs';
 
 export const VECTOR_DIM = 768;
 
@@ -138,6 +139,7 @@ export function getCortexConfig() {
     embedUrl:   c.embedUrl,    // optional override; routeEmbedEndpoint derives default if absent
     reasonProvider,
     reasonModel,
+    relevanceTask: c.relevanceTask === true,
     // Legacy fields — kept for backcompat callers that read them directly.
     // Defaults match the install names used by reason-transfer.mjs.
     reasonModelLmstudio: c.reasonModelLmstudio ?? c.reasonModel ?? 'openensemble/reason-v1',
@@ -285,7 +287,17 @@ export async function providerHealthy() {
  *  The builtin model is always preferred on 'auto' because it's bundled with
  *  OpenEnsemble and requires no external runtime — matches how embed works.
  *  Non-auto values (any provider name) are returned as-is. */
-export async function resolveReasonProvider() {
+export function isLocalReasonEndpoint(provider, baseUrl) {
+  if (provider === 'builtin') return true;
+  if (!['llamacpp', 'ollama', 'lmstudio'].includes(provider)) return false;
+  try {
+    const url = new URL(baseUrl);
+    return ['http:', 'https:'].includes(url.protocol)
+      && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  } catch { return false; }
+}
+
+export async function resolveReasonProvider({ localOnly = false } = {}) {
   const { reasonProvider, lmstudioBase, ollamaBase } = getCortexConfig();
   if (reasonProvider !== 'auto') return reasonProvider;
   // Builtin is considered available unless explicitly failed to warm. The
@@ -300,8 +312,8 @@ export async function resolveReasonProvider() {
     // Prefer builtin even on first miss — downstream handles null gracefully.
     return 'builtin';
   } catch { /* module missing in weird install states — fall through */ }
-  if (await _isReachable(`${lmstudioBase}/v1/models`)) return 'lmstudio';
-  if (await _isReachable(`${ollamaBase}/api/tags`))    return 'ollama';
+  if ((!localOnly || isLocalReasonEndpoint('lmstudio', lmstudioBase)) && await _isReachable(`${lmstudioBase}/v1/models`)) return 'lmstudio';
+  if ((!localOnly || isLocalReasonEndpoint('ollama', ollamaBase)) && await _isReachable(`${ollamaBase}/api/tags`)) return 'ollama';
   return null;
 }
 
@@ -324,22 +336,28 @@ export function safeParseJSON(raw) {
 // model (memory/builtin-reason.mjs).
 //
 // `meta.caller` tags the call with its task name ('salience' | 'contradiction'
-// | 'signals' | 'friction' | 'summary'). Used by:
+// | 'signals' | 'friction' | 'summary' | 'relevance'). Used by:
 //   1. builtin-reason to select the task-prefix token for the fine-tuned model
 //   2. memory/training-log.mjs to bucket captured I/O by task for corpus building
 async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
+  if (meta.signal?.aborted) return null;
+  if (meta.caller === 'relevance') temperature = 0;
   const cfg = getCortexConfig();
-  const provider = await resolveReasonProvider();
-  if (!provider) return null;
+  const provider = await resolveReasonProvider({ localOnly: meta.localOnly === true });
+  if (!provider || meta.signal?.aborted) return null;
 
   const spec = getProviderSpec(provider);
+  if (meta.localOnly && !isLocalReasonEndpoint(provider, spec?.baseUrl)) return null;
   if (!spec || !spec.supportsChat) {
     console.warn('[cortex] Reason provider', provider, 'not supported.');
     return null;
   }
 
   const model = cfg.reasonModel;
-  const signal = AbortSignal.timeout(20000);
+  const timeoutSignal = AbortSignal.timeout(meta.caller === 'relevance'
+    ? Math.max(1, Math.min(1500, Math.ceil(meta.timeoutMs ?? 1500))) : 20000);
+  const signal = meta.signal ? AbortSignal.any([meta.signal, timeoutSignal]) : timeoutSignal;
+  const externalUser = isTrainedReasonModel(model) ? reasonTaskInput(user, meta.caller) : user;
   const startedAt = Date.now();
   let output = null;
   let rawResponse = null;
@@ -354,18 +372,21 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
   try {
     if (spec.apiStyle === 'builtin') {
       const { builtinGenerate } = await import('./builtin-reason.mjs');
-      output = await builtinGenerate({ system, user, temperature, task: meta.caller });
+      output = await builtinGenerate({ system, user, temperature, task: meta.caller, signal,
+        ...(meta.caller === 'relevance' ? { maxTokens: 32 } : {}) });
       rawResponse = output;
     } else if (spec.apiStyle === 'ollama') {
       const body = JSON.stringify({
         model, stream: false,
         messages: [
           ...(system ? [{ role: 'system', content: system }] : []),
-          { role: 'user', content: user },
+          { role: 'user', content: externalUser },
         ],
-        options: { temperature, num_ctx: 512 },
+        options: { temperature, num_ctx: 512,
+          ...(meta.caller === 'relevance' ? { num_predict: 32 } : {}) },
       });
-      const res = await fetch(`${spec.baseUrl}/api/chat`, { method: 'POST', headers: spec.headers, body, signal });
+      const res = await fetch(`${spec.baseUrl}/api/chat`, { method: 'POST', headers: spec.headers, body, signal,
+        ...(meta.localOnly ? { redirect: 'error' } : {}) });
       httpStatus = res.status;
       if (!res.ok) {
         console.warn(`[cortex] ollama HTTP ${res.status} for model "${model}"`);
@@ -381,10 +402,12 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
         model, temperature, stream: false,
         messages: [
           ...(system ? [{ role: 'system', content: system }] : []),
-          { role: 'user', content: user },
+          { role: 'user', content: externalUser },
         ],
+        ...(meta.caller === 'relevance' ? { max_tokens: 32 } : {}),
       });
-      const res = await fetch(`${spec.baseUrl}/chat/completions`, { method: 'POST', headers: spec.headers, body, signal });
+      const res = await fetch(`${spec.baseUrl}/chat/completions`, { method: 'POST', headers: spec.headers, body, signal,
+        ...(meta.localOnly ? { redirect: 'error' } : {}) });
       httpStatus = res.status;
       if (!res.ok) {
         // 404 from LM Studio = model not loaded (JIT off). See lib/runtime-warn.mjs.
@@ -409,11 +432,16 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
       output = data.content?.map(c => c.text).filter(Boolean).join('').trim() || null;
     }
   } catch (e) {
+    if (meta.signal?.aborted || (meta.caller === 'relevance' && signal.aborted)) return null;
     console.warn('[cortex] Chat call failed (' + provider + '):', e.message);
     output = null;
     networkError = e.message;
     rawResponse = { error: e.message };
   }
+
+  // Cancellation of optional context work is not evidence of a broken
+  // provider. The caller reports an unavailable relevance decision itself.
+  if (meta.signal?.aborted || (meta.caller === 'relevance' && signal.aborted)) return null;
 
   if (isLocal) {
     if (output != null) {

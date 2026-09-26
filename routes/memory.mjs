@@ -70,7 +70,8 @@ export async function handle(req, res) {
       let conversation = [];
       if (origin?.sessionKey?.startsWith(`${authId}_`)) {
         const { loadSession } = await import('../sessions.mjs');
-        conversation = (await loadSession(origin.sessionKey)).filter(message => message.turnId === origin.turnId
+        const turnIds = new Set(Array.isArray(origin.turnIds) ? origin.turnIds.slice(-8) : [origin.turnId]);
+        conversation = (await loadSession(origin.sessionKey)).filter(message => turnIds.has(message.turnId)
           && !message.hidden && ['user', 'assistant'].includes(message.role))
           .slice(0, 8).map(message => ({ role: message.role, text: String(message.content || '').slice(0, 6000), ts: message.ts }));
       }

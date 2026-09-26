@@ -27,7 +27,7 @@ import { USERS_DIR } from '../lib/paths.mjs';
 const CAPTURE_DIR = path.join(USERS_DIR, '..', 'training', 'capture');
 const SIZE_CAP_BYTES = 500 * 1024 * 1024; // 500 MB
 const KNOWN_CALLERS = new Set([
-  'salience', 'contradiction', 'signals', 'friction', 'summary', 'unknown',
+  'salience', 'contradiction', 'signals', 'friction', 'summary', 'relevance', 'unknown',
 ]);
 
 let _overCapWarned = false;

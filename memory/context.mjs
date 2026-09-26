@@ -4,12 +4,13 @@
  * block stays ~the same size regardless of conversation length.
  */
 
-import { TOKEN_BUDGET } from './shared.mjs';
+import { TOKEN_BUDGET, getCortexConfig } from './shared.mjs';
 import { embed } from './embedding.mjs';
 import { isChildAccountJailbreak } from './lance.mjs';
 import { recall, TEMPORAL_RE, parseTimeAnchor } from './recall.mjs';
-import { shouldSkipRecall, filterByConfidence } from './predictive-context.mjs';
+import { shouldSkipRecall } from './predictive-context.mjs';
 import { canonicalPreferenceSubjectKey } from '../lib/personalization/preference-structure.mjs';
+import { selectContextCandidates, filterContextRelevance, CONTEXT_CANDIDATE_THRESHOLD } from './relevance.mjs';
 
 const PERSONALIZATION_FACT_SOURCES = new Set(['personalization', 'user_confirmed', 'user_corrected']);
 const LEGACY_MODEL_PREFERENCE_SOURCE = 'preference';
@@ -29,7 +30,9 @@ function tailReferences(rows, textFor, maxChars) {
 }
 
 function memoryReference(row, table, type, reason, text = row.text || row.statement || '') {
-  return { id: row.id, table, type, reason, text: text.slice(0, 1000),
+  return { id: row.id, table, type, reason: row.selectionReason || reason, text: text.slice(0, 1000),
+    relevance: row.semantic_score ?? null,
+    applicability: row.applicability_score ?? null,
     source: row.source || null, pinned: row.immortal === true, confidence: row.confidence ?? null };
 }
 
@@ -101,7 +104,7 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   }
 
   // Pre-embed the query once and reuse for all parallel recalls
-  const queryVec = await embed(currentQuery);
+  const queryVec = await embed(currentQuery, { purpose: 'query' });
   const isTemporal = TEMPORAL_RE.test(currentQuery);
   const timeAnchor = isTemporal ? parseTimeAnchor(currentQuery) : null;
   // Temporal mode: pull more episodes, fewer params
@@ -122,11 +125,11 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   const includeEpisodes = opts?.includeEpisodes !== false;
   const suppressLearning = opts?.suppressLearning === true;
   const [paramsRaw, episodes, userFactsRaw, profileState] = await Promise.all([
-    recall({ agentId, type: 'params', query: currentQuery, queryVec, topK: paramsTopK, includeShared: false, userId, suppressLearning }),
+    recall({ agentId, type: 'params', query: currentQuery, queryVec, topK: paramsTopK, includeShared: false, userId, suppressLearning, forContext: true }),
     includeEpisodes
-      ? recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId, suppressLearning })
+      ? recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId, suppressLearning, forContext: true })
       : Promise.resolve([]),
-    recall({ agentId: 'shared', type: 'user_facts', query: currentQuery, queryVec, topK: 4, includeShared: false, userId, myRoles, suppressLearning })
+    recall({ agentId: 'shared', type: 'user_facts', query: currentQuery, queryVec, topK: 4, includeShared: false, userId, myRoles, suppressLearning, forContext: true })
       .catch(() => []),
     Promise.all([
       import('../lib/personalization/ledger.mjs'),
@@ -150,21 +153,16 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     }).catch(() => ({ rows: [], active: false })),
   ]);
 
-  // Confidence post-filter — drop weak hits before they reach the LLM.
-  // Immortal rows pass through unconditionally (filterByConfidence preserves
-  // them) so user-pinned preferences are never silently disabled by a
-  // tangential query. Episodes intentionally skip the filter: the recency
-  // boost in temporal queries depends on the full top-K being available.
+  // Every table, including episodes and pins, has passed the topic gate.
   // Before typed personalization existed, the model-classifier path wrote
   // guesses into agent params with source="preference". Params are rendered
   // below as trusted remembered rules, so those historical guesses must not
   // enter the prompt. Confirmed preferences now come from the auditable typed
   // ledger; ordinary user-pinned rules and corrections remain unaffected.
-  const params    = filterByConfidence(paramsRaw)
-    .filter(row => row.source !== LEGACY_MODEL_PREFERENCE_SOURCE);
-  const userFacts = filterByConfidence(userFactsRaw);
+  const params = paramsRaw.filter(row => row.source !== LEGACY_MODEL_PREFERENCE_SOURCE);
+  const userFacts = userFactsRaw;
 
-  // System instructions: immortal params always included, normal params trimmed if needed
+  // Format selected params within the system-instruction budget.
   const immortalParams = params.filter(p => p.immortal);
   const normalParams   = params.filter(p => !p.immortal);
   const immortalText   = immortalParams.map(p => p.text).join('\n');
@@ -175,18 +173,24 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     ? '[...]\n' + normalText.slice(-(normalBudget * 4)) : normalText;
   const systemInstructions = [immortalText, normalTrimmed].filter(Boolean).join('\n');
 
-  // Episode history — oldest first, individual entries capped at 500 chars
-  const rawEpisodes = episodes
+  // Keep whole entries within the history budget. Cutting through an excerpt
+  // can remove its speaker label or the condition attached to an outcome.
+  const episodeEntries = episodes
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
     .map(e => {
       const date = new Date(e.created_at).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
       const body = e.text.length > 500 ? e.text.slice(0, 500) + '...' : e.text;
-      return `[${date}] ${body}`;
-    })
-    .join('\n');
-  const episodeHistory = rawEpisodes.length / 4 > TOKEN_BUDGET.episodeHistory
-    ? '[...older history in memory...]\n' + rawEpisodes.slice(-(TOKEN_BUDGET.episodeHistory * 4))
-    : rawEpisodes;
+      return { row: e, text: `[${date}] ${body}` };
+    });
+  const includedEpisodes = [];
+  let historyChars = 0;
+  for (const entry of episodeEntries.reverse()) {
+    const cost = entry.text.length + (includedEpisodes.length ? 1 : 0);
+    if (historyChars + cost > TOKEN_BUDGET.episodeHistory * 4) continue;
+    includedEpisodes.unshift(entry);
+    historyChars += cost;
+  }
+  const episodeHistory = includedEpisodes.map(e => e.text).join('\n');
 
   // User context — group by category for structured output
   const profileIds = new Set(profileState.rows.map(r => r.id));
@@ -200,7 +204,7 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     .filter(r => preferenceStillCurrent(r, profileNow)
       && !isChildAccountJailbreak(userId, r.statement))
     .sort((a, b) => profileRecency(b) - profileRecency(a) || String(a.id).localeCompare(String(b.id)));
-  // Build the always-on confirmed profile first. Semantic recall is filtered
+  // Build the relevant confirmed profile first. Semantic recall is filtered
   // after this step so confirmed preference/constraint candidates cannot
   // bypass the cap or conflict projection; other ledger-owned
   // facts/patterns/goals remain retrievable when relevant.
@@ -232,11 +236,31 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   };
 
   if (confirmedCandidates.length) {
-    const globalPrefs = projectConfirmedPreferences(
+    const projectedPrefs = projectConfirmedPreferences(
       confirmedCandidates.filter(r => r.type === 'preference'),
       profileRecency,
-    ).slice(0, CONFIRMED_PROFILE_PER_TYPE_CAP);
-    const constraints = confirmedCandidates.filter(r => r.type === 'constraint').slice(0, CONFIRMED_PROFILE_PER_TYPE_CAP);
+    );
+    // Global profile scope means visibility across agents, not applicability
+    // to every question. Project conflicts before relevance so an older
+    // positive cannot bypass a newer avoidance statement.
+    const relevantProfile = async rows => {
+      // Keep existing confirmed-profile behavior on older models. Filtering
+      // broad preferences needs the applicability task; similarity alone
+      // loses constraints whose wording differs from the current request.
+      const rerank = getCortexConfig().relevanceTask;
+      if (!rerank) return rows.slice(0, CONFIRMED_PROFILE_PER_TYPE_CAP);
+      const withVectors = await Promise.all(rows.slice(0, 12).map(async row => ({ ...row,
+        vector: await embed(row.statement), text: row.statement })));
+      const selected = selectContextCandidates(withVectors, queryVec, {
+        topK: 12, threshold: CONTEXT_CANDIDATE_THRESHOLD, rerank,
+      });
+      return filterContextRelevance(currentQuery, selected, { userId, agentId,
+        limit: CONFIRMED_PROFILE_PER_TYPE_CAP });
+    };
+    const [globalPrefs, constraints] = await Promise.all([
+      relevantProfile(projectedPrefs),
+      relevantProfile(confirmedCandidates.filter(r => r.type === 'constraint')),
+    ]);
     // Constraints can encode accessibility and safety boundaries. Give them
     // first claim on the shared prompt budget so long preference text cannot
     // silently crowd every constraint out of context.
@@ -312,10 +336,7 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
         ...immortalParams.map(m => memoryReference(m, `${agentId}_params`, 'params', 'Pinned rule')),
         ...tailReferences(normalParams, m => m.text, normalBudget * 4)
           .map(({ row, text }) => memoryReference(row, `${agentId}_params`, 'params', 'Relevant remembered rule', text)),
-        ...tailReferences(episodes, m => {
-          const date = new Date(m.created_at).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-          return `[${date}] ${m.text.length > 500 ? m.text.slice(0, 500) + '...' : m.text}`;
-        }, TOKEN_BUDGET.episodeHistory * 4)
+        ...includedEpisodes
           .map(({ row, text }) => memoryReference(row, `${agentId}_episodes`, 'episodes', 'Relevant past conversation', text)),
         ...semanticFacts.map(m => memoryReference(m, 'user_facts', 'user_facts', m.immortal ? 'Pinned fact' : 'Relevant fact')),
         ...confirmedProfile.filter(m => !semanticFacts.some(f => f.id === m.id))

@@ -6,6 +6,24 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-09-26
+
+**Search your memories in chat**
+Ask “show me my food preferences” or “what do you know about me” to search saved facts and notes across your profile. Search runs locally using Nomic and, when enabled with a compatible model, Cortex. Your chat model receives a small page of matching excerpts to explain, rather than the complete memory store. Refine the topic or request another page to explore more; a short answer is not a complete inventory. See [Cortex](cortex.md).
+
+Memory context and search results share a 1,000-byte output limit per turn, with at most two searches. Repeated searches share that allowance, and raw search-result pages from earlier turns are not replayed into future model requests. Normal conversation history and other tools have their own limits.
+
+**More selective memory context**
+Unrelated pinned memories and preferences no longer automatically enter every answer. A complete new question is evaluated on its own; follow-ups can still use the recent conversation. With relevance checking enabled on a compatible Cortex model, Nomic and the existing Cortex model both check applicability. No additional relevance model is required. Retrieval alone no longer increases a memory's importance.
+
+**Summaries keep the original words and outcome**
+New session summaries use short, attributed conversation excerpts and retain links to the original turns when available. This helps preserve corrections, cancellations, and failed actions. Older generated summaries remain searchable but are excluded from automatic answer context and preference learning.
+
+**Approval buttons stay beside the current request**
+When a new action replaces an earlier approval of the same kind, its **Approve / Cancel** card moves beside the latest request. This also works when chat history reloads. Duplicate events keep their position, and outdated approvals cannot resolve a newer request.
+
+---
+
 ## 2026-09-25
 
 **Task results have their own ledger**

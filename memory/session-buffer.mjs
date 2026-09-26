@@ -2,56 +2,62 @@
  * Session buffer — per-agent in-memory conversation buffer.
  *
  * User messages are triaged (trivial greetings skipped) and written to the
- * episodes table. Idle buffers (>30min inactive) get LLM-summarized into a
+ * episodes table. Idle buffers (>30min inactive) get condensed into a
  * single elevated-stability episode and cleared.
  */
 
 import {
-  assertId, queuedWrite, generateCombined,
+  assertId, queuedWrite,
 } from './shared.mjs';
 import {
   getTable, rememberFast, queueEnrich,
 } from './lance.mjs';
+import { buildGroundedSummary } from './grounded-summary.mjs';
+import { captureMemorySource } from '../lib/memory-provenance.mjs';
+import { resolveProjectSessionKey } from '../lib/project-context.mjs';
 
 // ── In-memory state ──────────────────────────────────────────────────────────
 const _sessionBuffers = {};
 const _sessionLastActivity = {}; // bufKey → { ts: timestamp ms, userId, agentId }
 const _sessionSummarized = new Set(); // bufKeys already summarized this idle cycle
+const _sessionSummariesInFlight = new Set();
 
 const IDLE_THRESHOLD_MS = 30 * 60_000; // 30 minutes
 const SUMMARY_CHECK_INTERVAL_MS = 5 * 60_000; // check every 5 minutes
-
-// Cortex summary head was trained on bare `<conv>` per training/train.py
-// format_record('summary'). Empty instruction → generateCombined sends just
-// the conversation, matching the trained format.
 
 async function summarizeIdleSessions() {
   const now = Date.now();
   for (const [bufKey, meta] of Object.entries(_sessionLastActivity)) {
     if (now - meta.ts < IDLE_THRESHOLD_MS) continue;
-    if (_sessionSummarized.has(bufKey)) continue;
+    if (_sessionSummarized.has(bufKey) || _sessionSummariesInFlight.has(bufKey)) continue;
     const buf = _sessionBuffers[bufKey];
     if (!buf || buf.length < 4) { _sessionSummarized.add(bufKey); continue; } // need meaningful exchange
 
     const { userId, agentId } = meta;
 
-    // Build conversation text from buffer
-    const convText = buf
-      .map(m => `${m.role}: ${m.text.slice(0, 300)}`)
-      .join('\n')
-      .slice(0, 2000);
-
+    const snapshot = buf.slice();
+    const summary = buildGroundedSummary(snapshot);
     _sessionSummarized.add(bufKey);
+    if (!summary) continue;
+    _sessionSummariesInFlight.add(bufKey);
+    const origins = summary.evidence.map(item => snapshot[item.turn]?.sourceContext);
+    const lastOrigin = origins.at(-1);
+    const sourceContext = lastOrigin && origins.every(origin => origin?.sessionKey === lastOrigin.sessionKey)
+      ? { ...lastOrigin, turnIds: [...new Set(origins.map(origin => origin.turnId))] } : null;
 
-    // Generate summary via local LLM (non-blocking)
-    generateCombined('', convText, { caller: 'summary', userId, agentId }).then(async summary => {
-      if (!summary || summary.length < 20) return;
+    // Persist exact source excerpts; the small prose head cannot invent a
+    // completed action, amount, or failure cause in a stored summary.
+    (async () => {
       const record = await rememberFast({
-        agentId, type: 'episodes', text: `[Session summary] ${summary}`,
+        agentId, type: 'episodes', text: summary.text,
         source: 'summary', confidence: 1.0,
-        metadata: { session_id: new Date(meta.ts).toISOString().slice(0, 10), is_summary: true },
-        userId,
+        // category is persisted by rememberFast; arbitrary metadata is not.
+        // The evidence itself is stored verbatim, with speakers, in text.
+        metadata: { session_id: sourceContext?.sessionKey || new Date(meta.ts).toISOString().slice(0, 10),
+          category: summary.format },
+        userId, sourceContext,
       }).catch(() => null);
+      if (!record) { _sessionSummarized.delete(bufKey); return; }
       if (record) {
         // Give summaries elevated stability (slower decay) — they represent digested knowledge
         const tableName = `${agentId}_episodes`;
@@ -63,10 +69,13 @@ async function summarizeIdleSessions() {
           }).catch(e => console.debug('[cortex] Summary stability update error:', e.message));
         }, userId).catch(e => console.debug('[cortex] Summary queue failed:', e.message));
       }
-      // Clear the buffer after summarizing
-      _sessionBuffers[bufKey] = [];
+      // A new turn can arrive while storage is in flight. Remove only the
+      // snapshot that was persisted, never the new conversation.
+      const saved = new Set(snapshot);
+      _sessionBuffers[bufKey] = (_sessionBuffers[bufKey] || []).filter(m => !saved.has(m));
       console.log(`[cortex] Summarized idle session for ${agentId} (${userId})`);
-    }).catch(e => console.debug('[cortex] Session summary failed:', e.message));
+    })().catch(e => { _sessionSummarized.delete(bufKey); console.debug('[cortex] Session summary failed:', e.message); })
+      .finally(() => _sessionSummariesInFlight.delete(bufKey));
   }
 }
 
@@ -84,7 +93,7 @@ function normalizeForDedup(text) {
 }
 
 function alreadyStoredToday(userId, agentId, text) {
-  const key = `${userId}_${agentId}`;
+  const key = JSON.stringify([userId, agentId]);
   const today = new Date().toISOString().slice(0, 10);
   const entry = _dailyEpisodeCache.get(key);
   if (!entry || entry.date !== today) return false;
@@ -92,7 +101,7 @@ function alreadyStoredToday(userId, agentId, text) {
 }
 
 function markStoredToday(userId, agentId, text) {
-  const key = `${userId}_${agentId}`;
+  const key = JSON.stringify([userId, agentId]);
   const today = new Date().toISOString().slice(0, 10);
   const entry = _dailyEpisodeCache.get(key);
   if (!entry || entry.date !== today) {
@@ -129,12 +138,17 @@ function triageEpisode(text) {
 
 export function addToSessionBuffer(agentId, role, text, userId = 'default') {
   const clean = cleanTextForMemory(text);
-  if (!clean || clean.length < 8) return;
+  // Short replies such as "Failed." or "Cancel." can reverse an outcome.
+  // Episode triage below still prevents trivial standalone memory writes.
+  if (!clean) return;
 
-  const bufKey = `${userId}_${agentId}`;
+  const sourceContext = captureMemorySource(userId, agentId);
+  const sessionKey = sourceContext?.sessionKey
+    || resolveProjectSessionKey(agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`);
+  const bufKey = JSON.stringify([userId, agentId, sessionKey]);
   if (!_sessionBuffers[bufKey]) _sessionBuffers[bufKey] = [];
   const ts = new Date().toISOString();
-  _sessionBuffers[bufKey].push({ role, text: clean, timestamp: ts });
+  _sessionBuffers[bufKey].push({ role, text: clean, timestamp: ts, sourceContext });
   _sessionLastActivity[bufKey] = { ts: Date.now(), userId, agentId };
   _sessionSummarized.delete(bufKey); // reset idle flag on new activity
 
@@ -164,7 +178,7 @@ export function addToSessionBuffer(agentId, role, text, userId = 'default') {
   // Write to LanceDB in background — non-blocking
   rememberFast({
     agentId, type: 'episodes', text: clean, source: 'session', confidence: 1.0,
-    metadata: { role, session_id: ts.slice(0, 10) }, userId,
+    metadata: { role, session_id: sessionKey }, userId, sourceContext,
   }).then(record => {
     queueEnrich(record, `${agentId}_episodes`, userId);
   }).catch(e => console.warn('[cortex] Episode write failed:', e.message));

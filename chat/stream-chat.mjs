@@ -8,6 +8,9 @@ import { buildWorkContext } from '../lib/personalization/work-store.mjs';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import path from 'path';
 import { buildAgentContext, formatContext, addToSessionBuffer } from '../memory.mjs';
+import { buildRecallQuery } from '../memory/recall-query.mjs';
+import { memorySearchIntent } from '../memory/search-intent.mjs';
+import { budgetContext, createMemoryBudget, renderMemorySearch } from '../memory/search-budget.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from '../sessions.mjs';
 import { getUserFilesDir, USERS_DIR } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
@@ -179,6 +182,10 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const sessionUserText = typeof turnOpts?.sessionUserText === 'string'
     ? turnOpts.sessionUserText
     : userText;
+  const memoryBudget = createMemoryBudget();
+  const explicitMemoryRead = !agent.ephemeral && !isolatedTaskRun && !readOnlyTurn
+    && (agent.tools || []).some(tool => tool.function?.name === 'recall_facts')
+    ? memorySearchIntent(sessionUserText) : null;
   // Per-turn memory-scope tracker: records which service-role skills' tools run
   // this turn so a fact remembered mid-turn scopes to the skill that produced
   // it (see lib/memory-scope-context.mjs). enterWith here propagates through the
@@ -242,7 +249,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, matchedSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, routeText?: string, parallelWorkAssessment?: any, agentLaunchState?: {mode:string|null,count:number}, labVerifierForeground?: boolean, labProviderRequestCap?: number} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, matchedSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, routeText?: string, parallelWorkAssessment?: any, agentLaunchState?: {mode:string|null,count:number}, labVerifierForeground?: boolean, labProviderRequestCap?: number, memoryBudget?: any} | null} */
   let _routerStore = null;
   let _executionResolution = null;
   // A task must never create a task. On any autonomous run strip the task /
@@ -383,18 +390,19 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   // Generic ephemerals skip Cortex entirely. A detached worker may opt into
   // the narrower standing-memory contract only when its explicit stable owner
   // marker matches the request; episodes/history/cross-agent reads stay off.
-  const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
   const _ctxPromise = (readOnlyTurn || (agent.ephemeral && !workerMemoryOwnerId)) ? Promise.resolve(null) : (async () => {
-    let recallQuery = sessionUserText;
-    if (!isolatedTaskRun && (sessionUserText.length < 50 || NEEDS_CONTEXT_RE.test(sessionUserText))) {
-      const recentMsgs = (await loadSession(agent.id, 6)).filter(m => m.excludeFromModel !== true).slice(-4);
-      if (recentMsgs.length) {
-        const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
-        const lastAsst = recentMsgs.filter(m => m.role === 'assistant').slice(-1)[0];
-        const ctx_parts = [lastUser?.content?.slice(0, 150), lastAsst?.content?.slice(0, 150)].filter(Boolean);
-        if (ctx_parts.length) recallQuery = `${sessionUserText} [context: ${ctx_parts.join(' ')}]`;
-      }
+    if (explicitMemoryRead) {
+      memoryBudget.searches++;
+      memoryBudget.queries.add(`${explicitMemoryRead.type}:${explicitMemoryRead.query}:0`);
+      const { searchMemories } = await import('../memory/search.mjs');
+      const result = await searchMemories({ userId, ...explicitMemoryRead })
+        .catch(() => ({ rows: [], counts: {}, unavailable: true, partial: true }));
+      return { _localSearch: result, _meta: { injectedMemoryIds: [] } };
     }
+    const recallQuery = await buildRecallQuery(sessionUserText, {
+      isolatedTaskRun,
+      loadRecentMessages: () => loadSession(agent.id, 6),
+    });
     if (workerMemoryOwnerId) {
       return buildWorkerStandingMemoryContext({
         agent,
@@ -634,7 +642,17 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   agent._providerHostedImageBackend = shouldUseProviderHostedImageBackend(agent, userId);
 
   const ctx = await _ctxPromise;
-  const memBlock = ctx ? formatContext(ctx) : '';
+  if (_routerStore) _routerStore.memoryBudget = memoryBudget;
+  // Tool-plan turns without routing recovery still need the same quota.
+  const providerRouterStore = _routerStore ?? { agent, memoryBudget };
+  let memBlock = '';
+  if (ctx?._localSearch) {
+    const rendered = renderMemorySearch(ctx._localSearch, memoryBudget, { context: true });
+    memBlock = rendered.text;
+    ctx._meta.injectedMemoryIds = rendered.rows.map(row => ({ id: row.id, table: row.table,
+      type: row.table === 'user_facts' ? 'user_facts' : row.table.endsWith('_params') ? 'params' : 'episodes',
+      text: row.excerpt, source: row.source, reason: 'Explicit local memory search' }));
+  } else if (ctx) memBlock = budgetContext(ctx, formatContext, memoryBudget);
   const skillTriggersBlock = await _triggersPromise;
 
   // Inject current name so renaming takes effect in the LLM's self-awareness.
@@ -1187,7 +1205,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const canRecover = Boolean(_routerStore);
   let { assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
     consumeProvider(providerGen, { suppressText: false }),
-    _routerStore,
+    providerRouterStore,
   );
   let parallelPreflightFailure = null;
   // The schema boundary makes a text-only bypass unlikely, but a model can
@@ -1217,7 +1235,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
       const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
         suppressText: false,
         providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
-      }), _routerStore);
+      }), providerRouterStore);
       ({ assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
       usage = mergeProviderUsage(_priorUsage, _r.usage);
       modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
@@ -1289,7 +1307,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
           const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
             suppressText: false,
             providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
-          }), _routerStore);
+          }), providerRouterStore);
           ({ assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
           usage = mergeProviderUsage(_priorUsage, _r.usage);
           modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
@@ -1345,7 +1363,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
         const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
           suppressText: false,
           providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
-        }), _routerStore);
+        }), providerRouterStore);
         ({ assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
         usage = mergeProviderUsage(_priorUsage, _r.usage);
         modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];

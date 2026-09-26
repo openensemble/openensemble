@@ -225,7 +225,7 @@ export async function searchSimilar(tableName, text, k = 6, userId = 'default') 
 
 // ── Fast write — embedding only, ~5ms, no LLM ────────────────────────────────
 export async function rememberFast({ agentId = 'main', type = 'episodes', text,
-    immortal = false, source = 'system', confidence = 0.9, metadata = {}, userId = 'default' }) {
+    immortal = false, source = 'system', confidence = 0.9, metadata = {}, userId = 'default', sourceContext = undefined }) {
   if (!text || text.trim().length < 8) return null; // skip blank / junk
   const tableName = type === 'user_facts' ? 'user_facts' : `${agentId}_${type}`;
   const table = await getTable(tableName, userId);
@@ -267,7 +267,7 @@ export async function rememberFast({ agentId = 'main', type = 'episodes', text,
 
   await queuedWrite(tableName, () => table.add([record]), userId);
   const { recordMemorySource } = await import('../lib/memory-provenance.mjs');
-  await recordMemorySource(userId, tableName, record.id);
+  await recordMemorySource(userId, tableName, record.id, sourceContext);
   return record;
 }
 

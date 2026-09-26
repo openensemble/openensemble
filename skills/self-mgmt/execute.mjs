@@ -422,26 +422,34 @@ export default async function execute(name, args, userId, agentId) {
   }
 
   if (name === 'recall_facts') {
-    const query = args.query?.trim();
-    if (!query) return 'query is required.';
-    const { recall } = await import('../../memory.mjs');
-    const [facts, params, episodes] = await Promise.all([
-      recall({ agentId: 'shared', type: 'user_facts', query, topK: 6, includeShared: false, userId }).catch(() => []),
-      recall({ agentId, type: 'params', query, topK: 4, includeShared: false, userId }).catch(() => []),
-      recall({ agentId, type: 'episodes', query, topK: 4, includeShared: false, userId }).catch(() => []),
-    ]);
-    const parts = [];
-    if (facts.length) parts.push('Facts:\n' + facts.map(f => `• ${f.text}`).join('\n'));
-    if (params.length) parts.push('Agent params:\n' + params.map(p => `• ${p.text}`).join('\n'));
-    if (episodes.length) {
-      const lines = episodes.map(e => {
-        const date = new Date(e.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        const body = e.text.length > 200 ? e.text.slice(0, 200) + '…' : e.text;
-        return `• [${date}] ${body}`;
-      }).join('\n');
-      parts.push('Past conversations:\n' + lines);
+    const { searchMemories } = await import('../../memory/search.mjs');
+    const { memorySearchIntent, normalizeMemoryQuery } = await import('../../memory/search-intent.mjs');
+    const { createMemoryBudget, renderMemorySearch, memoryBudgetNotice, MEMORY_SEARCH_CALL_LIMIT } = await import('../../memory/search-budget.mjs');
+    const { getToolRouterContext, suppressToolForTurn } = await import('../../lib/tool-router-context.mjs');
+    const ctx = getToolRouterContext();
+    const budget = ctx ? (ctx.memoryBudget ??= createMemoryBudget()) : createMemoryBudget();
+    if (budget.searches >= MEMORY_SEARCH_CALL_LIMIT || budget.remaining < 180) {
+      suppressToolForTurn(name);
+      return memoryBudgetNotice(budget, 'Memory search limit reached. Use the existing results.');
     }
-    return parts.length ? parts.join('\n\n') : `No stored memories match "${query}".`;
+    const query = typeof args.query === 'string' ? args.query.slice(0, 500) : '';
+    const intent = memorySearchIntent(query);
+    const type = ['profile', 'episodes', 'all'].includes(args.type) ? args.type : (intent?.type || 'all');
+    const offset = Math.max(0, Math.min(5000, Math.floor(Number(args.offset) || 0)));
+    const key = `${type}:${intent?.query ?? normalizeMemoryQuery(query)}:${offset}`;
+    if (budget.queries.has(key)) {
+      suppressToolForTurn(name);
+      return memoryBudgetNotice(budget, 'This memory search was already supplied. Answer from those results.');
+    }
+    // Reserve before awaiting: parallel calls share one quota, too.
+    budget.queries.add(key); budget.searches++;
+    if (budget.searches >= MEMORY_SEARCH_CALL_LIMIT) suppressToolForTurn(name);
+    let result;
+    try { result = await searchMemories({ userId, query, type, offset }); }
+    catch { result = { rows: [], counts: {}, unavailable: true, partial: true }; }
+    const rendered = renderMemorySearch(result, budget);
+    if (budget.remaining < 180) suppressToolForTurn(name);
+    return rendered.text;
   }
 
   if (name === 'forget_fact') {

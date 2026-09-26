@@ -127,7 +127,10 @@ function persistedToolCallBatches(row, rowIndex, keepFullResult) {
       }));
   }
 
-  const calls = records.map((record, callIndex) => {
+  // Memory search results are transient retrieval context. Replaying pages
+  // from old turns would bypass the current turn's memory budget and topic
+  // filter. The visible answer remains ordinary conversation history.
+  const calls = records.filter(record => record.name !== 'recall_facts').map((record, callIndex) => {
     const retained = record.result == null ? null : String(record.result.text ?? '');
     const output = keepFullResult
       ? (retained || MISSING_TOOL_RESULT)
@@ -299,4 +302,3 @@ export function historyMessageChars(message) {
   try { return JSON.stringify(message).length; }
   catch { return String(message?.content ?? '').length; }
 }
-

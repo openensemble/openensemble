@@ -33,17 +33,12 @@ import fs from 'fs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { effectiveCpuCount } from '../lib/cpu-count.mjs';
 import { ensureGguf } from '../lib/model-fetch.mjs';
+import { REASON_TASK_TOKENS, reasonTaskInput } from './reason-prompts.mjs';
 
 // Task tokens added to the SmolLM2 vocab during training (see training/train.py).
 // Prepended to the user content so the multi-task adapter routes to the right
 // head. Must match the training format exactly — do not reformat casing/spacing.
-const TASK_TOKENS = {
-  salience: '<salience>',
-  contradiction: '<contradiction>',
-  signals: '<signals>',
-  friction: '<friction>',
-  summary: '<summary>',
-};
+const TASK_TOKENS = REASON_TASK_TOKENS;
 
 // Keep identical to training/train.py system prompt; changing this at inference
 // time nudges the model off-distribution.
@@ -112,11 +107,10 @@ export async function initBuiltinReason() {
 // then pre-tokenize with specialTokens=true so <|im_start|>/<|im_end|> and the
 // task prefix token resolve to their single vocabulary IDs.
 function _buildPromptTokens(system, user, task) {
-  const prefix = task && TASK_TOKENS[task] ? `${TASK_TOKENS[task]} ` : '';
   const sys = system ?? DEFAULT_SYSTEM;
   const text =
     `<|im_start|>system\n${sys}<|im_end|>\n` +
-    `<|im_start|>user\n${prefix}${user ?? ''}<|im_end|>\n` +
+    `<|im_start|>user\n${reasonTaskInput(user, task)}<|im_end|>\n` +
     `<|im_start|>assistant\n`;
   return _model.tokenize(text, true);
 }
@@ -130,7 +124,8 @@ function _buildPromptTokens(system, user, task) {
  *   user: string,
  *   temperature?: number,
  *   maxTokens?: number,
- *   task?: 'salience'|'contradiction'|'signals'|'friction'|'summary'|null,
+ *   signal?: AbortSignal,
+ *   task?: 'salience'|'contradiction'|'signals'|'friction'|'summary'|'relevance'|null,
  * }} args
  * @returns {Promise<string|null>} trimmed text, or null on failure
  */
@@ -140,10 +135,13 @@ export async function builtinGenerate({
   temperature = 0.01,
   maxTokens = 256,
   task = null,
+  signal,
 } = {}) {
   const run = async () => {
     try {
+      signal?.throwIfAborted();
       await initBuiltinReason();
+      signal?.throwIfAborted();
 
       const tokens = _buildPromptTokens(system, user, task);
       const sequence = _context.getSequence();
@@ -154,13 +152,14 @@ export async function builtinGenerate({
           // Training was greedy (do_sample=False); 0 keeps that. Non-zero
           // only used by callers that want sampling variety for summaries.
           temperature,
+          signal,
         });
         return typeof response === 'string' ? response.trim() : null;
       } finally {
         if (typeof sequence.dispose === 'function') sequence.dispose();
       }
     } catch (e) {
-      console.warn('[cortex] Builtin reason generation failed:', e.message);
+      if (!signal?.aborted) console.warn('[cortex] Builtin reason generation failed:', e.message);
       return null;
     }
   };
