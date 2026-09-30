@@ -81,19 +81,16 @@ export const FIREWORKS_BASE   = 'https://api.fireworks.ai/inference/v1/workflows
 export const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
 export const OPENAI_OAUTH_BASE = 'https://chatgpt.com/backend-api/codex';
 
-const OLLAMA_URL_DEFAULT = 'http://localhost:11434/api/chat';
 export function getOllamaUrl(agentOrProvider = null) {
   const cfg = loadConfig();
   const provider = typeof agentOrProvider === 'string'
     ? agentOrProvider
     : agentOrProvider?.provider;
-  if (provider === 'ollama-local') {
-    const localBase = String(cfg?.cortex?.ollamaLocalUrl || 'http://localhost:11434')
-      .replace(/\/+$/, '');
-    return /\/api$/i.test(localBase) ? `${localBase}/chat` : `${localBase}/api/chat`;
-  }
-  const base = cfg?.cortex?.ollamaUrl;
-  return base ? base.replace(/\/$/, '') + '/chat' : OLLAMA_URL_DEFAULT;
+  const base = String(provider === 'ollama-local'
+    ? (cfg?.cortex?.ollamaLocalUrl || 'http://localhost:11434')
+    : (cfg?.cortex?.ollamaUrl || 'https://ollama.com/api'))
+    .replace(/\/+$/, '');
+  return /\/api$/i.test(base) ? `${base}/chat` : `${base}/api/chat`;
 }
 export function getOllamaKey(agentOrProvider = null) {
   const cfg = loadConfig();
@@ -395,7 +392,7 @@ export function buildImageUserMessage(provider, images, text) {
       ],
     };
   }
-  if (provider === 'ollama') {
+  if (provider === 'ollama' || provider === 'ollama-local') {
     return { role: 'user', content: text, images: safeImages.map(i => i.base64) };
   }
   // OpenAI Chat-Completions + Responses API both accept image_url parts

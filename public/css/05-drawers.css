@@ -192,7 +192,7 @@
 .model-option { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
   border-radius: 6px; font-size: 13px; }
 .provider-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
-.dot-ollama    { background: #4caf50; }
+.dot-ollama, .dot-ollama-local { background: #4caf50; }
 .dot-lmstudio  { background: #ff9800; }
 .dot-anthropic { background: #7c6af7; }
 .dot-grok      { background: #00b4d8; }

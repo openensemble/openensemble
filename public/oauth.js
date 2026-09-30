@@ -888,7 +888,8 @@ function renderVisionModelSelect(currentProvider, currentModel) {
   // Group by provider, label local/cloud Ollama tiers separately for clarity.
   const groups = {};
   const labelFor = (m) => {
-    if (m.provider === 'ollama')   return m.tier === 'cloud' ? 'Ollama (cloud)' : 'Ollama (local)';
+    if (m.provider === 'ollama')   return 'Ollama (cloud)';
+    if (m.provider === 'ollama-local') return 'Ollama (local)';
     if (m.provider === 'lmstudio') return 'LM Studio (local)';
     if (m.provider === 'anthropic')return 'Anthropic';
     if (m.provider === 'openai-oauth') return 'ChatGPT (OAuth)';
@@ -1492,6 +1493,9 @@ async function toggleProvider(provider, enabled) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabledProviders: { [provider]: enabled } }),
     });
+    if ((provider === 'ollama' || provider === 'ollama-local') && typeof loadModels === 'function') {
+      await loadModels();
+    }
     // Re-render model lists so agent dropdowns reflect the change
     if (typeof renderModelBrowser === 'function') renderModelBrowser();
     if (typeof renderAgentModelRows === 'function') renderAgentModelRows();

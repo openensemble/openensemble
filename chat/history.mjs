@@ -273,7 +273,7 @@ export function adaptLlmHistoryForProvider(messages, provider) {
     return out;
   }
 
-  if (provider === 'ollama') {
+  if (provider === 'ollama' || provider === 'ollama-local') {
     return rows.map(row => {
       if (row?.role === 'assistant' && Array.isArray(row.tool_calls)) {
         return {

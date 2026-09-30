@@ -94,7 +94,7 @@ export async function recordActivity(userId, agentId, { message = false, apiCall
 
 // ── Token usage tracking ────────────────────────────────────────────────────
 function estimateCost(provider, model, input, output) {
-  if (provider === 'ollama' || provider === 'lmstudio') return 0; // local models
+  if (provider === 'ollama' || provider === 'ollama-local' || provider === 'lmstudio') return 0;
   if (provider === 'anthropic') return (input * 3 + output * 15) / 1_000_000;
   if (provider === 'fireworks') return (input * 3 + output * 15) / 1_000_000;
   if (provider === 'grok') return (input * 5 + output * 15) / 1_000_000;

@@ -116,15 +116,8 @@ function allAvailableModels({ unfiltered = false } = {}) {
     const key = `${m.provider}::${m.name}`;
     if (!seen.has(key)) { seen.add(key); merged.push(m); }
   }
-  // Filter out disabled providers. Ollama is special: cloud and local share
-  // m.provider==='ollama' but each has its own toggle (`ollama` for cloud,
-  // `ollama-local` for local), so map per tier before checking.
-  const providerKey = (m) => {
-    if (m.provider !== 'ollama') return m.provider;
-    return m.tier === 'local' ? 'ollama-local' : 'ollama';
-  };
   const filtered = merged
-    .filter(m => typeof isProviderEnabled !== 'function' || isProviderEnabled(providerKey(m)))
+    .filter(m => typeof isProviderEnabled !== 'function' || isProviderEnabled(m.provider))
     .filter(m => !_isSystemInternalModel(m));
   // Unless unfiltered requested (admin UI), restrict to user's allowed models.
   if (!unfiltered && _currentUser?.allowedModels != null) {
@@ -138,7 +131,7 @@ function groupModelsByProvider(models, { splitOllamaTier = false } = {}) {
   const out = {};
   for (const m of models) {
     let key = m.provider ?? 'other';
-    if (splitOllamaTier && key === 'ollama') key = m.tier === 'cloud' ? 'ollama-cloud' : 'ollama-local';
+    if (splitOllamaTier && key === 'ollama') key = 'ollama-cloud';
     (out[key] ??= []).push(m);
   }
   return out;
@@ -363,9 +356,8 @@ function renderAgentModelRows() {
   const models = allAvailableModels();
   if (!agents.length) { $('agentModelRows').innerHTML = '<div style="color:var(--muted)">No agents loaded.</div>'; return; }
   const anthropicOpts    = models.filter(m => m.provider === 'anthropic');
-  const ollamaAll        = models.filter(m => m.provider === 'ollama');
-  const ollamaLocalOpts  = ollamaAll.filter(m => (m.tier ?? 'local') === 'local');
-  const ollamaCloudOpts  = ollamaAll.filter(m => m.tier === 'cloud');
+  const ollamaLocalOpts  = models.filter(m => m.provider === 'ollama-local');
+  const ollamaCloudOpts  = models.filter(m => m.provider === 'ollama');
   const lmsOpts          = models.filter(m => m.provider === 'lmstudio');
   const fireworksOpts    = models.filter(m => m.provider === 'fireworks');
   const grokOpts         = models.filter(m => m.provider === 'grok');
@@ -376,6 +368,11 @@ function renderAgentModelRows() {
   function makeAgentModelSelect(a) {
     if (!models.length) return `<select data-change-action="assignModelToAgentFromSelect" data-change-args='${JSON.stringify([a.id, "$value"]).replace(/'/g, "&#39;")}'><option value="${escHtml(a.model)}||${a.provider ?? 'ollama'}" selected>${escHtml(a.model)}</option></select>`;
     const mkOpt = m => `<option value="${escHtml(m.name)}||${m.provider}" ${m.name === a.model && m.provider === a.provider ? 'selected' : ''}>${escHtml(m.displayName ?? m.name)}</option>`;
+    // Preserve a stale selection until the user explicitly chooses its new
+    // provider. Otherwise a local-only list silently displays its first model
+    // while the agent still has the old cloud provider saved.
+    const orphan = models.some(m => m.name === a.model && m.provider === a.provider) ? ''
+      : `<option value="${escHtml(a.model)}||${escHtml(a.provider ?? '')}" selected>${escHtml(a.model)} (unavailable)</option>`;
     const compatGroups = compatMeta.map(p => {
       const opts = models.filter(m => m.provider === p.id);
       if (!opts.length) return '';
@@ -383,6 +380,7 @@ function renderAgentModelRows() {
       return `<optgroup label="${escHtml(label)}">${opts.map(mkOpt).join('')}</optgroup>`;
     }).join('');
     return `<select data-change-action="assignModelToAgentFromSelect" data-change-args='${JSON.stringify([a.id, "$value"]).replace(/'/g, "&#39;")}'>
+      ${orphan}
       ${anthropicOpts.length  ? `<optgroup label="Anthropic">${anthropicOpts.map(mkOpt).join('')}</optgroup>`          : ''}
       ${compatGroups}
       ${ollamaLocalOpts.length? `<optgroup label="Ollama (local)">${ollamaLocalOpts.map(mkOpt).join('')}</optgroup>`   : ''}
@@ -1035,4 +1033,3 @@ function switchSettingsTab(name) {
   if (name === 'browser' && typeof loadBrowserBridge === 'function') loadBrowserBridge();
   if (name === 'personalization' && typeof renderPersonalizationPanel === 'function') renderPersonalizationPanel();
 }
-

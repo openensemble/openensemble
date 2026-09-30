@@ -36,6 +36,10 @@ OpenEnsemble doesn't ship with a default model — you bring your own. Providers
 
 > If OE and Ollama/LM Studio are on the same machine, you *can* use `localhost`. But if Ollama is on your desktop and OE is in an LXC, a Pi, or a Docker container, `localhost` points OE at *itself* and the connection fails. Always use the actual LAN IP of the host running the model server. Make sure that host's firewall allows the port (11434 / 1234) and that Ollama/LM Studio is configured to listen on `0.0.0.0` rather than only `127.0.0.1`.
 
+Ollama local and cloud have separate URLs, credentials, and model selections. Local model discovery uses the URL saved under **Settings → Providers → Ollama (local)**. In the supplied Docker Compose setup, `http://host.docker.internal:11434` reaches Ollama on the Docker host if Ollama is listening on an interface reachable by the container. Leave the local API key empty unless your own proxy requires one. An Ollama Cloud key is not needed for local inference.
+
+If an older installation returns **401 Unauthorized** after selecting a local model, edit the affected agent, select the model again under **Ollama (local)**, and save. Older versions could save a local model as a cloud selection. Existing selections are not automatically moved between providers; reselecting after updating corrects the saved provider.
+
 ## Environment-variable overrides
 
 Instead of pasting API keys into `config.json` (where they sit as plain text on disk), you can set them as shell environment variables before starting OE. The server reads from the environment first; values found there **override** anything in `config.json`.

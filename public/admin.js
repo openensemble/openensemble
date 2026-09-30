@@ -135,7 +135,7 @@ async function loadUserManagement() {
           // Split Ollama into local vs cloud tiers so admins can grant access
           // by where the model actually runs.
           let prov = m.provider ?? 'other';
-          if (prov === 'ollama') prov = m.tier === 'cloud' ? 'ollama-cloud' : 'ollama-local';
+          if (prov === 'ollama') prov = 'ollama-cloud';
           if (!grouped[prov]) grouped[prov] = [];
           grouped[prov].push(m);
         }

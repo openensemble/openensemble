@@ -45,9 +45,8 @@ Return [] if no transactions found. Output ONLY the JSON array.`;
  * @returns {Promise<object[]>} Raw extracted transaction objects (unfiltered)
  */
 export async function extractTransactions(cfg, { isImage, mimeType, base64, extractedText }) {
-  const visionProvider = cfg.visionProvider ?? (cfg.anthropicApiKey ? 'anthropic' : 'ollama');
+  const visionProvider = cfg.visionProvider ?? (cfg.anthropicApiKey ? 'anthropic' : 'ollama-local');
   const visionModel    = cfg.visionModel    ?? (visionProvider === 'anthropic' ? 'claude-sonnet-4-6' : visionProvider === 'lmstudio' ? 'local-model' : 'llava:latest');
-  const ollamaUrl      = cfg.cortex?.ollamaUrl   ?? 'http://localhost:11434';
   const lmstudioUrl    = cfg.cortex?.lmstudioUrl ?? 'http://127.0.0.1:1234';
   let rawJson = '[]';
 
@@ -65,13 +64,20 @@ export async function extractTransactions(cfg, { isImage, mimeType, base64, extr
     if (!r.ok) throw new Error(`Anthropic error ${r.status}: ${await r.text()}`);
     rawJson = (await r.json()).content?.[0]?.text ?? '[]';
 
-  } else if (visionProvider === 'ollama') {
+  } else if (visionProvider === 'ollama' || visionProvider === 'ollama-local') {
+    const local = visionProvider === 'ollama-local';
+    const ollamaBase = String(local
+      ? (cfg.cortex?.ollamaLocalUrl || 'http://localhost:11434')
+      : (cfg.cortex?.ollamaUrl || 'https://ollama.com/api'))
+      .replace(/\/+$/, '').replace(/\/api$/i, '');
+    const key = local ? cfg.cortex?.ollamaLocalApiKey
+      : (cfg.cortex?.ollamaApiKey ?? cfg.ollamaApiKey);
     const userMsg = isImage && base64
       ? { role: 'user', content: 'Extract all transactions from this receipt/invoice/statement. ' + EXPENSE_SYSTEM_MSG, images: [base64] }
       : { role: 'user', content: `Extract all transactions from this document:\n\n${extractedText}\n\n${EXPENSE_SYSTEM_MSG}` };
-    const r = await fetch(`${ollamaUrl}/api/chat`, {
+    const r = await fetch(`${ollamaBase}/api/chat`, {
       method: 'POST', signal: AbortSignal.timeout(60000),
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
       body: JSON.stringify({ model: visionModel, stream: false, messages: [userMsg] }),
     });
     if (!r.ok) throw new Error(`Ollama error ${r.status}`);

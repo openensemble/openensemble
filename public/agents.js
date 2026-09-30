@@ -255,7 +255,7 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
     curProvider = agent.provider;
   } else {
     curModel = 'qwen2.5:7b';
-    curProvider = 'ollama';
+    curProvider = 'ollama-local';
   }
   const all = allAvailableModels();
   const mkOpt = m => {
@@ -263,9 +263,8 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
     return `<option value="${escHtml(m.name)}||${m.provider}" ${selected}>${escHtml(m.displayName ?? m.name)}</option>`;
   };
   const byProv = p => all.filter(m => m.provider === p);
-  const ollamaAll       = byProv('ollama');
-  const ollamaLocalOpts = ollamaAll.filter(m => (m.tier ?? 'local') === 'local');
-  const ollamaCloudOpts = ollamaAll.filter(m => m.tier === 'cloud');
+  const ollamaLocalOpts = byProv('ollama-local');
+  const ollamaCloudOpts = byProv('ollama');
   const groups = [
     ['Anthropic',                  byProv('anthropic')],
     ['OpenAI ✨',                   byProv('openai')],
@@ -290,7 +289,7 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
   // first-seen model order covers any provider that predates its metadata load.
   const groupedProviders = new Set([
     'anthropic', 'openai', 'openai-oauth', 'xai-oauth', 'gemini', 'deepseek',
-    'mistral', 'groq', 'together', 'perplexity', 'ollama', 'lmstudio',
+    'mistral', 'groq', 'together', 'perplexity', 'ollama', 'ollama-local', 'lmstudio',
     'fireworks', 'grok', 'openrouter',
   ]);
   const compatMeta = typeof window.getCompatProviderMeta === 'function'
@@ -307,7 +306,7 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
   }
   sel.innerHTML = all.length
     ? groups.map(([label, list]) => list.length ? `<optgroup label="${escHtml(label)}">${list.map(mkOpt).join('')}</optgroup>` : '').join('')
-    : `<option value="qwen2.5:7b||ollama">qwen2.5:7b</option>`;
+    : `<option value="qwen2.5:7b||ollama-local">qwen2.5:7b</option>`;
   // If the agent's saved model isn't in the dropdown (provider disabled / not yet loaded),
   // inject it so the select reflects reality instead of silently defaulting to option 0.
   if (agent?.model && !all.some(m => m.name === curModel && m.provider === curProvider)) {

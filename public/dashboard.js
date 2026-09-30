@@ -213,7 +213,7 @@ async function loadDashboard() {
           const modelRows = models.map(([key, d]) => {
             const [prov, model] = key.split('||');
             const shortModel = model?.length > 30 ? model.slice(0, 27) + '...' : model;
-            const provBadge = prov === 'anthropic' ? icon('cloud', 12) : (prov === 'ollama' || prov === 'lmstudio') ? icon('server', 12) : icon('globe', 12);
+            const provBadge = prov === 'anthropic' ? icon('cloud', 12) : (prov === 'ollama-local' || prov === 'lmstudio') ? icon('server', 12) : icon('globe', 12);
             return `<div style="display:flex;gap:8px;font-size:10px;color:var(--muted);padding:2px 0">
               <span>${provBadge}</span>
               <span style="flex:1">${escHtml(shortModel)}</span>

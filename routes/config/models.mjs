@@ -350,34 +350,37 @@ export async function tryHandleModelRoutes(req, res) {
     if (req.url === '/api/models') {
       const authId = requireAuth(req, res); if (!authId) return true;
       const cfg = loadConfig();
-      const configuredOllamaBase = (cfg.cortex?.ollamaUrl ?? OLLAMA_DEFAULT).replace(/\/api\/?$/, '');
-      const ollamaKey  = cfg.cortex?.ollamaApiKey ?? null;
+      const ollamaBase = raw => String(raw).replace(/\/+$/, '').replace(/\/api$/i, '');
+      const configuredOllamaBase = ollamaBase(cfg.cortex?.ollamaUrl || OLLAMA_DEFAULT);
+      const localOllamaBase = ollamaBase(cfg.cortex?.ollamaLocalUrl || 'http://localhost:11434');
+      const ollamaKey  = cfg.cortex?.ollamaApiKey ?? cfg.ollamaApiKey ?? null;
       const ollamaHeaders = ollamaKey ? { Authorization: `Bearer ${ollamaKey}` } : {};
+      const localOllamaKey = cfg.cortex?.ollamaLocalApiKey ?? null;
+      const localOllamaHeaders = localOllamaKey ? { Authorization: `Bearer ${localOllamaKey}` } : {};
       const lmsBase    = cfg.cortex?.lmstudioUrl ?? LMS_DEFAULT;
       const lmsKey     = cfg.cortex?.lmstudioApiKey ?? cfg.lmstudioApiKey ?? null;
       const lmsHeaders = lmsKey ? { Authorization: `Bearer ${lmsKey}` } : {};
 
-      // Always probe localhost for local Ollama, even when cortex.ollamaUrl points
-      // at the cloud — so users running both see both sets. Skip localhost if the
-      // configured URL already *is* localhost (avoid duplicate fetch).
-      const LOCAL = 'http://localhost:11434';
-      const probeLocal = !configuredOllamaBase.startsWith('http://localhost') && !configuredOllamaBase.startsWith('http://127.0.0.1');
-      const isCloudUrl = /ollama\.com/i.test(configuredOllamaBase);
+      let isCloudUrl = false;
+      try { isCloudUrl = new URL(configuredOllamaBase).hostname.toLowerCase() === 'ollama.com'; }
+      catch { /* A malformed cloud URL must not prevent local discovery. */ }
 
       // Classify an Ollama model as local or cloud. Local daemon proxies cloud
       // models via a `:cloud` tag or `remote_host` field — those are still cloud.
       const classifyOllama = (m, sourceIsCloud) => {
         if (sourceIsCloud) return 'cloud';
         if (m.remote_host) return 'cloud';
-        if (typeof m.name === 'string' && m.name.endsWith(':cloud')) return 'cloud';
+        if (typeof m.name === 'string' && /[:-]cloud$/.test(m.name)) return 'cloud';
         return 'local';
       };
 
-      const fetchOllamaTags = (base, headers, sourceIsCloud) =>
+      const fetchOllamaTags = (base, headers, provider, sourceIsCloud) =>
         fetch(`${base}/api/tags`, { headers, signal: AbortSignal.timeout(3000) })
-          .then(r => r.json())
-          .then(d => (d.models ?? []).map(m => ({
-            name: m.name, provider: 'ollama', tier: classifyOllama(m, sourceIsCloud),
+          .then(r => r.ok ? r.json() : { models: [] })
+          .then(d => (Array.isArray(d.models) ? d.models : []).filter(m => m?.name).map(m => ({
+            name: m.name, provider, tier: classifyOllama(m, sourceIsCloud),
+            ...(provider === 'ollama-local' && classifyOllama(m, sourceIsCloud) === 'cloud'
+              ? { displayName: `${m.name} (cloud via local Ollama)` } : {}),
             supportsVision: supportsVision('ollama', m.name),
             supportsImageGeneration: supportsImageGeneration('ollama', m.name),
             capabilities: [
@@ -387,10 +390,16 @@ export async function tryHandleModelRoutes(req, res) {
           })));
 
       const ollamaFetches = [];
-      // Configured URL (may be local OR cloud)
-      ollamaFetches.push(fetchOllamaTags(configuredOllamaBase, ollamaHeaders, isCloudUrl));
-      // Localhost probe (only when configured URL wasn't already localhost)
-      if (probeLocal) ollamaFetches.push(fetchOllamaTags(LOCAL, {}, false));
+      // Provider identifies the endpoint, even for cloud models proxied by a
+      // local daemon. Never send a local selection (or its key) to the cloud.
+      // The default cloud URL is saved even on local-only installs; only a
+      // cloud key makes that catalog configured.
+      if (cfg.enabledProviders?.ollama !== false && ollamaKey) {
+        ollamaFetches.push(fetchOllamaTags(configuredOllamaBase, ollamaHeaders, 'ollama', isCloudUrl));
+      }
+      if (cfg.enabledProviders?.['ollama-local'] !== false) {
+        ollamaFetches.push(fetchOllamaTags(localOllamaBase, localOllamaHeaders, 'ollama-local', false));
+      }
 
       const normalizeLmstudioCapabilities = (caps) => {
         if (Array.isArray(caps)) return caps;
@@ -461,11 +470,11 @@ export async function tryHandleModelRoutes(req, res) {
         ...ollamaFetches,
       ]);
 
-      // Merge Ollama results and dedupe on canonical-name + tier. The cloud catalog
+      // Merge Ollama results and dedupe on provider + canonical name. The cloud catalog
       // exposes the same model under both a bare name (`glm-4.7`, `cogito-2.1:671b`)
       // and a suffixed alias (`glm-4.7:cloud`, `cogito-2.1:671b-cloud`); without
-      // canonicalization the picker shows duplicates. Local-tier entries skip the
-      // strip so a real `something-cloud` local pull (rare) wouldn't collapse.
+      // canonicalization the picker shows duplicates. Local-server entries keep
+      // their exact names, including aliases that the daemon forwards to cloud.
       const canonicalCloudName = (name) => {
         if (typeof name !== 'string') return name;
         if (name.endsWith(':cloud')) return name.slice(0, -':cloud'.length);
@@ -477,13 +486,13 @@ export async function tryHandleModelRoutes(req, res) {
       for (const r of ollamaResults) {
         if (r.status !== 'fulfilled') continue;
         for (const m of r.value) {
-          const canonical = m.tier === 'cloud' ? canonicalCloudName(m.name) : m.name;
-          const key = `${canonical}::${m.tier}`;
+          const canonical = m.provider === 'ollama' && isCloudUrl ? canonicalCloudName(m.name) : m.name;
+          const key = `${m.provider}::${canonical}`;
           if (ollamaSeen.has(key)) continue;
           ollamaSeen.add(key);
           // Prefer the bare canonical form so the picker shows e.g. `glm-4.7`
           // instead of `glm-4.7:cloud` even if the suffixed variant arrived first.
-          ollamaMerged.push(m.tier === 'cloud' && canonical !== m.name ? { ...m, name: canonical } : m);
+          ollamaMerged.push(canonical !== m.name ? { ...m, name: canonical } : m);
         }
       }
 

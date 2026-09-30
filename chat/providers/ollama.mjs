@@ -130,7 +130,10 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
         continue;
       }
       console.error(`[ollama] ERROR ${res.status} agent=${agent.id} model=${agent.model}`);
-      yield { type: 'error', message: `Ollama error ${res.status}: ${err}` };
+      const hint = res.status === 401 && agent.provider === 'ollama'
+        ? ' Check the Ollama Cloud API key, or select the model under Ollama (local) in the agent settings.'
+        : '';
+      yield { type: 'error', message: `Ollama error ${res.status}: ${err}${hint}` };
       return;
     }
 
@@ -217,7 +220,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           type: '__usage',
           inputTokens: ollamaInputTokens,
           outputTokens: ollamaOutputTokens,
-          provider: 'ollama',
+          provider: agent.provider || 'ollama',
           model: agent.model,
         };
       }
@@ -339,7 +342,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           type: '__usage',
           inputTokens: ollamaInputTokens,
           outputTokens: ollamaOutputTokens,
-          provider: 'ollama',
+          provider: agent.provider || 'ollama',
           model: agent.model,
         };
       }
