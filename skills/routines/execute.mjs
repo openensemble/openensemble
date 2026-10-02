@@ -6,8 +6,10 @@ function summarizeAction(a) {
   switch (a.type) {
     case 'ha_scene':     return `activate ${a.scene_id}`;
     case 'ha_call':      return `${a.domain}.${a.service}${a.data?.entity_id ? ` (${a.data.entity_id})` : ''}`;
+    case 'delay':        return `wait ${a.seconds} seconds`;
     case 'play_ambient': return `play ${a.file}${a.loop !== false ? ' on loop' : ''}`;
     case 'tts_say':      return `say "${a.text}"`;
+    case 'run_prompt':   return `ask: "${a.prompt}"`;
     default:             return a.type;
   }
 }
@@ -53,7 +55,7 @@ async function execCreateRoutine(args, userId) {
   if (!persisted) {
     // cleanRoutine in lib/routines.mjs rejected the input — surface why rather
     // than silently dropping.
-    return `Error: routine did not pass validation. Check action types and required fields (ha_scene needs scene_id, ha_call needs domain+service+data, play_ambient needs file, tts_say needs text).`;
+    return `Error: routine did not pass validation. Check action types and required fields (ha_scene needs scene_id, ha_call needs domain+service+data, delay needs seconds from 1 to 86400, play_ambient needs file, tts_say needs text, run_prompt needs prompt).`;
   }
   return `Routine ${action}: ${summarizeRoutine(persisted)}`;
 }

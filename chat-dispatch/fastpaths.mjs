@@ -8,10 +8,10 @@
  * and return. The caller still owns finalizeTurn() because the cleanup tuple
  * lives next to the abortController / busy-slot that's set up in handleChatMessage.
  *
- *   1. Home Assistant — "turn on/off X", "lock X", "set X to N%", etc.
- *   2. Routine        — user-defined trigger → ordered action list
- *                       (voice-device only; may return a `followupPrompt`
+ *   1. Routine        — user-defined trigger → ordered action list
+ *                       (voice or chat; may return a `followupPrompt`
  *                       that re-enters handleChatMessage)
+ *   2. Home Assistant — "turn on/off X", "lock X", "set X to N%", etc.
  *   3. Trivia (clock) — "what time is it", "what's the date", etc.
  */
 
@@ -137,13 +137,26 @@ async function resolvePhrase(phrase, userId, suppressLearning = false) {
  * tryHaFastpath still runs (and learns) if the turn proceeds. Fail-closed.
  */
 export async function probeHaCommand(text, userId) {
-  if (!text || !hasHaIntentSyntax(text)) return null;
+  if (!text) return null;
   try {
     if (!await fastpathToolAllowed(userId, HA_SKILL_ID, HA_SERVICE_TOOL)) return null;
+    const saved = await savedHaIntent(text, userId);
+    if (saved) return saved;
+    if (!hasHaIntentSyntax(text)) return null;
     return await classifyHaIntent(text, userId, true);
   } catch {
     return null;
   }
+}
+
+async function savedHaIntent(text, userId) {
+  const { findSavedHaFastpath } = await import('../lib/saved-fastpaths.mjs');
+  const saved = findSavedHaFastpath(userId, text);
+  if (!saved) return null;
+  const { entity_id, domain, service, data } = saved.fixedArgs;
+  return { entity_id, domain: entity_id.split('.')[0], serviceDomain: domain,
+    service, ...(data ? { data } : {}), friendly_name: entity_id.split('.')[1].replace(/_/g, ' '),
+    verb: service, saved: true };
 }
 
 async function classifyHaIntent(text, userId, suppressLearning = false) {
@@ -307,8 +320,22 @@ async function executeHaIntent(intent) {
  * @returns {Promise<{ handled: true, trace?: { name: string, args: object, result: string, status: string, durationMs: number } } | null>}
  */
 export async function tryHaFastpath({ userText, userId, agentId, onEvent, suppressLearning = false }) {
-  if (!userText || !hasHaIntentSyntax(userText)) return null;
+  if (!userText) return null;
   const startedAt = Date.now();
+  let bound = null;
+  async function savedFailure(message) {
+    const text = `The saved fast path could not complete: ${message}`;
+    if (await persistFastpath(`${userId}_${agentId}`, [
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: text, ts: Date.now() },
+    ], onEvent, agentId, 'saved-ha-fastpath')) {
+      onEvent({ type: 'token', text, agent: agentId });
+      onEvent({ type: 'done', agent: agentId });
+    }
+    return { handled: /** @type {const} */ (true), trace: { name: HA_SERVICE_TOOL,
+      args: { entity_id: bound.entity_id, domain: bound.serviceDomain, service: bound.service, ...(bound.data ? { data: bound.data } : {}) },
+      result: text, status: 'error', durationMs: Date.now() - startedAt } };
+  }
   // HA control stays GLOBAL (any agent fast-paths it): a light/lock command is
   // harmless and universal, and short-circuiting it to ~200ms from whatever
   // chat you're in beats falling through to an LLM + escalation. Inbox reading
@@ -322,10 +349,13 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent, suppre
       console.log('[chat] ha-fastpath: gated by runtime skill policy — falling through to LLM');
       return null;
     }
-    const haIntent = await classifyHaIntent(userText, userId, suppressLearning);
+    bound = await savedHaIntent(userText, userId);
+    if (!bound && !hasHaIntentSyntax(userText)) return null;
+    const haIntent = bound || await classifyHaIntent(userText, userId, suppressLearning);
     if (!haIntent) return null;
     const result = await executeHaIntent(haIntent);
     if (result.error) {
+      if (bound) return await savedFailure(result.error);
       console.log(`[chat] ha-fastpath miss-then-error: ${result.error} — falling through to LLM`);
       return null;
     }
@@ -353,13 +383,14 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent, suppre
     console.log(`[chat] ha-fastpath: ${haIntent.verb} ${haIntent.entity_id}`);
     return { handled: true, trace };
   } catch (e) {
+    if (bound) return await savedFailure(e.message);
     console.warn('[chat] ha-fastpath threw, falling through:', e.message);
     return null;
   }
 }
 
 /**
- * Try the routine fast-path. Voice-device only. On match, executes the routine
+ * Try the routine fast-path for a user voice or chat turn. On match, executes the routine
  * (lights, ambient, etc.) and emits the spoken reply. If the routine contains
  * a `run_prompt` action, returns `{handled: true, followupPrompt, targetDeviceId}`
  * so the caller can re-enter handleChatMessage with that prompt as the new
@@ -368,27 +399,37 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent, suppre
  * @returns {Promise<{ handled: true, followupPrompt?: string, targetDeviceId?: string } | null>}
  */
 export async function tryRoutineFastpath({ source, userText, userId, agentId, deviceId, _isRoutineFollowup, onEvent }) {
-  if (!(source === 'voice-device' && userText && deviceId && !_isRoutineFollowup)) return null;
+  if (!userText || !userId || _isRoutineFollowup) return null;
+  let matched = false;
   try {
     const routine = classifyRoutineIntent(userText, userId);
     if (!routine) return null;
+    matched = true;
+    const isVoice = source === 'voice-device';
     // routine.device_id, if set, overrides the originating device for
     // play_ambient + tts_say. Example: "goodnight" on the kitchen mic
     // can still play sounds in the bedroom. The originating device's WS
     // still gets the `done` event so its chat stream closes cleanly.
     const targetDeviceId = resolveRoutineDeviceId(routine, deviceId);
     const targetDiffers = targetDeviceId && targetDeviceId !== deviceId;
-    const result = await executeRoutine(routine, { userId, deviceId: targetDeviceId });
-    const reply = result.text || '';
+    const result = await executeRoutine(routine, { userId, deviceId: targetDeviceId, agentId });
+    let reply = result.text || '';
     const ambient = Array.isArray(result.ambient) ? result.ambient : [];
+    if (ambient.length && !targetDeviceId) {
+      reply = [reply, 'Choose a target voice device in this routine to play its ambient audio.'].filter(Boolean).join(' ');
+    } else if (!isVoice && !reply && !result.followupPrompt) {
+      reply = result.scheduled
+        ? 'Routine started. I’ll continue with the remaining actions after the wait.'
+        : 'Routine completed.';
+    }
     let ttsMs = 0; // spoken duration of the reply, used to time ambient start
 
     // When the routine targets a different device, push the spoken reply to
     // THAT device via the MP3-marker path. speakRoutineTts reports the measured
     // audio duration so ambient can start exactly when the announcement ends.
-    if (reply && targetDiffers) {
+    if (result.text && targetDiffers) {
       try {
-        ({ durationMs: ttsMs } = await speakRoutineTts({ userId, deviceIds: [targetDeviceId], text: reply }));
+        ({ durationMs: ttsMs } = await speakRoutineTts({ userId, deviceIds: [targetDeviceId], text: result.text }));
       } catch (e) {
         console.warn(`[chat] routine cross-device tts push failed: ${e.message}`);
       }
@@ -399,7 +440,7 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
     // over the WS with no completion signal, so we estimate the duration;
     // cross-device used the measured MP3 length above. ttsMs<=0 → start now.
     const scheduleAmbient = (spokenMs) => {
-      if (!ambient.length) return;
+      if (!ambient.length || !targetDeviceId) return;
       const delay = spokenMs > 0 ? spokenMs + 300 : 0;
       setTimeout(() => {
         runDeferredAmbient(ambient, { userId, deviceId: targetDeviceId })
@@ -419,7 +460,10 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
       if (reply) {
         // Skip the WS token push when the routine is bound to a different
         // device — speakRoutineTts above already spoke it in the right room.
-        if (!targetDiffers) { onEvent({ type: 'token', text: reply, agent: agentId }); ttsMs = estimateTtsMs(reply); }
+        if (!targetDiffers || !isVoice) {
+          onEvent({ type: 'token', text: reply, agent: agentId });
+          if (isVoice && !targetDiffers) ttsMs = estimateTtsMs(reply);
+        }
       }
       scheduleAmbient(ttsMs);
       console.log(`[chat] routine-fastpath: ${routine.id} → followup prompt`);
@@ -427,19 +471,33 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
     }
     if (!await persistFastpath(`${userId}_${agentId}`, [
       { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', content: reply || '(routine executed silently)', ts: Date.now() }
+      { role: 'assistant', content: reply || (result.scheduled ? '(routine started; remaining actions scheduled)' : '(routine executed silently)'), ts: Date.now() }
     ], onEvent, agentId, 'routine')) return { handled: true };
     // Only stream the spoken reply over the originating WS when the routine
     // fires on that same device — otherwise speakRoutineTts above has already
     // pushed it to the target device.
-    if (reply && !targetDiffers) { onEvent({ type: 'token', text: reply, agent: agentId }); ttsMs = estimateTtsMs(reply); }
+    if (reply && (!targetDiffers || !isVoice)) {
+      onEvent({ type: 'token', text: reply, agent: agentId });
+      if (isVoice && !targetDiffers) ttsMs = estimateTtsMs(reply);
+    }
     scheduleAmbient(ttsMs);
     onEvent({ type: 'done', agent: agentId });
     console.log(`[chat] routine-fastpath: ${routine.id} actions=${routine.actions.length} errors=${result.errors.length} ambient=${ambient.length}`);
     return { handled: true };
   } catch (e) {
-    console.warn('[chat] routine-fastpath threw, falling through:', e.message);
-    return null;
+    console.warn('[chat] routine-fastpath failed:', e.message);
+    if (!matched) return null;
+    // Once a saved trigger matched, an execution error must not fall through
+    // to a generic HA command that could skip the routine's wait entirely.
+    const reply = 'I couldn’t complete that routine. Please check its actions.';
+    if (await persistFastpath(`${userId}_${agentId}`, [
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: reply, ts: Date.now() },
+    ], onEvent, agentId, 'routine')) {
+      onEvent({ type: 'token', text: reply, agent: agentId });
+      onEvent({ type: 'done', agent: agentId });
+    }
+    return { handled: true };
   }
 }
 

@@ -234,6 +234,16 @@ export default async function execute(name, args, userId, agentId) {
         else return `Skill "${skill.name}" has ${toolNames.length} tools — pass \`tool\` to say which one the phrase should run: ${toolNames.join(', ')}.`;
       }
     }
+    if (skill.id === 'role_home_assistant' && toolName === 'ha_call_service') {
+      try {
+        const { teachHaFastpath } = await import('../../lib/saved-fastpaths.mjs');
+        const saved = await teachHaFastpath(userId, phrase, args.tool_args);
+        return `Saved for your account. "${phrase}" → ${saved.deviceName} (${saved.fixedArgs.entity_id}), ${saved.fixedArgs.domain}.${saved.fixedArgs.service}.`
+          + ` You can see or remove it in Routines → Saved fast paths. Saving did not operate the device.`
+          + (saved.routine ? ` Your routine "${saved.routine}" uses this phrase and will run first.` : ' It takes effect on your next message.');
+      } catch (error) { return `Error: ${error.message}`; }
+    }
+    if (args.tool_args != null) return 'Error: fixed tool_args are currently supported for Home Assistant ha_call_service. Use a routine for other saved actions.';
     // Reuse an existing intent for this tool when one exists (the phrase joins
     // its learned utterances); otherwise mint a user_taught intent that
     // materializes standalone.
@@ -253,9 +263,10 @@ export default async function execute(name, args, userId, agentId) {
     const store = loadLearnedIntents(userId) || {};
     const intents = store[skillArg];
     if (!intents) return `No taught phrases stored for skill "${skillArg}".`;
-    const normPhrase = phrase.toLowerCase().replace(/\s+/g, ' ');
+    const { normalizePhrase } = await import('../../lib/routines.mjs');
+    const normPhrase = normalizePhrase(phrase);
     for (const [intentId, entry] of Object.entries(intents)) {
-      const hit = (entry?.utterances || []).find(u => u.toLowerCase().replace(/\s+/g, ' ') === normPhrase);
+      const hit = (entry?.utterances || []).find(u => normalizePhrase(u) === normPhrase);
       if (hit) {
         await removeLearnedUtterance(userId, skillArg, intentId, hit);
         return `Forgotten — "${hit}" no longer triggers ${entry.tool} locally. (It'll route through the normal assistant flow instead.)`;

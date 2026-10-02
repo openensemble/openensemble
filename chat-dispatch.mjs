@@ -1370,7 +1370,12 @@ export async function handleChatMessage({
       financePreprocess,
     ] : []),
     ...(allowIntentFastpaths
-      ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath, tryCalendarFastpath]
+      ? [
+          // A saved trigger is more specific than a generic device command.
+          // Generic device control must not bypass the saved action sequence.
+          ...((_hiddenUser || _isolatedTaskRun || _silent) ? [] : [tryRoutineFastpath]),
+          tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath,
+        ]
       : (allowVerifierHaFastpath ? [tryHaFastpath] : [])),
     // Skill-agnostic local cognition tier (dispatch face). Runs after the
     // bespoke fast-paths and before the embedding specialist router, so a

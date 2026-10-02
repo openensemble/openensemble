@@ -27,18 +27,43 @@
  */
 
 import { requireAuth, readBody } from './_helpers.mjs';
+import { isDeepStrictEqual } from 'node:util';
 import {
   loadRoutines, saveRoutines, executeRoutineOutOfBand,
   findRoutineByWebhookToken, regenerateWebhookToken, resolveRoutineDeviceId,
 } from '../lib/routines.mjs';
 import { listDevices } from '../lib/voice-devices.mjs';
+import { getHaDeviceCatalog, validateHaDeviceAction } from '../lib/ha-device-catalog.mjs';
+import { listSavedFastpaths, removeSavedFastpath } from '../lib/saved-fastpaths.mjs';
 
 export async function handle(req, res) {
+  if (req.url === '/api/routines/fastpaths' && ['GET', 'DELETE'].includes(req.method)) {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.method === 'DELETE') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { /* invalid body below */ }
+      if (typeof body?.id !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'A saved fast path id is required.' }));
+        return true;
+      }
+      if (!await removeSavedFastpath(userId, body.id)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Saved fast path not found.' }));
+        return true;
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ fastpaths: await listSavedFastpaths(userId) }));
+    return true;
+  }
   if (req.url === '/api/routines' && req.method === 'GET') {
     const userId = requireAuth(req, res);
     if (!userId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(loadRoutines(userId)));
+    res.end(JSON.stringify({ ...loadRoutines(userId), capabilities: { delay: true }, fastpaths: await listSavedFastpaths(userId) }));
     return true;
   }
 
@@ -58,9 +83,33 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'body.routines must be an array (send [] to clear)' }));
       return true;
     }
-    const saved = saveRoutines(userId, body.routines);
+    let saved;
+    try {
+      // A full-list save may include unrelated, unchanged device actions.
+      // Only newly configured controls need live capability validation.
+      const previous = loadRoutines(userId).routines;
+      const changed = body.routines.flatMap(routine => {
+        const old = previous.find(item => item.id === routine?.id);
+        return (Array.isArray(routine?.actions) ? routine.actions : []).filter(action =>
+          action?.type === 'ha_call' && Object.hasOwn(action, 'ha_device_id')
+          && !old?.actions.some(existing => isDeepStrictEqual(existing, action)));
+      });
+      if (changed.length) {
+        let catalog;
+        try { catalog = await getHaDeviceCatalog(); }
+        catch (e) { res.writeHead(503); res.end(JSON.stringify({ error: e.message })); return true; }
+        for (const action of changed) validateHaDeviceAction(action, catalog.devices);
+      }
+      saved = saveRoutines(userId, body.routines);
+    }
+    catch (e) {
+      if (!(e instanceof RangeError)) throw e;
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+      return true;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(saved));
+    res.end(JSON.stringify({ ...saved, fastpaths: await listSavedFastpaths(userId) }));
     return true;
   }
 
@@ -156,7 +205,8 @@ export async function handle(req, res) {
     }
     console.log(`[routines] webhook fire: ${routine.id} (user=${userId} device=${deviceId || '-'} errors=${result.errors.length})`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, routine_id: routine.id, deviceId, errors: result.errors }));
+    res.end(JSON.stringify({ ok: true, routine_id: routine.id, deviceId, errors: result.errors,
+      ...(result.scheduled ? { scheduled: result.scheduled } : {}) }));
     return true;
   }
 

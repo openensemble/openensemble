@@ -25,6 +25,7 @@ import {
 } from './_helpers.mjs';
 import { invalidateCache as invalidateHaCache, ensureCache as ensureHaCache } from '../lib/ha-cache.mjs';
 import { getHaConfig, haRequest } from '../lib/ha-client.mjs';
+import { getHaDeviceCatalog, invalidateHaDeviceCatalog } from '../lib/ha-device-catalog.mjs';
 import {
   getHaWebSocketStatus,
   reconfigureHaWebSocketBridge,
@@ -42,6 +43,7 @@ let _servicesInflight = null;
 function invalidateServicesCache() {
   _servicesCache = null;
   _servicesAt = 0;
+  invalidateHaDeviceCatalog();
 }
 
 async function ensureServicesCache(force = false) {
@@ -130,6 +132,12 @@ export async function handle(req, res) {
     res.end(JSON.stringify(data));
     return true;
   };
+
+  if (req.url === '/api/home-assistant/devices' && req.method === 'GET') {
+    if (!requireAuth(req, res)) return true;
+    try { return json(await getHaDeviceCatalog()); }
+    catch (e) { return json({ devices: [], error: e.message }, 503); }
+  }
 
   if (req.url === '/api/home-assistant' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;

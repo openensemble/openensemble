@@ -55,6 +55,9 @@ let _piperVoices = []; // installed Piper voices for the per-slot picker.
 // section in the drawer is the sole UI for both. Server-side persistence in
 // users/<id>/routines.json + users/<id>/ambient/*.mp3.
 let _routines = [];
+let _savedFastpaths = [];
+let _routineAccountGeneration = 0;
+let _routineDelaySupported = false;
 let _ambientFiles = [];
 // HA scene + script entities — populated on drawer open from the HA cache.
 // Drives the ha_scene action picker so users don't have to type entity ids.
@@ -69,6 +72,8 @@ let _haActionEntities = [];
 // domain + service dropdowns in the ha_call action editor so users pick
 // from real services instead of guessing at strings.
 let _haServiceCatalog = {};
+let _haDevices = [];
+let _haDevicesError = '';
 
 // Resolve the current user's coordinator agent name for routine-editor UI
 // strings. Reads the global `agents` array set up in init.js — every user
@@ -169,6 +174,7 @@ function fmtTimeAgo(ts) {
 }
 
 async function loadDevices() {
+  const accountGeneration = _routineAccountGeneration;
   const body = $('drawerDevicesBody');
   if (!body) return;
   if (typeof stopVoiceDiagnostics === 'function') stopVoiceDiagnostics();
@@ -178,7 +184,7 @@ async function loadDevices() {
     // refs, OE user roster, AND the per-user voice-config (sole source
     // of truth for slot routing since 2026-05-13 — applies to all of
     // this user's voice devices).
-    const [rDevices, rIncoming, rLib, rTts, rStt, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts, rHaCall, rHaSvc] = await Promise.all([
+    const [rDevices, rIncoming, rLib, rTts, rStt, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts, rHaCall, rHaSvc, rHaDevices] = await Promise.all([
       fetch('/api/devices'),
       fetch('/api/devices/incoming-slots'),
       fetch('/api/wakewords'),
@@ -195,6 +201,7 @@ async function loadDevices() {
       // Broader actionable-entity list for the ha_call entity picker.
       fetch('/api/home-assistant/entities?domain=light,switch,fan,cover,lock,media_player,climate,input_boolean,automation,group,scene,script'),
       fetch('/api/home-assistant/services'),
+      fetch('/api/home-assistant/devices').catch(() => null),
     ]);
     // Firmware manifest is best-effort — if it's missing (no flash wizard
     // bundled, etc.) the Update button just doesn't appear. Don't fail the
@@ -278,10 +285,16 @@ async function loadDevices() {
     } else {
       _chimeInfo = { hasCustom: false, sizeBytes: 0 };
     }
+    if (accountGeneration !== _routineAccountGeneration) return;
     if (rRoutines && rRoutines.ok) {
-      try { const j = await rRoutines.json(); _routines = Array.isArray(j.routines) ? j.routines : []; }
-      catch { _routines = []; }
-    } else { _routines = []; }
+      try {
+        const j = await rRoutines.json();
+        if (accountGeneration !== _routineAccountGeneration) return;
+        _routines = Array.isArray(j.routines) ? j.routines : [];
+        _savedFastpaths = Array.isArray(j.fastpaths) ? j.fastpaths : [];
+        _routineDelaySupported = j.capabilities?.delay === true;
+      } catch { _routines = []; _savedFastpaths = []; _routineDelaySupported = false; }
+    } else { _routines = []; _savedFastpaths = []; _routineDelaySupported = false; }
     // Preserve unsaved edits when switching between Devices and Routines.
     // Read the still-live editor before renderDevices() replaces the DOM.
     if (_editingRoutineId) _readEditorIntoBuffer();
@@ -301,6 +314,8 @@ async function loadDevices() {
       try { const j = await rHaSvc.json(); _haServiceCatalog = (j.services && typeof j.services === 'object') ? j.services : {}; }
       catch { _haServiceCatalog = {}; }
     } else { _haServiceCatalog = {}; }
+    await readHaDeviceCatalog(rHaDevices);
+    if (accountGeneration !== _routineAccountGeneration) return;
     renderDevices();
     // Coordinator-name labels are populated lazily after render — we don't
     // know which user(s) are assigned to slots until the DOM is in place,
@@ -433,7 +448,7 @@ function renderDevices() {
   const body = $('drawerDevicesBody');
   if (!body) return;
   const routinesFirst = $('sbtnRoutines')?.classList.contains('active');
-  const routinePanels = renderRoutinesPanel() + renderAmbientLibraryPanel();
+  const routinePanels = renderRoutinesPanel() + renderSavedFastpathsPanel() + renderAmbientLibraryPanel();
   const drawer = $('drawerDevices');
   drawer.querySelector('.drawer-label').textContent = routinesFirst ? 'Routines' : 'Voice devices';
   drawer.querySelector('.drawer-icon').innerHTML = `<i data-lucide="${routinesFirst ? 'repeat' : 'mic'}"></i>`;
@@ -684,6 +699,79 @@ function renderDevices() {
 let _editingRoutineId = null;
 let _ambientUploadProgress = null;
 
+function resetRoutineAccountState() {
+  _routineAccountGeneration++;
+  _routines = [];
+  _savedFastpaths = [];
+  _routineEditBuffer = null;
+  _editingRoutineId = null;
+  _routineDelaySupported = false;
+  _ambientFiles = [];
+  const body = $('drawerDevicesBody');
+  if (body) body.innerHTML = '';
+}
+
+function renderSavedFastpathsPanel() {
+  const rows = _savedFastpaths.map(row => {
+    const entityId = row.entityId || row.args?.entity_id;
+    const entity = _haActionEntities.find(entity => entity.entity_id === entityId);
+    const target = entityId ? `${entity?.friendly_name || entityId} (${entityId})` : row.skillName;
+    const description = row.kind === 'alias' ? `Device name → ${target}`
+      : row.kind === 'device' ? `${row.args.domain}.${row.args.service} → ${target}${row.args.data ? ' · ' + JSON.stringify(row.args.data) : ''}`
+        : `${target} → ${row.tool} · learned phrasing`;
+    const priority = row.routines?.length
+      ? `<div style="font-size:11px;color:var(--amber,#d49a44);margin-top:4px">Routine takes priority: ${row.routines.map(phrase => '&quot;' + escHtml(phrase) + '&quot;').join(', ')}</div>` : '';
+    return `<div data-saved-fastpath="${escHtml(row.id)}" style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-top:1px solid var(--border);font-size:12px">
+      <div style="flex:1;min-width:0;overflow-wrap:anywhere">
+        <div style="font-weight:600">&quot;${escHtml(row.phrase)}&quot;${row.active ? '' : ' <span style="font-weight:400;color:var(--muted)">(inactive)</span>'}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">${escHtml(description)}</div>${priority}
+      </div>
+      <button class="cdraw-btn" data-action="deleteSavedFastpath" data-args='${JSON.stringify([row.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;flex-shrink:0">Delete</button>
+    </div>`;
+  }).join('');
+  return `<section id="savedFastpathsPanel" aria-labelledby="savedFastpathsTitle" style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+      <h2 id="savedFastpathsTitle" style="font-size:14px;margin:0">Saved fast paths <span style="font-size:12px;font-weight:400;color:var(--muted)">${_savedFastpaths.length}</span></h2>
+      <button class="cdraw-btn" data-action="refreshSavedFastpaths" style="font-size:11px;padding:3px 7px">Refresh</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:6px">Your account only, like your routines. A matching routine runs first, then a saved device phrase, then normal device matching.
+      Ask ${escHtml(_coordinatorLabel())} to add a fast path with a phrase and the device to remember. If more than one device matches, the agent will ask which one.</div>
+    ${rows || '<div style="font-size:12px;color:var(--muted);padding:6px 0">No saved fast paths yet.</div>'}
+  </section>`;
+}
+
+window.refreshSavedFastpaths = async function () {
+  const accountGeneration = _routineAccountGeneration;
+  try {
+    const response = await fetch('/api/routines/fastpaths');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (accountGeneration !== _routineAccountGeneration) return;
+    _readEditorIntoBuffer();
+    _savedFastpaths = data.fastpaths || [];
+    renderDevices();
+    populateCoordinatorLabels();
+  } catch (error) { if (accountGeneration === _routineAccountGeneration) showDeviceToast(`Refresh failed: ${error.message}`, { variant: 'error' }); }
+};
+
+window.deleteSavedFastpath = async function (id) {
+  const row = _savedFastpaths.find(row => row.id === id);
+  if (!row || !confirm(`Delete saved fast path "${row.phrase}"?`)) return;
+  const accountGeneration = _routineAccountGeneration;
+  try {
+    const response = await fetch('/api/routines/fastpaths', { method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+    const data = await response.json();
+    if (accountGeneration !== _routineAccountGeneration) return;
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    _readEditorIntoBuffer();
+    _savedFastpaths = data.fastpaths || [];
+    renderDevices();
+    populateCoordinatorLabels();
+    showDeviceToast('Saved fast path deleted.');
+  } catch (error) { if (accountGeneration === _routineAccountGeneration) showDeviceToast(`Delete failed: ${error.message}`, { variant: 'error' }); }
+};
+
 function focusRoutinesPanel() {
   const panel = $('routinesPanel');
   if (!panel) return;
@@ -714,7 +802,7 @@ function renderRoutinesPanel() {
       </div>
       <div style="font-size:12px;color:var(--muted);margin-bottom:6px;line-height:1.5">
         Save an action sequence and reuse it with a trigger phrase — for example, "hey ensemble, goodnight".
-        You can also run it with Test on a paired device or use its webhook URL from another app.
+        You can also run it with Test or use its webhook URL from another app. Audio actions need a paired device.
       </div>
       ${rows}
     </section>
@@ -736,7 +824,7 @@ function renderRoutineRow(r) {
         <div style="color:var(--muted);font-size:11px;margin-top:2px;word-break:break-word">${escHtml(summary)}</div>
       </div>
       <div style="display:flex;gap:4px;flex-shrink:0">
-        <button class="cdraw-btn" data-action="testRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px" title="Fire this routine now on a paired device">Test</button>
+        <button class="cdraw-btn" data-action="testRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px" title="Run this routine now">Test</button>
         <button class="cdraw-btn" data-action="editRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px">Edit</button>
         <button class="cdraw-btn" data-action="deleteRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)">Delete</button>
       </div>
@@ -755,7 +843,22 @@ function summarizeRoutineAction(a) {
         'turn on';
       return `${verbLabel} ${id}`;
     }
-    case 'ha_call':      return `${a.domain || '?'}.${a.service || '?'}${a.data?.entity_id ? ` (${a.data.entity_id})` : ''}`;
+    case 'ha_call': {
+      const device = _haDevices.find(device => device.id === a.ha_device_id);
+      const control = findHaDeviceControl(a);
+      if (device && control) {
+        const values = control.fields.filter(field => a.data?.[field.key] != null).map(field => {
+          const value = a.data[field.key];
+          return field.options?.find(option => option.value === value)?.label || String(value);
+        });
+        return `${device.name}: ${control.label}${values.length ? ` — ${values.join(', ')}` : ''}`;
+      }
+      return `${a.domain || '?'}.${a.service || '?'}${a.data?.entity_id ? ` (${a.data.entity_id})` : ''}`;
+    }
+    case 'delay': {
+      const { value, unit } = routineDelayDisplay(a.seconds);
+      return `wait ${value} ${value === 1 ? unit.slice(0, -1) : unit}`;
+    }
     case 'play_ambient': return `play ${a.file || '?'}${a.loop !== false ? ' on loop' : ''}${Number.isFinite(a.volume) ? ` @ ${a.volume}%` : ''}`;
     case 'tts_say':      return `say "${a.text || ''}"`;
     case 'run_prompt': {
@@ -766,6 +869,137 @@ function summarizeRoutineAction(a) {
     default:             return a.type || '?';
   }
 }
+
+function routineDelayDisplay(seconds) {
+  if (seconds >= 3600 && seconds % 3600 === 0) return { value: seconds / 3600, unit: 'hours' };
+  if (seconds >= 60 && seconds % 60 === 0) return { value: seconds / 60, unit: 'minutes' };
+  return { value: seconds ?? '', unit: 'seconds' };
+}
+
+async function readHaDeviceCatalog(response) {
+  try {
+    const data = await response?.json();
+    if (!response?.ok) throw new Error(data?.error || 'Unable to load HA devices. Try refreshing.');
+    // The user may keep typing while requests are pending. Capture the live
+    // fields against the old catalog before replacing it and rendering again.
+    _readEditorIntoBuffer();
+    _haDevices = Array.isArray(data.devices) ? data.devices : [];
+    _haDevicesError = data.configured === false ? 'Connect Home Assistant in Settings to choose a device.' : '';
+  } catch (error) {
+    _readEditorIntoBuffer();
+    _haDevices = [];
+    _haDevicesError = error.message;
+  }
+}
+
+function findHaDeviceControl(action) {
+  return _haDevices.find(device => device.id === action.ha_device_id)?.controls.find(control =>
+    control.domain === action.domain && control.service === action.service && control.entity_id === action.data?.entity_id);
+}
+
+function isUnchangedHaDeviceAction(action) {
+  const saved = _routines.find(routine => routine.id === _editingRoutineId);
+  // Guided settings contain scalars or color arrays. Ignore object key order
+  // and transient search text when checking whether a control was changed.
+  const settings = data => JSON.stringify(Object.entries(data || {}).sort(([a], [b]) => a.localeCompare(b)));
+  return saved?.actions.some(original => ['type', 'domain', 'service', 'ha_device_id'].every(key => original[key] === action[key])
+    && settings(original.data) === settings(action.data)) || false;
+}
+
+function haDeviceOptions(selected, search = '') {
+  const query = search.trim().toLowerCase();
+  const matches = _haDevices.filter(device => device.id === selected
+    || `${device.name} ${device.area} ${device.manufacturer} ${device.model}`.toLowerCase().includes(query));
+  const groups = new Map();
+  for (const device of matches) {
+    const area = device.area || 'No room assigned';
+    if (!groups.has(area)) groups.set(area, []);
+    groups.get(area).push(device);
+  }
+  const missing = selected && !_haDevices.some(device => device.id === selected)
+    ? `<option value="${escHtml(selected)}" selected>Saved device (unavailable)</option>` : '';
+  return `<option value="">${matches.length ? 'Choose a device…' : 'No matching devices'}</option>${missing}`
+    + [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([area, devices]) =>
+      `<optgroup label="${escHtml(area)}">${devices.map(device => `<option value="${escHtml(device.id)}" ${device.id === selected ? 'selected' : ''}>${escHtml(device.name)}</option>`).join('')}</optgroup>`).join('');
+}
+
+function renderHaDeviceAction(action, idx) {
+  const device = _haDevices.find(device => device.id === action.ha_device_id);
+  const control = findHaDeviceControl(action);
+  const style = 'width:100%;min-width:0;font-size:12px;padding:6px';
+  const groups = new Map();
+  for (const item of device?.controls || []) {
+    if (!groups.has(item.entity_id)) groups.set(item.entity_id, []);
+    groups.get(item.entity_id).push(item);
+  }
+  const controlOptions = [...groups.values()].map(controls => `<optgroup label="${escHtml(controls[0].entity_name)}">${controls.map(item =>
+    `<option value="${escHtml(item.id)}" ${control?.id === item.id ? 'selected' : ''}>${escHtml(item.label)}</option>`).join('')}</optgroup>`).join('');
+  let message = _haDevicesError;
+  if (!message && device && !device.controls.length) message = 'Home Assistant exposes no configurable controls for this device. It may only report readings.';
+  if (!message && action.service && !control) message = 'The saved control is unavailable. Refresh Home Assistant or choose a supported control.';
+  const settings = (control?.fields || []).map(field => {
+    const value = action.data?.[field.key];
+    const attrs = `class="cdraw-input" style="${style}" data-action-field="${idx}.setting_${escHtml(field.key)}" data-ha-setting aria-label="${escHtml(field.label)}" ${field.required ? 'required' : ''}`;
+    let input;
+    if (field.kind === 'select' || field.kind === 'boolean') {
+      const choices = field.options || [{ value: true, label: 'Yes' }, { value: false, label: 'No' }];
+      const missing = value != null && !choices.some(option => option.value === value)
+        ? `<option value="${escHtml(String(value))}" selected>${escHtml(String(value))} (unavailable)</option>` : '';
+      input = `<select ${attrs}><option value="">${field.required ? 'Choose a value…' : 'Leave unchanged'}</option>${missing}${choices.map(option =>
+        `<option value="${escHtml(String(option.value))}" ${option.value === value ? 'selected' : ''}>${escHtml(option.label)}</option>`).join('')}</select>`;
+    } else if (field.kind === 'number') {
+      input = `<input type="number" ${attrs} value="${escHtml(String(value ?? ''))}" step="${field.step || 'any'}" ${field.min != null ? `min="${field.min}"` : ''} ${field.max != null ? `max="${field.max}"` : ''} placeholder="${field.min != null && field.max != null ? `${field.min}–${field.max}` : field.required ? 'Enter a value' : 'Leave unchanged'}">`;
+    } else if (field.kind === 'color') {
+      const hex = Array.isArray(value) ? '#' + value.map(n => n.toString(16).padStart(2, '0')).join('') : value || '';
+      input = `<input type="text" ${attrs} value="${escHtml(hex)}" pattern="#[a-fA-F0-9]{6}" placeholder="#RRGGBB (optional)">`;
+    } else {
+      input = `<input type="text" ${attrs} value="${escHtml(String(value ?? ''))}" ${field.minLength != null ? `minlength="${field.minLength}"` : ''} ${field.maxLength != null ? `maxlength="${field.maxLength}"` : ''} placeholder="${field.required ? 'Enter a value' : 'Leave unchanged'}">`;
+    }
+    return `<label style="display:block;font-size:11px;color:var(--muted);margin-top:8px">${escHtml(field.label)}${field.unit ? ` (${escHtml(field.unit)})` : ''}${field.required ? ' *' : ''}${input}</label>`;
+  }).join('');
+  return `
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <input type="search" class="cdraw-input" style="${style}" data-action-field="${idx}.device_search" data-input-action="filterHaRoutineDevices" data-input-args='[${idx},"$value"]' value="${escHtml(action._deviceSearch || '')}" placeholder="Find a device or room…" aria-label="Find HA device">
+      <button class="cdraw-btn" data-action="refreshHaEntities" title="Refresh Home Assistant devices and controls" aria-label="Refresh HA devices">↻</button>
+    </div>
+    <label style="display:block;font-size:11px;color:var(--muted);margin-top:8px">Device
+      <select class="cdraw-input" style="${style}" aria-label="HA device" data-action-field="${idx}.ha_device_id" data-change-action="changeHaRoutineDevice" data-change-args='[${idx},"$value"]'>${haDeviceOptions(action.ha_device_id, action._deviceSearch)}</select>
+    </label>
+    <label style="display:block;font-size:11px;color:var(--muted);margin-top:8px">Control
+      <select class="cdraw-input" style="${style}" aria-label="HA device control" data-action-field="${idx}.ha_control" data-change-action="changeHaRoutineControl" data-change-args='[${idx},"$value"]' ${device?.controls.length ? '' : 'disabled'}><option value="">${device ? 'Choose a control…' : 'Choose a device first'}</option>${controlOptions}</select>
+    </label>
+    ${control && groups.size > 1 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">${escHtml(control.entity_name)}</div>` : ''}
+    ${settings}
+    ${message ? `<div role="status" style="font-size:11px;color:var(--amber,#d49a44);margin-top:8px">${escHtml(message)}</div>` : ''}`;
+}
+
+window.filterHaRoutineDevices = function (idx, value) {
+  const action = _routineEditBuffer?.actions[idx];
+  const select = document.querySelector(`[data-action-field="${idx}.ha_device_id"]`);
+  if (!action || !select) return;
+  action._deviceSearch = value;
+  select.innerHTML = haDeviceOptions(action.ha_device_id, value);
+};
+
+window.changeHaRoutineDevice = function (idx, value) {
+  _readEditorIntoBuffer();
+  const action = _routineEditBuffer?.actions[idx];
+  if (!action || !Object.hasOwn(action, 'ha_device_id')) return;
+  Object.assign(action, { ha_device_id: value, domain: '', service: '', data: {} });
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+window.changeHaRoutineControl = function (idx, value) {
+  _readEditorIntoBuffer();
+  const action = _routineEditBuffer?.actions[idx];
+  const control = _haDevices.find(device => device.id === action?.ha_device_id)?.controls.find(control => control.id === value);
+  if (!action) return;
+  Object.assign(action, { domain: control?.domain || '', service: control?.service || '',
+    data: control ? { entity_id: control.entity_id } : {} });
+  renderDevices();
+  populateCoordinatorLabels();
+};
 
 function renderRoutineEditor(r) {
   // "_new" is the synthetic id used to flag an in-progress create. Don't
@@ -816,8 +1050,10 @@ function renderRoutineEditor(r) {
         <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Actions</div>
         <select class="cdraw-input" data-change-action="addRoutineAction" data-change-args='["$value"]' style="font-size:11px;padding:3px 6px">
           <option value="">+ Add action…</option>
+          <option value="ha_device">HA Device</option>
           <option value="ha_scene">HA scene</option>
-          <option value="ha_call">HA service call</option>
+          <option value="ha_call">HA service call (advanced)</option>
+          <option value="delay" ${_routineDelaySupported ? '' : 'disabled'}>Wait${_routineDelaySupported ? '' : ' (restart server to enable)'}</option>
           <option value="play_ambient">Play ambient sound</option>
           <option value="tts_say">Speak text</option>
           <option value="run_prompt">Ask ${_coordinatorLabel()} (run a prompt)</option>
@@ -836,7 +1072,7 @@ function renderRoutineEditor(r) {
 function renderActionEditor(a, idx, ambientOpts) {
   const headerRow = `
     <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
-      <span>${idx + 1}. ${escHtml(a.type)}</span>
+      <span>${idx + 1}. ${escHtml(Object.hasOwn(a, 'ha_device_id') ? 'HA Device' : a.type === 'delay' ? 'Wait' : a.type)}</span>
       <div style="display:flex;gap:4px">
         ${idx > 0 ? `<button class="cdraw-btn" data-action="moveRoutineAction" data-args='${JSON.stringify([idx, -1]).replace(/'/g, '&#39;')}' style="font-size:10px;padding:1px 6px" title="Move up">↑</button>` : ''}
         <button class="cdraw-btn" data-action="moveRoutineAction" data-args='${JSON.stringify([idx, 1]).replace(/'/g, '&#39;')}' style="font-size:10px;padding:1px 6px" title="Move down">↓</button>
@@ -891,6 +1127,8 @@ function renderActionEditor(a, idx, ambientOpts) {
         <select class="cdraw-input" data-action-field="${idx}.scene_id" style="flex:1;min-width:0;font-family:monospace;font-size:12px;padding:4px 6px">${opts}</select>
         <button class="cdraw-btn" data-action="refreshHaEntities" title="Re-fetch scenes/scripts/groups from Home Assistant (skips the 5-min cache)" style="font-size:11px;padding:4px 8px">↻</button>
       </div>${verbPicker}${emptyHint}`;
+  } else if (a.type === 'ha_call' && Object.hasOwn(a, 'ha_device_id')) {
+    body = renderHaDeviceAction(a, idx);
   } else if (a.type === 'ha_call') {
     // Cascading dropdowns sourced from the live HA service catalog + entity
     // cache so users pick instead of guessing strings. Saved values that
@@ -959,6 +1197,16 @@ function renderActionEditor(a, idx, ambientOpts) {
       <input type="text" class="cdraw-input" data-action-field="${idx}.data" value="${escHtml(extraStr)}" placeholder='Extra params (optional, e.g. {"brightness":200})' style="width:100%;font-family:monospace;font-size:11px;padding:4px 6px;margin-top:4px" title="Extra fields beyond entity_id (brightness, color, etc.) as a JSON object.">
       ${emptyHint}
     `;
+  } else if (a.type === 'delay') {
+    const { value, unit } = routineDelayDisplay(a.seconds);
+    body = `
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="number" class="cdraw-input" data-action-field="${idx}.duration" value="${escHtml(String(value))}" min="0" step="any" aria-label="Wait duration" style="width:90px;font-size:12px;padding:4px 6px">
+        <select class="cdraw-input" data-action-field="${idx}.unit" aria-label="Wait unit" style="font-size:12px;padding:4px 6px">
+          ${['seconds', 'minutes', 'hours'].map(u => `<option value="${u}" ${u === unit ? 'selected' : ''}>${u}</option>`).join('')}
+        </select>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">Wait before continuing with the next action. Choose 1 second to 24 hours. Waiting runs appear in Tasks, where you can cancel them.</div>`;
   } else if (a.type === 'play_ambient') {
     // If a.file points at something no longer in the library, prepend a
     // "(missing)" option so the value sticks instead of silently resetting
@@ -986,7 +1234,7 @@ function renderActionEditor(a, idx, ambientOpts) {
     // streams to TTS on the device that fired the routine, so any tools
     // (news, weather, web search) just work.
     body = `<textarea class="cdraw-input" data-action-field="${idx}.prompt" rows="2" placeholder="give me the latest news" style="width:100%;font-size:12px;padding:4px 6px;font-family:inherit;resize:vertical">${escHtml(a.prompt || '')}</textarea>
-      <div style="font-size:10px;color:var(--muted);margin-top:4px">Runs after the other actions in this routine. The reply is spoken on the device that fired the trigger.</div>`;
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">Runs after all other actions and waits in this routine. The reply is spoken on the target device.</div>`;
   } else {
     body = `<div style="font-size:11px;color:var(--red,#e05c5c)">Unknown action type: ${escHtml(a.type)}</div>`;
   }
@@ -1928,6 +2176,26 @@ function _readEditorIntoBuffer() {
     if (a.type === 'ha_scene') {
       a.scene_id = (f('scene_id')?.value || '').trim();
       a.verb = f('verb')?.value || 'turn_on';
+    } else if (a.type === 'ha_call' && Object.hasOwn(a, 'ha_device_id')) {
+      a._deviceSearch = f('device_search')?.value || '';
+      const control = findHaDeviceControl(a);
+      if (control) {
+        // Preserve unavailable saved settings for validation, rather than
+        // silently changing the routine when HA capabilities change.
+        const data = { ...a.data, entity_id: control.entity_id };
+        for (const field of control.fields) {
+          const input = f(`setting_${field.key}`);
+          if (!input) continue;
+          const raw = input.value;
+          if (raw === '') { delete data[field.key]; continue; }
+          data[field.key] = field.kind === 'number' ? Number(raw)
+            : field.kind === 'boolean' ? raw === 'true'
+            : field.kind === 'select' ? field.options.find(option => String(option.value) === raw)?.value ?? raw
+            : field.kind === 'color' && /^#[a-f0-9]{6}$/i.test(raw)
+              ? [1, 3, 5].map(offset => parseInt(raw.slice(offset, offset + 2), 16)) : raw;
+        }
+        a.data = data;
+      }
     } else if (a.type === 'ha_call') {
       a.domain = (f('domain')?.value || '').trim().toLowerCase();
       a.service = (f('service')?.value || '').trim().toLowerCase();
@@ -1941,6 +2209,11 @@ function _readEditorIntoBuffer() {
       catch { extra = a.data && typeof a.data === 'object' ? { ...a.data } : {}; delete extra.entity_id; }
       if (!extra || typeof extra !== 'object' || Array.isArray(extra)) extra = {};
       a.data = entityId ? { ...extra, entity_id: entityId } : { ...extra };
+    } else if (a.type === 'delay') {
+      const factor = { seconds: 1, minutes: 60, hours: 3600 }[f('unit')?.value] || 1;
+      const seconds = Number(f('duration')?.value) * factor;
+      // Normalize harmless floating-point noise from fractional minutes/hours.
+      a.seconds = Number.isFinite(seconds) ? Math.round(seconds * 1000) / 1000 : null;
     } else if (a.type === 'play_ambient') {
       a.file = (f('file')?.value || '').trim();
       a.loop = !!f('loop')?.checked;
@@ -1980,12 +2253,42 @@ window.cancelRoutineEdit = function () {
 };
 
 window.saveRoutineEdit = async function () {
+  const accountGeneration = _routineAccountGeneration;
   _readEditorIntoBuffer();
   if (!_routineEditBuffer) return;
   const buf = _routineEditBuffer;
   if (!buf.id || buf.id === '_new') { showDeviceToast('Routine needs an id (short slug, e.g. goodnight).', { variant: 'error' }); return; }
   if (!buf.trigger) { showDeviceToast('Routine needs a trigger phrase.', { variant: 'error' }); return; }
   if (!buf.actions?.length) { showDeviceToast('Add at least one action.', { variant: 'error' }); return; }
+  for (const action of buf.actions) {
+    if (action.type !== 'ha_call' || !Object.hasOwn(action, 'ha_device_id')) continue;
+    // Existing controls can be retained while HA is offline; changing a
+    // trigger or wait must not require reconfiguring the device actions.
+    if (isUnchangedHaDeviceAction(action)) continue;
+    const control = findHaDeviceControl(action);
+    if (!control) { showDeviceToast('Choose a device and one of its available controls.', { variant: 'error' }); return; }
+    for (const field of control.fields) {
+      const value = action.data?.[field.key];
+      if (field.required && (value == null || value === '')) {
+        showDeviceToast(`Choose ${field.label}.`, { variant: 'error' }); return;
+      }
+      if (value != null && field.kind === 'select' && !field.options.some(option => option.value === value)) {
+        showDeviceToast(`Choose an available ${field.label}.`, { variant: 'error' }); return;
+      }
+    }
+  }
+  const invalidSetting = document.querySelector('[data-routine-editor]')?.querySelector('[data-ha-setting]:invalid');
+  if (invalidSetting) { invalidSetting.reportValidity(); return; }
+  // New browser assets can load before the running server has restarted.
+  // Older servers silently discard unknown actions, including the wait.
+  if (!_routineDelaySupported && buf.actions.some(a => a.type === 'delay')) {
+    showDeviceToast('Restart OpenEnsemble to enable Wait actions before saving this routine.', { variant: 'error' });
+    return;
+  }
+  if (buf.actions.some(a => a.type === 'delay' && (!Number.isInteger(a.seconds) || a.seconds < 1 || a.seconds > 86400))) {
+    showDeviceToast('Wait must be between 1 second and 24 hours, in whole seconds.', { variant: 'error' });
+    return;
+  }
   // Auto-slugify the id so "good night" (which the user often types when
   // they confuse id-the-slug with trigger-the-phrase) becomes "good_night"
   // and passes the server-side [a-z0-9_-]{1,64} regex.
@@ -1999,8 +2302,12 @@ window.saveRoutineEdit = async function () {
   const realId = buf.id;
   const merged = _routines.filter(r => r.id !== '_new' && r.id !== _editingRoutineId);
   const existingIdx = merged.findIndex(r => r.id === realId);
-  if (existingIdx >= 0) merged[existingIdx] = { ...buf, id: realId };
-  else merged.push({ ...buf, id: realId });
+  const edited = { ...buf, id: realId, actions: buf.actions.map(action => {
+    const { _deviceSearch, ...saved } = action;
+    return saved;
+  }) };
+  if (existingIdx >= 0) merged[existingIdx] = edited;
+  else merged.push(edited);
   try {
     const r = await fetch('/api/routines', {
       method: 'PUT',
@@ -2012,6 +2319,8 @@ window.saveRoutineEdit = async function () {
       throw new Error(error || `HTTP ${r.status}`);
     }
     const saved = await r.json();
+    if (accountGeneration !== _routineAccountGeneration) return;
+    _savedFastpaths = saved.fastpaths || [];
     const savedList = Array.isArray(saved.routines) ? saved.routines : [];
     // Server cleanRoutine silently drops routines with no valid actions
     // (e.g. an ha_scene without a scene_id picked, or a play_ambient pointing
@@ -2044,6 +2353,7 @@ window.saveRoutineEdit = async function () {
 };
 
 window.deleteRoutine = async function (id) {
+  const accountGeneration = _routineAccountGeneration;
   const r = _routines.find(x => x.id === id);
   if (!r) return;
   if (!confirm(`Delete routine "${id}"?`)) return;
@@ -2056,6 +2366,8 @@ window.deleteRoutine = async function (id) {
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const saved = await resp.json();
+    if (accountGeneration !== _routineAccountGeneration) return;
+    _savedFastpaths = saved.fastpaths || [];
     _routines = saved.routines || next;
     if (_editingRoutineId === id) { _editingRoutineId = null; _routineEditBuffer = null; }
     showDeviceToast(`Deleted "${id}".`);
@@ -2118,7 +2430,8 @@ window.testRoutine = async function (id) {
     targetDevice = _devicesList.find(d => d.id === routine.device_id && d.online) || null;
   }
   if (!targetDevice) targetDevice = _devicesList.find(d => d.online) || null;
-  if (!targetDevice) {
+  const needsDevice = routine?.actions?.some(a => ['tts_say', 'play_ambient', 'run_prompt'].includes(a.type));
+  if (!targetDevice && needsDevice) {
     showDeviceToast('No paired device is online to test against.', { variant: 'error' });
     return;
   }
@@ -2126,17 +2439,19 @@ window.testRoutine = async function (id) {
     const r = await fetch(`/api/routines/${encodeURIComponent(id)}/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId: targetDevice.id }),
+      body: JSON.stringify({ deviceId: targetDevice?.id || null }),
     });
     if (!r.ok) {
       const { error } = await r.json().catch(() => ({}));
       throw new Error(error || `HTTP ${r.status}`);
     }
-    const { errors } = await r.json();
+    const { errors, scheduled } = await r.json();
     if (errors?.length) {
       showDeviceToast(`Routine ran with ${errors.length} error(s): ${errors[0].message}`, { variant: 'error' });
     } else {
-      showDeviceToast(`Routine "${id}" fired on ${targetDevice.name}.`);
+      showDeviceToast(scheduled
+        ? `Routine "${id}" started. Next actions at ${new Date(scheduled.resumeAt).toLocaleTimeString()}; see Tasks to cancel.`
+        : `Routine "${id}" fired${targetDevice ? ` on ${targetDevice.name}` : ''}.`);
     }
   } catch (e) {
     showDeviceToast(`Test failed: ${e.message}`, { variant: 'error' });
@@ -2152,11 +2467,17 @@ window.blockRoutineIdSpace = function (key, ev) {
 
 window.addRoutineAction = function (type, ev) {
   if (!type) return;
+  if (type === 'delay' && !_routineDelaySupported) {
+    showDeviceToast('Restart OpenEnsemble to enable Wait actions.', { variant: 'error' });
+    return;
+  }
   if (ev?.target) ev.target.value = '';  // reset dropdown
   _readEditorIntoBuffer();
   if (!_routineEditBuffer) return;
   const fresh = { ha_scene:     { type, scene_id: '' },
+                  ha_device:    { type: 'ha_call', ha_device_id: '', domain: '', service: '', data: {} },
                   ha_call:      { type, domain: '', service: '', data: {} },
+                  delay:        { type, seconds: 300 },
                   play_ambient: { type, file: '', loop: true },
                   tts_say:      { type, text: '' },
                   run_prompt:   { type, prompt: '' } }[type];
@@ -2185,10 +2506,11 @@ window.refreshHaEntities = async function (_ignored, ev) {
     // Re-pull every catalog the routine editor uses: scenes/scripts/groups
     // (ha_scene picker), broader actionable entities + service catalog
     // (ha_call cascading dropdowns).
-    const [r2, r3, r4] = await Promise.all([
+    const [r2, r3, r4, r5] = await Promise.all([
       fetch('/api/home-assistant/entities?domain=scene,script,group'),
       fetch('/api/home-assistant/entities?domain=light,switch,fan,cover,lock,media_player,climate,input_boolean,automation,group,scene,script'),
       fetch('/api/home-assistant/services'),
+      fetch('/api/home-assistant/devices').catch(() => null),
     ]);
     if (r2.ok) {
       const j = await r2.json();
@@ -2203,7 +2525,9 @@ window.refreshHaEntities = async function (_ignored, ev) {
       _haServiceCatalog = (j.services && typeof j.services === 'object') ? j.services : {};
     }
     const svcDomains = Object.keys(_haServiceCatalog).length;
-    showDeviceToast(`HA refreshed — ${_haSceneEntities.length} scenes/scripts/groups, ${_haActionEntities.length} entities, ${svcDomains} service domains.`);
+    await readHaDeviceCatalog(r5);
+    if (_haDevicesError) showDeviceToast(`HA device refresh failed: ${_haDevicesError}`, { variant: 'error' });
+    else showDeviceToast(`HA refreshed — ${_haDevices.length} devices, ${_haSceneEntities.length} scenes/scripts/groups, ${svcDomains} service domains.`);
     renderDevices();
     populateCoordinatorLabels();
   } catch (e) {

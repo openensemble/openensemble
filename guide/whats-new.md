@@ -6,6 +6,24 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-02
+
+**Wait between routine actions**
+Choose **Routines → + Add action → Wait** to pause for seconds, minutes, or hours before the next action. Waits survive closing the browser and restarting OE. Pending actions appear in **Tasks → Scheduled tasks**, where you can cancel the remaining sequence. Home Assistant calls and waits can be tested without a paired voice device. See [Routines](voice-devices.md#routines).
+
+**Choose Home Assistant devices and their supported controls**
+The routine editor's **HA Device** action lists physical devices from Home Assistant. Search by device or room, then choose a control and settings exposed by that device, including its available operating modes. Existing service calls remain editable through the advanced editor. Refreshing devices preserves unfinished edits, and unchanged device actions can stay saved while Home Assistant is offline.
+
+**Your saved fast paths, alongside your routines**
+Open **Routines → Saved fast paths** to see and delete your saved device phrases, device aliases, and learned tool phrases. Both routines and fast paths belong to the signed-in account. Overlapping phrases show when a routine takes priority; a matching routine runs before ordinary device control in chat and voice.
+
+Ask your agent to add a fast path for a Home Assistant device. It saves the exact device and action for that phrase and asks which device you mean when the reference is ambiguous. Saving does not operate the device. If a saved device action fails, OE reports the failure without trying a different device.
+
+**More reliable Gmail inbox loading**
+Gmail reads limit simultaneous requests and retry temporary failures. Connection errors and rate limits now produce a clear message instead of an empty or incomplete inbox. The inbox toolbar stays available after a loading failure so you can refresh or switch accounts.
+
+---
+
 ## 2026-09-26
 
 **Search your memories in chat**

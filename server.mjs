@@ -86,6 +86,7 @@ import { handle as handleTv }           from './routes/tv.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
 import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
 import { handle as handleRoutines }     from './routes/routines.mjs';
+import { resumeRoutine } from './lib/routine-delay.mjs';
 import { handle as handlePersonalization } from './routes/personalization.mjs';
 import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
@@ -700,6 +701,7 @@ setRuntimeMetricsFn(() => ({
 }));
 
 // ── Builtin task: fire reminder notification ─────────────────────────────────
+registerBuiltin('resumeRoutine', resumeRoutine);
 registerBuiltin('fireReminder', async (task, runContext = {}) => {
   // Weekdays-only check: skip weekends
   if (task.weekdaysOnly) {

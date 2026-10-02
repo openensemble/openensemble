@@ -8,7 +8,13 @@ Once paired, the device acts like any other OE client: it logs into a user accou
 
 Choose **Routines** next to **Tasks** in the sidebar, or **Menu → Routines** on mobile, to jump straight to your saved action sequences. You can also choose **Open routines** in Tasks or **Manage routines** in Learn.
 
-Use **+ New routine** to save a trigger phrase and its actions, or ask in chat: *"When I say goodnight, turn off the lights."* Existing routines have **Test**, **Edit**, and **Delete** controls. You can create and edit routines before pairing a device; the **Test** button currently needs an online paired device. Webhook URLs are available inside each saved routine's editor for triggers from other apps.
+Use **+ New routine** to save a trigger phrase and its actions, or ask in chat: *"When I say goodnight, turn off the lights."* Existing routines have **Test**, **Edit**, and **Delete** controls. You can create and edit routines before pairing a device; testing Home Assistant calls and waits does not need a voice device. Audio actions need an online paired device. Webhook URLs are available inside each saved routine's editor for triggers from other apps.
+
+Choose **+ Add action → Wait** to pause before the next action. Set a duration in seconds, minutes, or hours (1 second to 24 hours per wait).
+
+Say your wake word followed by the trigger, or type the trigger in chat. A matching saved routine takes priority over ordinary Home Assistant commands. OE runs the actions before the wait, schedules the remaining actions, and releases the voice device for other requests. Closing the browser does not interrupt the wait. Pending actions survive an OE restart; if their due time passes while OE is offline, they run when it starts again. Home Assistant must be reachable when each call runs.
+
+Waiting runs appear under **Tasks → Scheduled tasks** as **Continue routine: …**. Delete that scheduled task to cancel the remaining actions. Each trigger starts a separate run using a snapshot of its remaining actions; editing or deleting the saved routine does not change an already waiting run. Multiple waits are supported. As with existing routines, prompt actions run after all other actions; waits also finish first, and the last prompt wins.
 
 ## Voice diagnostics
 
