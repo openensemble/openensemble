@@ -194,7 +194,8 @@ async function loadInboxPreview(accountId) {
       `<div id="inboxScrollSentinel" style="height:1px"></div>`;
   } catch (err) {
     if (listGen !== _inboxListGen) return;
-    el.innerHTML = `<div style="color:var(--red);font-size:13px;padding:20px">Failed: ${escHtml(err.message)}</div>`;
+    el.innerHTML = makeDrawerToolbar('Inbox', 'loadInboxPreview') +
+      `<div role="alert" style="color:var(--red);font-size:13px;padding:20px">Failed: ${escHtml(err.message)}</div>`;
   }
 }
 

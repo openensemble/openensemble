@@ -10,31 +10,54 @@ import { requireAuth, readBody, safeError } from './_helpers.mjs';
 import { loadConfig as loadAutoLabelConfig, saveConfig as saveAutoLabelConfig, startWatcher, stopWatcher, isWatcherRunning, startAllAccountWatchers, undoLastBatch } from '../gmail-autolabel.mjs';
 import { tailActivity } from '../lib/gmail-autolabel-activity.mjs';
 import { getGmailAuthHeader } from '../lib/google-auth.mjs';
+import { createGmailReader, GmailReadError, GMAIL_READ_CONCURRENCY } from '../lib/gmail-read.mjs';
 
 export { getGmailAuthHeader };
-
-const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
 /**
  * Fetch a page of Gmail inbox messages. Used by email-accounts.mjs unified dispatch.
  */
 export async function fetchGmailInboxPage(userId, pageToken, max, accountId, query) {
-  const authHdr = await getGmailAuthHeader(userId, accountId);
-  let listUrl = `${GMAIL_BASE}/messages?q=${encodeURIComponent(query || 'in:inbox')}&maxResults=${max ?? 30}`;
+  const read = await createGmailReader(userId, accountId);
+  let listUrl = `/messages?q=${encodeURIComponent(query || 'in:inbox')}&maxResults=${max ?? 30}`;
   if (pageToken) listUrl += `&pageToken=${encodeURIComponent(pageToken)}`;
-  const listRes = await fetch(listUrl, { headers: authHdr });
-  const listData = await listRes.json();
+  const listData = await read(listUrl);
+  if (listData.messages != null && (!Array.isArray(listData.messages)
+      || listData.messages.some(message => typeof message?.id !== 'string' || !message.id))) {
+    throw new GmailReadError('Gmail returned an incomplete inbox. Please try again.');
+  }
   const ids = (listData.messages ?? []).map(m => m.id);
-  const emails = await Promise.all(ids.map(async id => {
-    const msg = await fetch(`${GMAIL_BASE}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, { headers: authHdr }).then(r => r.json());
-    const hdrs = {};
-    for (const h of msg.payload?.headers ?? []) hdrs[h.name] = h.value;
+  const fetchMessage = async id => {
+    let msg;
+    try {
+      msg = await read(`/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
+    } catch (error) {
+      // A message may be deleted between listing its id and reading its headers.
+      if (error instanceof GmailReadError && error.status === 404) return null;
+      throw error;
+    }
+    if (msg.id !== id || !Array.isArray(msg.payload?.headers)) {
+      throw new GmailReadError('Gmail returned an incomplete email. Please try again.');
+    }
+    const hdrs = Object.create(null);
+    for (const h of msg.payload.headers) {
+      if (typeof h?.name === 'string' && typeof h.value === 'string') hdrs[h.name.toLowerCase()] = h.value;
+    }
     const snippet = (msg.snippet ?? '')
       .replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'")
       .replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202F\u2060-\u2064\u206A-\u206F\uFEFF]/g, '')
       .replace(/\s+/g, ' ').trim();
-    return { id, from: hdrs.From ?? '', subject: hdrs.Subject ?? '(no subject)', date: hdrs.Date ?? '', snippet };
-  }));
+    return { id, from: hdrs.from ?? '', subject: hdrs.subject?.trim() ? hdrs.subject : '(no subject)', date: hdrs.date ?? '', snippet };
+  };
+  const emails = [];
+  // Settle each small batch before starting more work, including on failure.
+  for (let offset = 0; offset < ids.length; offset += GMAIL_READ_CONCURRENCY) {
+    const results = await Promise.allSettled(ids.slice(offset, offset + GMAIL_READ_CONCURRENCY).map(fetchMessage));
+    for (const result of results) {
+      if (result.status === 'rejected') throw result.reason;
+      if (result.value) emails.push(result.value);
+    }
+  }
   return { emails, nextPageToken: listData.nextPageToken ?? null };
 }
 

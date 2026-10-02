@@ -18,7 +18,8 @@ import { requireAuth, readBody, withLock, getUserDir, safeError } from './_helpe
 import { encrypt, decrypt } from '../lib/email-crypto.mjs';
 import { fetchInboxPage as fetchImapPage, fetchImapMessageBody, testConnection } from '../lib/imap-client.mjs';
 import { fetchMsInboxPage, fetchMsMessageBody, msTokenPath } from '../lib/ms-graph.mjs';
-import { fetchGmailInboxPage, getGmailAuthHeader } from './gmail.mjs';
+import { fetchGmailInboxPage } from './gmail.mjs';
+import { createGmailReader, GmailReadError } from '../lib/gmail-read.mjs';
 
 const BASE_DIR  = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -379,7 +380,14 @@ export async function handle(req, res) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
-    } catch (e) { safeError(res, e); }
+    } catch (e) {
+      if (e instanceof GmailReadError) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      } else {
+        safeError(res, e);
+      }
+    }
     return true;
   }
 
@@ -404,11 +412,12 @@ async function resolveAccount(userId, accountId, fallbackProvider) {
 }
 
 // Gmail message body fetcher
-const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
-
 async function fetchGmailMessageBodyById(userId, msgId, accountId) {
-  const authHdr = await getGmailAuthHeader(userId, accountId);
-  const msg = await fetch(`${GMAIL_BASE}/messages/${msgId}?format=full`, { headers: authHdr }).then(r => r.json());
+  const read = await createGmailReader(userId, accountId);
+  const msg = await read(`/messages/${encodeURIComponent(msgId)}?format=full`);
+  if (!msg.payload || msg.id !== msgId) {
+    throw new GmailReadError('Gmail returned an incomplete email. Please try again.');
+  }
   function extractBody(part) {
     if (!part) return null;
     if (part.mimeType === 'text/html' && part.body?.data)
