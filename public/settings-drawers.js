@@ -57,7 +57,7 @@ function scheduleDrawerReload({ immediate = false } = {}) {
 }
 
 // Tracks initJs execution state for custom drawers so we only run it once per open.
-window._customDrawerInitJs = window._customDrawerInitJs ?? {};
+window._customDrawerInitUrls = window._customDrawerInitUrls ?? {};
 window._customDrawerInitialized = window._customDrawerInitialized ?? {};
 window._customDrawerCleanup = window._customDrawerCleanup ?? {};
 window._customDrawerMounts = window._customDrawerMounts ?? {};
@@ -68,7 +68,7 @@ window._customDrawerInitPromise = window._customDrawerInitPromise ?? {};
 function customDrawerSignature(p) {
   return JSON.stringify([
     p.version || '', p.name || '', p.description || '', p.icon || '', p.lucideIcon || '',
-    p.drawerId || '', p.btnId || '', p.html || '', p.initJs || '',
+    p.drawerId || '', p.btnId || '', p.html || '', p.initJs || '', p.initUrl || '',
   ]);
 }
 
@@ -100,7 +100,7 @@ async function unmountCustomDrawer(pluginId, mounted) {
   }
   if (drawerId) {
     document.getElementById(drawerId)?.remove();
-    delete window._customDrawerInitJs[drawerId];
+    delete window._customDrawerInitUrls[drawerId];
     delete window._customDrawerInitialized[drawerId];
     delete window._customDrawerCleanup[drawerId];
     delete window._customDrawerAbort[drawerId];
@@ -196,8 +196,8 @@ function mountCustomDrawers() {
     }
     if (typeof prepareSkillDrawer === 'function') prepareSkillDrawer(drawerId);
 
-    if (p.initJs) window._customDrawerInitJs[drawerId] = p.initJs;
-    else delete window._customDrawerInitJs[drawerId];
+    if (p.initUrl) window._customDrawerInitUrls[drawerId] = p.initUrl;
+    else delete window._customDrawerInitUrls[drawerId];
     window._customDrawerGeneration[drawerId]
       = (window._customDrawerGeneration[drawerId] || 0) + 1;
     window._customDrawerMounts[p.id] = { drawerId, btnId, signature };
@@ -209,22 +209,27 @@ function mountCustomDrawers() {
 
 // Called by drawers.js toggleDrawer when a custom drawer is opened.
 // Executes initJs the first time the drawer is opened (idempotent).
+let _customDrawerInitAttempt = 0;
+async function importCustomDrawerInit(url) {
+  // Failed module loads are cached by the browser. A new attempt must retry.
+  const module = await import(`${url}&load=${++_customDrawerInitAttempt}`);
+  return module.default;
+}
+
 function runCustomDrawerInit(drawerId) {
   if (window._customDrawerInitialized[drawerId]) return;
-  const code = window._customDrawerInitJs[drawerId];
-  if (!code) return;
+  const url = window._customDrawerInitUrls[drawerId];
+  if (!url) return;
   window._customDrawerInitialized[drawerId] = true;
   const generation = window._customDrawerGeneration[drawerId] || 0;
   const controller = new AbortController();
   window._customDrawerAbort[drawerId] = controller;
   try {
-    // AsyncFunction so the init body may use top-level await (fetch, etc.)
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    // `signal` and `drawerId` are optional backwards-compatible arguments.
-    // New drawers should pass signal to fetch and check signal.aborted after
-    // awaits so a hot update cannot let stale work touch replacement DOM.
-    const fn = new AsyncFunction('signal', 'drawerId', code);
-    const initPromise = Promise.resolve(fn(controller.signal, drawerId))
+    const initPromise = importCustomDrawerInit(url)
+      .then(initialize => {
+        if (controller.signal.aborted || window._customDrawerGeneration[drawerId] !== generation) return;
+        return initialize(controller.signal, drawerId);
+      })
       .then(cleanup => {
         if (window._customDrawerGeneration[drawerId] !== generation) {
           if (typeof cleanup === 'function') {

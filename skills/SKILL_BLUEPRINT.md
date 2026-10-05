@@ -1139,14 +1139,14 @@ in place and show “unavailable” until removed or the widget returns.
 
 ## Optional: drawer UI
 
-A skill may optionally ship a **drawer** — a small panel that opens from the left sidebar when the user clicks its button. Drawers are completely optional. Most skills don't need one. Add a drawer when the user explicitly asks for a sidebar panel, configuration form, or richer interactive UI. If they ask for a card on an OE dashboard, use the declarative dashboard widget contract above instead.
+A skill may optionally ship a **drawer** — a panel opened from an app icon inside **Skills**. Open **Skills** using the grid icon in the sidebar, or **Menu → Skills** on mobile, then select the skill. Enabled custom drawers appear in that launcher automatically. Drawers are completely optional. Most skills don't need one. Add a drawer when the user explicitly asks for a skill panel, configuration form, or richer interactive UI. If they ask for a card on an OE dashboard, use the declarative dashboard widget contract above instead.
 
 Pass a `drawer` object to `skill_create` alongside the usual `id`, `name`, `tools`, `code`:
 
 ```jsonc
 {
   "drawer": {
-    "name": "My Panel",          // shown in the drawer header + sidebar tooltip
+    "name": "My Panel",          // shown below the app icon in Skills + in the drawer header
     "lucideIcon": "receipt",     // PREFERRED — lucide icon name, matches built-in drawers
     "icon": "🔧",                 // fallback emoji if no lucide icon fits
     "html": "<div id='usr_myskill_root'>Loading…</div>",
@@ -1158,7 +1158,7 @@ Pass a `drawer` object to `skill_create` alongside the usual `id`, `name`, `tool
 
 ### Icons — prefer `lucideIcon` over emoji
 
-The rest of the OpenEnsemble sidebar uses [Lucide](https://lucide.dev/icons) line icons (`receipt`, `home`, `bell`, `calendar`, `file-text`, `users`, `bookmark`, etc.). Set `lucideIcon` to a lucide icon name so the drawer's sidebar button and header match the built-in look instead of standing out as an emoji. Only fall back to `icon` (emoji) when no lucide icon fits the concept.
+OpenEnsemble uses [Lucide](https://lucide.dev/icons) line icons (`receipt`, `home`, `bell`, `calendar`, `file-text`, `users`, `bookmark`, etc.). Set `lucideIcon` to a lucide icon name for the skill's app icon in **Skills** and its drawer header. OE supplies the rounded app tile and label automatically. Only fall back to `icon` (emoji) when no lucide icon fits the concept.
 
 ### HTML — use the `.cdraw-*` class set, not inline styles
 
@@ -1186,7 +1186,7 @@ The `html` string is injected straight into the drawer body. It lives in the mai
 
 Color and spacing tokens available as CSS variables: `--bg`, `--bg2`, `--bg3`, `--border`, `--text`, `--muted`, `--accent`, `--green`, `--yellow`, `--red`, `--radius`. Prefer these over hard-coded hex codes so light/dark themes stay consistent.
 
-Give any custom ids a unique prefix (e.g. `usr_myskill_root`, not `root`) to avoid DOM collisions with other drawers. The drawer header, close button, and outer frame are provided for you — you only fill the body.
+Give any custom ids a unique prefix (e.g. `usr_myskill_root`, not `root`) to avoid DOM collisions with other drawers. OE provides the launcher icon, **All skills** return button, drawer header, close button, and outer frame. Supply only the drawer body; the shared launcher handles navigation.
 
 #### Example: a clean list drawer
 
@@ -1346,9 +1346,9 @@ export async function handleRequest(req, res, cfg) {
 - Admins editing another account's duplicate-named skill pass the explicit
   `owner_id` returned by the read tool; ordinary users can address only their
   own drawer.
-- On `skill_delete`, the drawer plugin directory and its sidebar button are removed automatically.
+- On `skill_delete`, the drawer plugin directory and its app icon in **Skills** are removed automatically.
 - Successful add/update/delete operations hot-reload the server-side drawer and
-  notify connected browsers to reconcile their sidebar and open panel. A
+  notify connected browsers to reconcile their **Skills** launcher and open panel. A
   reconnect also refreshes the drawer catalog.
 - If the drawer creation fails (missing `html`, invalid `serverCode`, etc.) the entire skill creation is rolled back.
 - Never edit `plugins/` directly and never restart OE for a drawer-only change.

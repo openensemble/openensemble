@@ -6,6 +6,16 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-05
+
+**One Skills drawer for Finance, Tutor, and custom panels**
+Open **Skills** using the grid icon in the sidebar, or **Menu → Skills** on mobile, to see your enabled skill drawers as app icons. Search for a skill and select its icon to open the panel. **All skills** returns to the grid with your search and scroll position preserved. See [Skills](skills.md#per-skill-setup).
+
+**New custom drawers appear automatically**
+Skill Builder now explains where to find a skill's icon and uses the shared Skills navigation. Adding, updating, or removing a custom drawer refreshes the launcher even while your agent is responding, without reloading the page. Interactive custom drawers also start correctly when opened.
+
+---
+
 ## 2026-10-02
 
 **Wait between routine actions**

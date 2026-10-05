@@ -244,15 +244,19 @@ Do not volunteer a visual for every skill.
 
 ---
 
-## 10. Drawer / sidebar UI
+## 10. Drawer UI in Skills
 
-**Trigger:** user explicitly asks for a sidebar panel, a configuration
+**Trigger:** user explicitly asks for a skill panel, a configuration
 screen, a form, or richer interactive UI.
 
-**User pitch:** "I can add a small sidebar panel showing {what's in
+**User pitch:** "I can add a panel under Skills showing {what's in
 flight, last fired, current settings} so you can see everything without
 asking. Most skills don't need one — it's pure UX, no extra
 functionality. Want one?"
+
+**Location:** **Skills** (the sidebar grid icon), or **Menu → Skills** on mobile.
+OE automatically adds an app icon for each enabled custom drawer and supplies
+the **All skills** return button inside the panel.
 
 **Skip when:** user asked for a card on a dashboard; use capability 9 instead.
 Drawers are optional and most skills should not include one.

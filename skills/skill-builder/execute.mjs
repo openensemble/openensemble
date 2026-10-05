@@ -15,7 +15,7 @@ import {
 } from '../../plugins.mjs';
 import { mayImportCustomCodeInProcess } from '../../lib/custom-code-policy.mjs';
 import { atomicWriteSync, withLock } from '../../routes/_helpers/io-lock.mjs';
-import { notifyUser } from '../../lib/personalization/notify.mjs';
+import { sendToUser } from '../../routes/_helpers/broadcast.mjs';
 import { validateSkillDashboardWidgets } from '../../lib/dashboard-widgets.mjs';
 
 const BLUEPRINT = path.join(SKILLS_DIR, 'SKILL_BLUEPRINT.md');
@@ -568,7 +568,8 @@ async function persistDrawerBundle({
         try { rmSync(commitPath, { force: true }); } catch {}
       }
 
-      void notifyUser(userId, {
+      // Catalog invalidation must reach the browser even during an active turn.
+      sendToUser(userId, {
         type: 'drawers_changed',
         action: prior ? 'update' : 'add',
         pluginId,
@@ -663,7 +664,7 @@ async function removeDrawerForSkill(
       }
       return { error: `Drawer delete failed — previous version restored: ${e.message}` };
     }
-    void notifyUser(userId, { type: 'drawers_changed', action: 'delete', pluginId });
+    sendToUser(userId, { type: 'drawers_changed', action: 'delete', pluginId });
     return { removed: true, pluginId };
   });
 }
@@ -1160,7 +1161,7 @@ async function handleCreate(args, userId) {
       });
       return `Drawer creation failed — skill creation rolled back:\n\n${drawerErr}`;
     }
-    drawerNote = ' A sidebar drawer was also installed and hot-loaded in connected browsers.';
+    drawerNote = ' A drawer was also installed and hot-loaded in connected browsers. Open it from Skills (Menu → Skills on mobile).';
   }
 
   // Improvement log — first entry for the new skill.
