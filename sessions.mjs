@@ -8,7 +8,7 @@
  */
 
 import fs from 'fs';
-import { resolveProjectSessionKey, projectIdFromSession } from './lib/project-context.mjs';
+import { resolveProjectSessionKey, projectIdFromSession, chatIdFromSession, isChatId, isProjectId } from './lib/project-context.mjs';
 import fsp from 'fs/promises';
 import { randomUUID } from 'crypto';
 import {
@@ -986,7 +986,7 @@ export function clearSession(agentId, { expectedEpoch = null, streamSnapshot = n
 // buffer, and LM Studio response-id files. Keep a freshly rotated epoch
 // tombstone so an old restart/task checkpoint can never match a deleted and
 // later recreated agent merely because both otherwise read as "legacy".
-export async function deleteSession(agentId) {
+export async function deleteSession(agentId, { strict = false } = {}) {
   agentId = resolveProjectSessionKey(agentId);
   return withSessionWriteLock(agentId, async () => {
     const paths = [sessionPath(agentId), `${sessionPath(agentId)}.clears.json`, streamBufferPath(agentId), lmsIdPath(agentId)];
@@ -998,8 +998,8 @@ export async function deleteSession(agentId) {
           paths.push(path.join(getSessionsDir(agentId), name));
         }
       }
-    } catch { /* directory may not exist */ }
-    await Promise.all(paths.map(p => fsp.rm(p, { force: true }).catch(() => {})));
+    } catch (error) { if (strict && error.code !== 'ENOENT') throw error; }
+    await Promise.all(paths.map(p => fsp.rm(p, { force: true }).catch(error => { if (strict) throw error; })));
     await atomicRewrite(
       sessionEpochPath(agentId),
       `se_${randomUUID().slice(0, 12)}\n`,
@@ -1008,6 +1008,17 @@ export async function deleteSession(agentId) {
     _lineCounts.delete(agentId);
     for (const key of _lastFlush.keys()) if (key.startsWith(`${agentId}:`)) _lastFlush.delete(key);
   });
+}
+
+// Include histories from agents that have since been removed from the roster.
+export async function savedChatSessionKeys(userId, chatId, projectId = null) {
+  if (!/^user_[a-zA-Z0-9]+$/.test(userId) || !isChatId(chatId) || (projectId && !isProjectId(projectId))) throw new Error('Invalid saved chat scope');
+  let files;
+  try { files = await fsp.readdir(getSessionsDir(`${userId}_chat`)); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  return [...new Set(files.map(file => file.split('.')[0])
+    .filter(id => /^[a-zA-Z0-9_-]+$/.test(id) && chatIdFromSession(id) === chatId && projectIdFromSession(id) === projectId)
+    .map(id => `${userId}_${id}`))];
 }
 
 // ── LM Studio stateful response ID ───────────────────────────────────────────

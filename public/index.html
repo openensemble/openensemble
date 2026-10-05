@@ -25,6 +25,7 @@
 <script src="/vendor/chart.umd.min.js"></script>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/project-spaces.css">
+<link rel="stylesheet" href="/saved-chats.css">
 <link rel="stylesheet" href="/proactive-work.css">
 <link rel="stylesheet" href="/voice-diagnostics.css">
 </head>
@@ -302,10 +303,12 @@
         <p id="chatAgentsEmpty" class="chat-agents-empty">When this chat delegates work, agents and their progress will appear here.</p>
       </section>
       <div class="chat-agents-controls">
+        <span id="savedChatLabel">Original chat</span>
         <button type="button" class="chat-agents-toggle" id="chatAgentsToggle" aria-controls="chatAgentsPanel" aria-expanded="false" aria-haspopup="dialog" title="Show agents working in this chat"><i data-lucide="network" aria-hidden="true"></i><span class="chat-agents-toggle-label">Agents</span><span id="chatAgentsCount" hidden>0</span></button>
       </div>
       <div class="input-row">
         <button class="btn-attach" id="btnAttach" title="Attach file"><i data-lucide="paperclip"></i></button>
+        <button type="button" class="btn-attach" id="btnChats" title="Saved chats" aria-label="Saved chats" aria-haspopup="dialog" aria-controls="savedChatsDialog" aria-expanded="false" data-action="openSavedChats"><i data-lucide="messages-square" aria-hidden="true"></i></button>
         <input type="file" id="chatFileInput" accept="image/*,audio/*,video/*,.pdf,.csv" multiple style="display:none">
         <textarea id="input" placeholder="Message…" rows="1"></textarea>
         <button class="btn-stop" id="btnStop" title="Stop generating">■</button>
@@ -1904,6 +1907,15 @@
 
 
 
+<dialog id="savedChatsDialog" class="saved-chats-dialog" aria-labelledby="savedChatsTitle">
+  <header><h2 id="savedChatsTitle">Saved chats</h2><button data-action="closeSavedChats" aria-label="Close saved chats">✕</button></header>
+  <p>Chats save automatically. Start fresh or pick up where you left off.</p>
+  <button id="newSavedChat" data-action="newSavedChat">+ New chat</button>
+  <input id="savedChatsSearch" type="search" placeholder="Search chats…" aria-label="Search saved chats" data-input-action="renderSavedChats">
+  <nav id="savedChatsList" aria-label="Your saved chats"></nav>
+  <div id="savedChatRenameRow" hidden><input id="savedChatRename" maxlength="100" placeholder="Rename current chat" aria-label="New name for current chat"><button data-action="renameCurrentChat">Rename</button></div>
+  <div id="savedChatsMessage" role="status" aria-live="polite"></div>
+</dialog>
 <dialog id="projectSpacesDialog" class="project-spaces-dialog" aria-labelledby="projectSpacesTitle">
   <header class="project-spaces-header"><h2 id="projectSpacesTitle">Project spaces</h2><button data-action="enterProjectSpace" data-args="[null]">General chat</button><button data-action="closeProjectSpaces" aria-label="Close project spaces">✕</button></header>
   <div class="project-spaces-layout"><aside class="project-spaces-nav"><button class="project-primary" data-action="newProjectSpace">+ New project</button><nav id="projectSpaceList" aria-label="Your projects"></nav></aside><main id="projectSpaceDetail" class="project-space-detail"></main></div>
@@ -1917,6 +1929,7 @@
 </dialog>
 <script src="/proactive-work.js"></script>
 <script src="/project-spaces.js"></script>
+<script src="/saved-chats.js"></script>
 <script src="/tutor.js"></script>
 <script src="/tutor-today.js"></script>
 <script src="/websocket.js"></script>

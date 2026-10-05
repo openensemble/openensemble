@@ -1,3 +1,6 @@
+import { projectSessionKey } from '../lib/project-context.mjs';
+import { getSavedChat } from '../lib/saved-chats.mjs';
+import { getProjectSpace } from '../lib/project-spaces.mjs';
 /**
  * Expense routes: /api/expenses/*, /api/expense-groups/*, /api/expense-books/*, /api/chat-upload
  */
@@ -255,7 +258,11 @@ export async function handle(req, res) {
         return true;
       }
       const agentId = String(agent);
-      const key = agentId.startsWith(`${authId}_`) ? agentId : `${authId}_${agentId}`;
+      const projectId = body.projectId || null, chatId = body.chatId || null;
+      if (projectId) getProjectSpace(authId, projectId);
+      if (chatId) getSavedChat(authId, chatId, projectId);
+      const localAgentId = agentId.startsWith(`${authId}_`) ? agentId.slice(authId.length + 1) : agentId;
+      const key = projectSessionKey(authId, localAgentId, projectId, chatId);
       const { resolveAttachmentDecision } = await import('../sessions.mjs');
       const outcome = await resolveAttachmentDecision(
         key,
@@ -279,7 +286,7 @@ export async function handle(req, res) {
         const { sendToUser } = await import('../ws-handler.mjs');
         sendToUser(authId, {
           type: 'attachment_decision_outcome',
-          decisionId, decision, agent: agent || null, ts,
+          decisionId, decision, agent: agent || null, ts, projectId, chatId,
         });
       } catch {}
       res.writeHead(200, { 'Content-Type': 'application/json' });

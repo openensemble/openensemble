@@ -4,6 +4,10 @@
 async function send() {
   let text = $('input').value.trim();
   if (!text && !pendingAttachments.length) return;
+  if (/^\/chat(?:\s|$)/i.test(text)) {
+    await runSavedChatCommand(text.slice(5));
+    return;
+  }
   if (/^\/clear$/i.test(text) && !pendingAttachments.length) {
     if (clearSession(true)) {
       clearTimeout(_draftSaveTimer);

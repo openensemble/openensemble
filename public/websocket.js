@@ -363,7 +363,8 @@ function connect() {
   // OE is served over a secure tunnel — the browser blocks the upgrade and
   // every WS-dependent feature (chat send, streaming, drawers) goes silent.
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${wsProto}://${location.host}${typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? '/?project=' + encodeURIComponent(activeProjectSpaceId) : ''}`);
+  const scopeQuery = typeof chatScopeQuery === 'function' ? chatScopeQuery() : new URLSearchParams(typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? { project: activeProjectSpaceId } : {});
+  ws = new WebSocket(`${wsProto}://${location.host}/${scopeQuery.size ? '?' + scopeQuery : ''}`);
   ws.onopen  = () => {
     sessionsLoaded.clear();
     // Authenticate via first message instead of URL query string
@@ -533,12 +534,24 @@ function reloadDocumentSession(agentId) {
 
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
+  if (msg.type === 'saved_chat_deleted') {
+    handleSavedChatDeleted(msg.chatId, msg.projectId);
+    return;
+  }
+  if (msg.type === 'chat_error') {
+    if (typeof showSavedChatUnavailable === 'function') showSavedChatUnavailable(msg.message);
+    return;
+  }
   if (msg.type === 'project_error') {
     if (typeof showProjectUnavailable === 'function') showProjectUnavailable(msg.message);
     return;
   }
   if (typeof activeProjectSpaceId !== 'undefined' && (msg.agent || ['session_loaded', 'session_cleared', 'active_streams'].includes(msg.type))
       && (msg.projectId || null) !== (activeProjectSpaceId || null)) return;
+  if (typeof activeSavedChatId !== 'undefined' && (msg.agent || ['session_loaded', 'session_cleared', 'active_streams'].includes(msg.type))
+      && (msg.chatId || null) !== activeSavedChatId) return;
+  if (['agent_list', 'turn_accepted'].includes(msg.type) && typeof refreshSavedChatLabel === 'function') refreshSavedChatLabel();
+  if (msg.type === 'agent_list' && typeof restoreChatAttachmentDraft === 'function') restoreChatAttachmentDraft();
   observeServerBootId(msg?.boot_id);
   noteAgentLiveRevision(msg);
   if (!acceptTurnEnvelope(msg)) return;

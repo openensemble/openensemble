@@ -59,6 +59,7 @@ import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
 import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs';
 import { handle as handleProjectSpaces } from './routes/project-spaces.mjs';
+import { handle as handleSavedChats } from './routes/saved-chats.mjs';
 import { handle as handleProactiveWork } from './routes/proactive-work.mjs';
 import { startProactiveWork, stopProactiveWork } from './lib/personalization/work-engine.mjs';
 import { handle as handleJobRecovery } from './routes/job-recovery.mjs';
@@ -333,6 +334,7 @@ function isDashboardViewPath(pathname) {
 const routeHandlers = [
   handleHealth,    // /health (public) + /api/admin/health (authed)
   handleProjectSpaces,
+  handleSavedChats,
   handleProactiveWork,
   handleJobRecovery,
   handleDashboards, // per-user dashboards + authenticated renderer compatibility APIs

@@ -5,6 +5,30 @@
 let slashMenuIdx = 0, slashMenuItems = [];
 let _skillsCache = null;
 let _effortCache = null;
+let _chatMenuState = null;
+function _chatMenuItems(filter) {
+  if (filter === 'list') filter = '';
+  const create = { label: 'New chat', desc: 'Start a new conversation', iconName: 'plus', action: () => runSavedChatCommand('new') };
+  if (filter === 'new') return [create];
+  if (!_chatMenuState) {
+    const state = _chatMenuState = { chats: [], loading: true, error: '' };
+    savedChatApi().then(chats => { state.chats = chats; })
+      .catch(error => { state.error = error.message; })
+      .finally(() => {
+        state.loading = false;
+        if (_chatMenuState === state && $('slashMenu').style.display !== 'none') updateSlashMenu();
+      });
+  }
+  const items = 'new chat'.startsWith(filter) ? [create] : [];
+  return items.concat(savedChatChoices(_chatMenuState.chats)
+    .filter(chat => `${chat.name} ${chat.preview}`.toLowerCase().includes(filter))
+    .map(chat => ({
+      label: chat.name,
+      desc: chat.id === activeSavedChatId ? 'Current chat' : chat.preview || 'Resume conversation',
+      iconName: chat.id === activeSavedChatId ? 'check' : 'message-square',
+      action: () => { consumeSavedChatCommand(); enterSavedChat(chat.id, chat.agentId); },
+    })));
+}
 async function _loadSkills() {
   try { _skillsCache = await fetch('/api/roles').then(r => r.json()); } catch { _skillsCache = _skillsCache || []; }
   return _skillsCache;
@@ -33,6 +57,8 @@ async function assignEffortToAgent(agentId, reasoningEffort) {
 }
 
 const SLASH_COMMANDS = [
+  { cmd: '/chat',      icon: 'messages-square', desc: 'List saved chats or start a new one',
+    action: () => runSavedChatCommand() },
   { cmd: '/clear',     icon: 'trash-2',    desc: 'Clear the current chat session',
     action: () => { hideSlashMenu(); $('input').value = ''; clearSession(); } },
   { cmd: '/model',     icon: 'brain',      desc: 'Change the active model' },
@@ -48,6 +74,9 @@ const SLASH_COMMANDS = [
 
 function _slashGetItems(val) {
   const lo = val.toLowerCase();
+  if (/^\/chat(?:\s|$)/i.test(val)) {
+    return _chatMenuItems(val.slice(5).trim().toLowerCase());
+  }
   // /model <filter> → model submenu
   if (/^\/model\s/.test(val)) {
     const f = val.slice(7).toLowerCase();
@@ -138,24 +167,30 @@ function _slashGetItems(val) {
 function updateSlashMenu() {
   const val = $('input').value;
   if (!val.startsWith('/')) { hideSlashMenu(); return; }
+  const isChatMenu = /^\/chat(?:\s|$)/i.test(val);
+  if (!isChatMenu) _chatMenuState = null;
   slashMenuItems = _slashGetItems(val);
   const menu = $('slashMenu');
-  if (!slashMenuItems.length) { hideSlashMenu(); return; }
+  const status = isChatMenu
+    ? (_chatMenuState?.loading ? 'Loading chats…' : _chatMenuState?.error || (!slashMenuItems.length ? 'No matching chats.' : ''))
+    : '';
+  if (!slashMenuItems.length && !status) { hideSlashMenu(); return; }
   if (slashMenuIdx >= slashMenuItems.length) slashMenuIdx = 0;
+  menu.classList.toggle('saved-chat-menu', isChatMenu);
   menu.style.display = 'block';
   menu.innerHTML = slashMenuItems.map((item, i) =>
     `<div class="slash-menu-item${i === slashMenuIdx ? ' active' : ''}" data-idx="${i}">
        ${item.iconName ? `<span class="smi-icon">${icon(item.iconName, 14)}</span>` : ''}
-       <span class="smi-label">${escHtml(item.label)}</span>
+       <span class="smi-label" title="${escHtml(item.label)}">${escHtml(item.label)}</span>
        <span class="smi-desc">${escHtml(item.desc)}</span>
      </div>`
-  ).join('');
+  ).join('') + (status ? `<div class="slash-menu-status" role="status">${escHtml(status)}</div>` : '');
   menu.querySelectorAll('.slash-menu-item').forEach(el => {
     el.addEventListener('mousedown', e => { e.preventDefault(); slashMenuItems[+el.dataset.idx]?.action(); });
   });
 }
 
-function hideSlashMenu() { $('slashMenu').style.display = 'none'; slashMenuItems = []; slashMenuIdx = 0; }
+function hideSlashMenu() { $('slashMenu').style.display = 'none'; slashMenuItems = []; slashMenuIdx = 0; _chatMenuState = null; }
 
 // ── @-Mention Menu ─────────────────────────────────────────────────────────
 // Two modes:
@@ -305,4 +340,5 @@ function slashMenuNav(dir) {
   if (!slashMenuItems.length) return;
   slashMenuIdx = (slashMenuIdx + dir + slashMenuItems.length) % slashMenuItems.length;
   updateSlashMenu();
+  $('slashMenu').querySelector('.slash-menu-item.active')?.scrollIntoView({ block: 'nearest' });
 }

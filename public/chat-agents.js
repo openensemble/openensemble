@@ -69,7 +69,8 @@ function loadChatAgentHistory(agent, completedTasks, snapshotRevision = 0) {
     // A completed snapshot is accepted only for this exact chat incarnation.
     // Historical records never supply live work or cross a user/profile clear.
     const projectSuffix = typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? `__${activeProjectSpaceId}` : '';
-    if (!userId || !epoch || status.state.sourceSessionKey !== `${userId}_${agent}${projectSuffix}`
+    const chatSuffix = typeof activeSavedChatId === 'string' && activeSavedChatId ? `__${activeSavedChatId}` : '';
+    if (!userId || !epoch || status.state.sourceSessionKey !== `${userId}_${agent}${chatSuffix}${projectSuffix}`
         || status.state.sourceSessionEpoch !== epoch
         || chatAgentScope(status.agent || status.state.visibleAgentId) !== agent) continue;
     completed.set(status.watcherId, {

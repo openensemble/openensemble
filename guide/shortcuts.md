@@ -16,6 +16,8 @@ A grab-bag of small features that save time once you know they exist.
 
 Type `/` at the start of an empty chat input to bring up the slash menu. It shows agent-specific commands and quick actions. Available commands depend on the agent's role.
 
+Type `/chat` to list your chats in the suggestion box, with **New chat** at the top. Click a chat or use the arrow keys and Enter. Type `/chat new` to start a new conversation directly. You can also use the **Saved chats** button next to the paperclip.
+
 ## Agent mentions
 
 Type `@<agent-name> do this` at the start of a message to send that request to a specific agent. OE will switch to that agent's chat and route the message there.

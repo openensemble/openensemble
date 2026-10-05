@@ -1,4 +1,4 @@
-import { projectContext, currentProjectId, projectEvent, matchesProject } from '../lib/project-context.mjs';
+import { projectContext, currentProjectId, currentChatId, projectEvent, matchesProject } from '../lib/project-context.mjs';
 /**
  * User/device WebSocket delivery helpers (broadcast, sendTo*, online probes).
  * Extracted from ws-handler.mjs — pure move. Main connection setup stays there.
@@ -23,8 +23,8 @@ function rawChatAgentId(userId, agentId) {
   return value.startsWith(prefix) ? value.slice(prefix.length) : value;
 }
 
-function chatRevisionKey(userId, agentId) {
-  return `${userId}:${rawChatAgentId(userId, agentId)}${currentProjectId(userId) ? ':' + currentProjectId(userId) : ''}`;
+function chatRevisionKey(userId, agentId, projectId = currentProjectId(userId), chatId = currentChatId(userId)) {
+  return `${userId}:${rawChatAgentId(userId, agentId)}${projectId ? ':' + projectId : ''}${chatId ? ':' + chatId : ''}`;
 }
 
 export function getChatRevision(userId, agentId) {
@@ -35,7 +35,7 @@ export function stampChatEvent(userId, event) {
   event = projectEvent(userId, event);
   if (!event || typeof event !== 'object' || !event.agent) return event;
   if (Number.isFinite(event.chat_revision)) return event;
-  const key = chatRevisionKey(userId, event.agent);
+  const key = chatRevisionKey(userId, event.agent, event.projectId || null, event.chatId || null);
   const revision = (_chatRevisions.get(key) ?? 0) + 1;
   _chatRevisions.set(key, revision);
   return { ...event, chat_revision: revision };
@@ -60,7 +60,7 @@ export function broadcast(msg) {
     return;
   }
   const context = projectContext.getStore();
-  if (context?.projectId && msg?.agent) { sendToUser(context.userId, projectEvent(context.userId, msg)); return; }
+  if ((context?.projectId || context?.chatId) && msg?.agent) { sendToUser(context.userId, projectEvent(context.userId, msg)); return; }
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   for (const client of getMainWss().clients)
     if (client.readyState === client.OPEN && !client._deviceId) try { client.send(data); } catch {}
@@ -70,7 +70,7 @@ export function broadcast(msg) {
 export function broadcastToUsers(userIds, msg) {
   if (!getMainWss()) return;
   const context = projectContext.getStore();
-  if (context?.projectId && msg?.agent) {
+  if ((context?.projectId || context?.chatId) && msg?.agent) {
     if (userIds.includes(context.userId)) sendToUser(context.userId, projectEvent(context.userId, msg));
     return;
   }

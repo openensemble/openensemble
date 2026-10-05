@@ -1,5 +1,6 @@
-import { projectContext, projectSessionKey, projectIdFromSession, matchesProject } from '../lib/project-context.mjs';
+import { projectContext, projectSessionKey, projectIdFromSession, chatIdFromSession, matchesProject } from '../lib/project-context.mjs';
 import { getProjectSpace } from '../lib/project-spaces.mjs';
+import { getSavedChat } from '../lib/saved-chats.mjs';
 /**
  * Main browser/voice WebSocket connection handler.
  * Extracted from ws-handler.mjs — pure move.
@@ -215,7 +216,9 @@ export function bindConnectionDeps(deps) {
 
 export function onConnection(ws, req) {
   const requestedProject = new URL(req.url || '/', 'http://localhost').searchParams.get('project');
+  const requestedChat = new URL(req.url || '/', 'http://localhost').searchParams.get('chat');
   ws._projectId = null;
+  ws._chatId = null;
   try { ws._socket?.setKeepAlive?.(true, WS_PING_INTERVAL); } catch {}
   ws._clientIp = wsClientIp(req);
   const desktopHeader = String(req.headers['x-openensemble-desktop-app'] || '').trim() === '1';
@@ -262,12 +265,17 @@ export function onConnection(ws, req) {
         getProjectSpace(ws._userId, requestedProject);
         ws._projectId = requestedProject;
       }
-      await projectContext.run({ userId: ws._userId, projectId: ws._projectId }, sendProjectInitialData);
+      if (requestedChat) {
+        if (ws._deviceId) throw new Error('Saved chats require a browser session');
+        getSavedChat(ws._userId, requestedChat, ws._projectId);
+        ws._chatId = requestedChat;
+      }
+      await projectContext.run({ userId: ws._userId, projectId: ws._projectId, chatId: ws._chatId }, sendProjectInitialData);
     } catch {
       // A rejected project must never accept queued frames as general chat.
       ws._authenticated = false;
-      ws.send(JSON.stringify({ type: requestedProject ? 'project_error' : 'error', message: requestedProject ? 'Project space unavailable for this profile' : 'Unable to load conversations' }));
-      ws.close(requestedProject ? 4004 : 1011, requestedProject ? 'Project unavailable' : 'Session load failed');
+      ws.send(JSON.stringify({ type: requestedChat ? 'chat_error' : requestedProject ? 'project_error' : 'error', message: requestedChat ? 'Saved chat unavailable for this profile or project' : requestedProject ? 'Project space unavailable for this profile' : 'Unable to load conversations' }));
+      ws.close(requestedChat || requestedProject ? 4004 : 1011, 'Conversation unavailable');
     }
   }
   async function sendProjectInitialData() {
@@ -335,7 +343,7 @@ export function onConnection(ws, req) {
     const activeByAgent = new Map(active.map(s => [s.agentId, s]));
     for (const { agent, messages, completedTasks, pendingStream, sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts } of sessionLoads) {
       ws.send(JSON.stringify({
-        type: 'session_loaded', projectId: ws._projectId, agent: agent.id, messages, completedTasks, pendingStream,
+        type: 'session_loaded', projectId: ws._projectId, chatId: ws._chatId, agent: agent.id, messages, completedTasks, pendingStream,
         activeStream: activeByAgent.get(agent.id) ?? null,
         activeSnapshotRevision: activeSnapshotRevisions[agent.id] ?? 0,
         sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts,
@@ -344,9 +352,9 @@ export function onConnection(ws, req) {
     // Send a narrow, folded UI snapshot rather than serializing execution
     // callbacks, private prompts, verifier leases, or ambient contexts.
     const tasks = projectActiveTasksForWire(
-      getActiveBgTasks().filter(t => t.userId === ws._userId && projectIdFromSession(t.sourceSessionKey) === (ws._projectId || null)),
+      getActiveBgTasks().filter(t => t.userId === ws._userId && projectIdFromSession(t.sourceSessionKey) === (ws._projectId || null) && chatIdFromSession(t.sourceSessionKey) === (ws._chatId || null)),
     );
-    ws.send(JSON.stringify({ type: 'active_streams', projectId: ws._projectId, agents: active, tasks, snapshotRevisions: activeSnapshotRevisions }));
+    ws.send(JSON.stringify({ type: 'active_streams', projectId: ws._projectId, chatId: ws._chatId, agents: active, tasks, snapshotRevisions: activeSnapshotRevisions }));
   }
 
   if (ws._authenticated) {
@@ -461,6 +469,16 @@ export function onConnection(ws, req) {
       ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
       ws.close(4001, 'Unauthorized');
       return;
+    }
+
+    if (ws._chatId) {
+      try { getSavedChat(ws._userId, ws._chatId, ws._projectId); }
+      catch {
+        ws._authenticated = false;
+        ws.send(JSON.stringify({ type: 'chat_error', message: 'This saved chat is no longer available.' }));
+        ws.close(4004, 'Saved chat unavailable');
+        return;
+      }
     }
 
     if (handleMotionMessage(ws, msg)) return;
@@ -805,7 +823,7 @@ export function onConnection(ws, req) {
           }
         } catch (error) {
           console.warn('[ws] Context clear failed:', error.message);
-          ws.send(JSON.stringify({ type: 'error', agent: agentId, projectId: ws._projectId || null,
+          ws.send(JSON.stringify({ type: 'error', agent: agentId, projectId: ws._projectId || null, chatId: ws._chatId || null,
             code: 'session_clear_failed', retryable: false,
             message: 'Context was not cleared because it could not be saved. Your conversation is still available.' }));
         }
@@ -1005,7 +1023,7 @@ export function onConnection(ws, req) {
         const requestId = typeof msg.request_id === 'string' && msg.request_id.length <= 80
           ? msg.request_id : null;
         ws.send(JSON.stringify({
-          type: 'session_loaded', projectId: ws._projectId, agent: agentId, messages, pendingStream,
+          type: 'session_loaded', projectId: ws._projectId, chatId: ws._chatId, agent: agentId, messages, pendingStream,
           completedTasks: completedTasksForSession(ws._userId, key, sessionEpoch),
           activeStream: activeStream ? {
             ...activeStream,
@@ -1022,11 +1040,11 @@ export function onConnection(ws, req) {
     if (msg.type === 'chat') {
       // Reject non-string text/agent at the boundary so downstream code can assume strings.
       if (msg.text != null && typeof msg.text !== 'string') {
-        ws.send(JSON.stringify({ type: 'error', message: 'chat.text must be a string', agent: typeof msg.agent === 'string' ? msg.agent : 'system' }));
+        ws.send(JSON.stringify({ type: 'error', projectId: ws._projectId, chatId: ws._chatId, message: 'chat.text must be a string', agent: typeof msg.agent === 'string' ? msg.agent : 'system' }));
         return;
       }
       if (msg.agent != null && typeof msg.agent !== 'string') {
-        ws.send(JSON.stringify({ type: 'error', message: 'chat.agent must be a string', agent: 'system' }));
+        ws.send(JSON.stringify({ type: 'error', projectId: ws._projectId, chatId: ws._chatId, message: 'chat.agent must be a string', agent: 'system' }));
         return;
       }
       const textPreview = typeof msg.text === 'string' ? msg.text.slice(0, 50) : '(no text)';
@@ -1053,7 +1071,7 @@ export function onConnection(ws, req) {
         && /^[A-Za-z0-9_-]+$/.test(value);
       if (!ws._deviceId && ((msg.message_id != null && !validBrowserId(msg.message_id))
           || (msg.attempt_id != null && !validBrowserId(msg.attempt_id)))) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Invalid chat correlation id', agent: msg.agent || 'system', retryable: false }));
+        ws.send(JSON.stringify({ type: 'error', projectId: ws._projectId, chatId: ws._chatId, message: 'Invalid chat correlation id', agent: msg.agent || 'system', retryable: false }));
         return;
       }
       const browserMessageId = !ws._deviceId && validBrowserId(msg.message_id) ? msg.message_id : null;
@@ -1610,6 +1628,7 @@ export function onConnection(ws, req) {
         ws.send(JSON.stringify({
           type: 'error',
           message: 'Server error processing message',
+          projectId: ws._projectId, chatId: ws._chatId,
           agent: typeof msg?.agent === 'string' ? msg.agent : 'system',
           ...(messageDocumentRequest ? { documentRequest: messageDocumentRequest, documentTurn: true } : {}),
         }));
@@ -1618,7 +1637,7 @@ export function onConnection(ws, req) {
    }
   };
   const onWsMessage = (...args) => projectContext.run(
-    { userId: ws._userId, projectId: ws._projectId }, () => handleWsMessage(...args));
+    { userId: ws._userId, projectId: ws._projectId, chatId: ws._chatId }, () => handleWsMessage(...args));
   ws.on('message', onWsMessage);
 
   ws.on('close', (code, reason) => {

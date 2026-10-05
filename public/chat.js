@@ -30,13 +30,27 @@ const DRAFT_STORAGE_KEY = 'oe.composerDrafts.v1' + (typeof activeProjectSpaceId 
 const DRAFT_SAVE_DEBOUNCE_MS = 400;
 let _draftSaveTimer = null;
 
+function composerDraftStorageKey() {
+  const userId = typeof _currentUser !== 'undefined' ? _currentUser?.id || '' : '';
+  const chatId = typeof activeSavedChatId === 'string' ? activeSavedChatId : '';
+  return `${DRAFT_STORAGE_KEY}.${userId}${chatId ? '.' + chatId : ''}`;
+}
 function _loadDrafts() {
-  try { return JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) || '{}'); } catch { return {}; }
+  try {
+    const key = composerDraftStorageKey();
+    let value = localStorage.getItem(key);
+    if (!value && !(typeof activeSavedChatId === 'string' && activeSavedChatId) && typeof _currentUser !== 'undefined' && _currentUser?.id) {
+      value = localStorage.getItem(DRAFT_STORAGE_KEY);
+      if (value) { localStorage.setItem(key, value); localStorage.removeItem(DRAFT_STORAGE_KEY); }
+    }
+    const data = JSON.parse(value || '{}');
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch { return {}; }
 }
 function _writeDrafts(drafts) {
   // localStorage can throw (Safari private mode, quota exceeded) — a draft
   // failing to save must never interrupt typing or sending.
-  try { localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts)); } catch {}
+  try { localStorage.setItem(composerDraftStorageKey(), JSON.stringify(drafts)); } catch {}
 }
 
 function saveDraftForAgent(agentId) {
@@ -50,7 +64,8 @@ function saveDraftForAgent(agentId) {
 function restoreDraftForAgent(agentId) {
   const input = $('input');
   if (!input || !agentId) return;
-  input.value = _loadDrafts()[agentId] || '';
+  const text = _loadDrafts()[agentId];
+  input.value = typeof text === 'string' ? text : '';
   resizeTextarea();
 }
 
@@ -447,12 +462,14 @@ const CHAT_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
 
 function clearAttachment() {
   pendingAttachments = [];
+  if (typeof saveChatAttachmentDraft === 'function') saveChatAttachmentDraft();
   $('chatFileInput').value = '';
   renderAttachmentTray();
 }
 
 function removeAttachmentAt(localKey) {
   pendingAttachments = pendingAttachments.filter(a => a._localKey !== localKey);
+  if (typeof saveChatAttachmentDraft === 'function') saveChatAttachmentDraft();
   if (!pendingAttachments.length) $('chatFileInput').value = '';
   renderAttachmentTray();
 }
@@ -546,6 +563,7 @@ async function _uploadAndAddAttachment(file) {
     const idx = pendingAttachments.findIndex(a => a._localKey === localKey);
     if (idx === -1) return; // removed from the tray while the upload was in flight
     pendingAttachments[idx] = { ...data, _localKey: localKey, size: file.size };
+    if (typeof saveChatAttachmentDraft === 'function') saveChatAttachmentDraft();
     renderAttachmentTray();
   } catch (e) {
     pendingAttachments = pendingAttachments.filter(a => a._localKey !== localKey);

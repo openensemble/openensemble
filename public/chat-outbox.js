@@ -31,7 +31,8 @@ function safeOutboxAttachments(attachments) {
 }
 
 function outboxUserPrefix(prefix, userId) {
-  return `${prefix}${encodeURIComponent(userId)}:`;
+  const scope = typeof conversationStorageScope === 'function' ? conversationStorageScope() : '';
+  return `${prefix}${encodeURIComponent(userId)}${scope ? '@' + encodeURIComponent(scope) : ''}:`;
 }
 
 function outboxAttemptKey(userId, attemptId) {
@@ -132,7 +133,7 @@ function ensureChatOutboxLoaded() {
 
     // One-time compatibility read for tabs that loaded the first stability
     // patch before v2's per-attempt keys.
-    const legacy = JSON.parse(localStorage.getItem(LEGACY_CHAT_OUTBOX_KEY) || '{}');
+    const legacy = typeof conversationStorageScope === 'function' && conversationStorageScope() ? {} : JSON.parse(localStorage.getItem(LEGACY_CHAT_OUTBOX_KEY) || '{}');
     for (const row of (Array.isArray(legacy[userId]) ? legacy[userId] : [])) {
       if (!row?.attemptId || !row?.messageId || !row?.agent) continue;
       if (pendingSentAttempts.has(row.attemptId) || isOutboxTombstoned(userId, row.attemptId)) continue;

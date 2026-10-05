@@ -1,7 +1,7 @@
 import { activeTasks } from './state.mjs';
 import { changeCheckpoint, checkpointNote, checkpointToolEvents, getJobCheckpoint } from './checkpoints.mjs';
 import { getProcessIdentity, processIdentityIsProvenDead } from '../lib/file-lock.mjs';
-import { projectContext, projectIdFromSession } from '../lib/project-context.mjs';
+import { projectContext, projectIdFromSession, chatIdFromSession } from '../lib/project-context.mjs';
 import { runInTaskContext } from '../lib/task-proxy-context.mjs';
 import { runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { toolRouterContext } from '../lib/tool-router-context.mjs';
@@ -21,6 +21,11 @@ async function executionAgent(entry) {
   if (projectId) {
     const { getProjectSpace } = await import('../lib/project-spaces.mjs');
     getProjectSpace(entry.userId, projectId);
+  }
+  const chatId = chatIdFromSession(entry.sourceSessionKey);
+  if (chatId) {
+    const { getSavedChat } = await import('../lib/saved-chats.mjs');
+    getSavedChat(entry.userId, chatId, projectId);
   }
   const saved = entry.checkpoint.execution;
   const current = getAgentsForUser(entry.userId).find(a => a.id === saved.agentId);
@@ -142,7 +147,7 @@ async function startResumedJob(taskId, userId) {
   });
   const projectId = projectIdFromSession(entry.sourceSessionKey);
   // The job starts detached, with fresh cancellation and routing contexts.
-  void projectContext.run({ userId, projectId }, () => runWithTurnContext({ signal: ac.signal },
+  void projectContext.run({ userId, projectId, chatId: chatIdFromSession(entry.sourceSessionKey) }, () => runWithTurnContext({ signal: ac.signal },
     () => toolRouterContext.run(null, () => runInTaskContext({
       taskId, userId, agentId: agent.id, watcherId: entry.watcherId,
       rootTaskId: entry.rootTaskId || taskId, rootWatcherId: entry.rootWatcherId || entry.watcherId,

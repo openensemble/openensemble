@@ -11,7 +11,8 @@
  */
 
 import fs from 'fs';
-import { resolveProjectSessionKey } from './lib/project-context.mjs';
+import { resolveProjectSessionKey, currentChatId, currentProjectId } from './lib/project-context.mjs';
+import { touchSavedChat, getSavedChat } from './lib/saved-chats.mjs';
 import { randomBytes } from 'crypto';
 import { USERS_DIR } from './lib/paths.mjs';
 import {
@@ -590,6 +591,13 @@ export async function handleChatMessage({
     return;
   }
   try {
+  if (currentChatId(userId)) {
+    try { getSavedChat(userId, currentChatId(userId), currentProjectId(userId)); }
+    catch {
+      onEvent({ type: 'error', code: 'chat_unavailable', agent: agentId || 'system', message: 'This saved chat is no longer available.', retryable: false });
+      return;
+    }
+  }
   const requestedAgentId = agentId ?? getUserCoordinatorAgentId(userId);
   // Stored browser/device/task references may name an agent parked by a mode
   // switch. Single mode redirects those references to the current primary;
@@ -895,6 +903,10 @@ export async function handleChatMessage({
         } : {}),
       };
       const pendingResult = await appendUserTurnPending(scopedSessionKey, pendingUserEntry);
+      if (!pendingResult?.duplicate && !_hiddenUser && !_silent && currentChatId(userId)) {
+        try { await touchSavedChat(userId, currentChatId(userId), currentProjectId(userId), agentId, pendingUserEntry.content); }
+        catch (error) { console.warn('[saved-chats] Could not update chat title:', error.message); }
+      }
       if (pendingResult?.duplicate) {
         onEvent({ type: 'turn_accepted', agent: agentId, duplicate: true, status: pendingResult.status || 'accepted' });
 

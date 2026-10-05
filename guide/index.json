@@ -28,6 +28,7 @@
     {
       "title": "Daily use",
       "pages": [
+        { "slug": "saved-chats", "title": "Saved chats" },
         { "slug": "project-spaces", "title": "Project spaces" },
         { "slug": "dashboards", "title": "Display dashboards" },
         { "slug": "tasks",      "title": "Tasks & scheduler" },

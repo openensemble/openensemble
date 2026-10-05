@@ -1,4 +1,4 @@
-import { currentProjectId } from '../lib/project-context.mjs';
+import { currentProjectId, currentChatId } from '../lib/project-context.mjs';
 import { buildProjectContext } from '../lib/project-spaces.mjs';
 import { buildWorkContext } from '../lib/personalization/work-store.mjs';
 /**
@@ -127,6 +127,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     turnOpts = { ...turnOpts, isolatedTaskRun: true };
   }
   const projectId = currentProjectId(userId);
+  const chatId = currentChatId(userId);
   if (projectId) systemNote = `${systemNote || ''}${buildProjectContext(userId, projectId)}`;
   try { systemNote = `${systemNote || ''}${buildWorkContext(userId, projectId)}`; }
   catch (error) { console.warn('[proactive-work] goal context unavailable:', error.message); }
@@ -158,7 +159,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const inheritedLabVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
     && getTurnContext()?.suppressLearning === true;
   const labVerifierTurn = inheritedLabVerifierTurn;
-  const suppressLearning = scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId;
+  const suppressLearning = scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId || !!chatId;
   // Foreground verifier turns honor the dispatcher-authenticated 1..4 cap.
   // Detached verifier work gets two bounded extra rounds so a multi-step task
   // can correct one lookup and still produce a final answer.
@@ -417,7 +418,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
       }).catch(() => null);
     }
     return buildAgentContext(agent.id, recallQuery, userId, {
-      includeEpisodes: !isolatedTaskRun && !projectId,
+      includeEpisodes: !isolatedTaskRun && !projectId && !chatId,
       suppressLearning,
     }).catch(() => null);
   })();

@@ -526,7 +526,8 @@ function openDashboardTool(tool) {
 }
 
 function handleTaskComplete(msg) {
-  fetch(`/api/history/${msg.agent}${typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? '?project=' + encodeURIComponent(activeProjectSpaceId) : ''}`).then(r => r.json()).then(messages => {
+  const scopeQuery = typeof chatScopeQuery === 'function' ? chatScopeQuery() : new URLSearchParams(typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? { project: activeProjectSpaceId } : {});
+  fetch(`/api/history/${msg.agent}${scopeQuery.size ? '?' + scopeQuery : ''}`).then(r => r.json()).then(messages => {
     sessions[msg.agent] = messages;
     if (msg.agent === activeAgent) renderSession();
     // Flash tasks badge

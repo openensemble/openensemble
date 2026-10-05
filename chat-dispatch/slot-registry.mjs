@@ -1,4 +1,4 @@
-import { resolveProjectSessionKey, projectIdFromSession, currentProjectId } from '../lib/project-context.mjs';
+import { resolveProjectSessionKey, projectIdFromSession, currentProjectId, chatIdFromSession, currentChatId } from '../lib/project-context.mjs';
 // @ts-check
 /**
  * chat-dispatch/slot-registry.mjs
@@ -225,7 +225,7 @@ export function getActiveStreams(userId, { allProjects = false } = {}) {
   for (const info of activeStreams.values()) {
     // Internal silent turns still own the per-agent execution slot, but they
     // are not a browser stream and must stay absent from reconnect snapshots.
-    if (info.userId === userId && info.omitFromReconnect !== true && (allProjects || (info.projectId || null) === currentProjectId(userId))) {
+    if (info.userId === userId && info.omitFromReconnect !== true && (allProjects || ((info.projectId || null) === currentProjectId(userId) && (info.chatId || null) === currentChatId(userId)))) {
       result.push(snapshotActiveStream(info));
     }
   }
@@ -252,6 +252,7 @@ function snapshotActiveStream(info) {
   return {
     agentId: info.agentId,
     ...(info.projectId ? { projectId: info.projectId } : {}),
+    ...(info.chatId ? { chatId: info.chatId } : {}),
     startTs: info.startTs,
     turnId: info.turnId ?? null,
     messageId: info.messageId ?? null,
@@ -375,6 +376,7 @@ export function openTurn(scopedSessionKey, userId, agentId, meta = {}) {
     userId,
     agentId,
     projectId: projectIdFromSession(scopedSessionKey),
+    chatId: chatIdFromSession(scopedSessionKey),
     startTs: Date.now(),
     turnId: meta.turnId ?? null,
     messageId: meta.messageId ?? null,

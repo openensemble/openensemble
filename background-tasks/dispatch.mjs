@@ -1,4 +1,4 @@
-import { withoutProjectSuffix, projectIdFromSession, projectContext } from '../lib/project-context.mjs';
+import { withoutConversationSuffix, projectIdFromSession, chatIdFromSession, projectContext } from '../lib/project-context.mjs';
 /**
  * Background dispatch + completion pipeline.
  * Extracted from background-tasks.mjs — pure move with bindDispatchDeps for
@@ -460,7 +460,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
 }
 
 export function _coordinatorAgentIdFromSessionKey(sessionKey, userId) {
-  const raw = withoutProjectSuffix(sessionKey);
+  const raw = withoutConversationSuffix(sessionKey);
   const prefix = `${userId}_`;
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
@@ -473,7 +473,8 @@ export async function _resolveRuntimeSessionKey(userId, sessionKey) {
     const resolved = resolveRuntimeAgentId(userId, raw);
     if (!resolved) return sessionKey;
     const suffix = projectIdFromSession(sessionKey);
-    return (String(sessionKey).startsWith(`${userId}_`) ? `${userId}_${resolved}` : resolved) + (suffix ? `__${suffix}` : '');
+    const chatId = chatIdFromSession(sessionKey);
+    return (String(sessionKey).startsWith(`${userId}_`) ? `${userId}_${resolved}` : resolved) + (chatId ? `__${chatId}` : '') + (suffix ? `__${suffix}` : '');
   } catch {
     return sessionKey;
   }
@@ -816,7 +817,8 @@ async function _runContinuation({
 export async function _onComplete(...args) {
   const [taskId, userId] = args;
   const projectId = projectIdFromSession(activeTasks.get(taskId)?.sourceSessionKey);
-  return projectId ? projectContext.run({ userId, projectId }, () => completeInProject(...args)) : completeInProject(...args);
+  const chatId = chatIdFromSession(activeTasks.get(taskId)?.sourceSessionKey);
+  return projectContext.run({ userId, projectId, chatId }, () => completeInProject(...args));
 }
 async function completeInProject(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '', media = null) {
   const rec = activeTasks.get(taskId);

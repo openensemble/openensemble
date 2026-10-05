@@ -20,6 +20,8 @@ Progress is stored under `users/<profile>/project-spaces/<projectId>/progress.js
 
 Each agent has its own conversation within the project. **Chats** opens those conversations, including earlier messages after a reload. Switching projects opens a fresh view and leaves any running work in its original space. Different browser tabs can use different spaces.
 
+Use the **Saved chats** button beside Attach to keep additional conversations inside a project. **New chat** preserves the current conversation while starting a separate history. Project notes and progress remain shared. See [Saved chats](saved-chats.md).
+
 Project conversation history and composer drafts are separate from general chat and other spaces. OE does not automatically learn project conversations into its general conversation memory. Your profile's standing preferences, explicitly saved memories, agents, connected services, and tool permissions remain available; a project is an organizational space within your profile, not a separate permissions sandbox.
 
 ## Files and tasks

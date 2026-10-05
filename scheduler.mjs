@@ -1,4 +1,4 @@
-import { projectContext, currentProjectId } from './lib/project-context.mjs';
+import { projectContext, currentProjectId, currentChatId } from './lib/project-context.mjs';
 /**
  * OpenEnsemble Scheduler
  * Runs tasks at set times, saves results to the task ledger.
@@ -263,7 +263,7 @@ export async function addTask(task) {
   // (scheduleNewTask), a collision would overwrite one task's timer and fire
   // the wrong config. Ids are opaque (nothing parses the numeric part).
   const id = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const entry = { id, enabled: true, ...task, ...(currentProjectId(task.ownerId) ? { projectId: currentProjectId(task.ownerId) } : {}) };
+  const entry = { id, enabled: true, ...task, ...(currentProjectId(task.ownerId) ? { projectId: currentProjectId(task.ownerId) } : {}), ...(currentChatId(task.ownerId) ? { chatId: currentChatId(task.ownerId) } : {}) };
   // modifyTasksForOwner goes through withLock and is async — must await or callers
   // get a Promise where they expect a task object (then `task.enabled` is
   // undefined, scheduleTask bails, and chat outcomes show "label=undefined").
@@ -513,7 +513,20 @@ export function registerBuiltin(name, fn) {
 
 // Run a task: builtin handler OR agent chat stream
 async function runTask(task, broadcast, opts = {}) {
-  return projectContext.run({ userId: task.ownerId, projectId: task.projectId || null }, () => runTaskInProject(task, broadcast, opts));
+  return projectContext.run({ userId: task.ownerId, projectId: task.projectId || null, chatId: task.chatId || null }, async () => {
+    if (!task.chatId) return runTaskInProject(task, broadcast, opts);
+    const { getSavedChat } = await import('./lib/saved-chats.mjs');
+    let lease;
+    for (let attempt = 0; attempt < 80 && !lease; attempt++) {
+      lease = tryAcquireUserTurnLease(task.ownerId, { label: `saved-chat-task:${task.id}` });
+      if (!lease) await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (!lease) throw new Error('Chat is busy. Try this task again in a moment.');
+    try {
+      getSavedChat(task.ownerId, task.chatId, task.projectId || null);
+      return await runTaskInProject(task, broadcast, opts);
+    } finally { lease.release(); }
+  });
 }
 async function runTaskInProject(task, broadcast, opts = {}) {
   // manual: a user pressed "Run now". Bypass day-of-week + access-curfew gating

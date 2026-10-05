@@ -270,7 +270,9 @@ async function respondToAttachmentDecision(el, decisionId, fileId, decision, kee
     const r = await fetch('/api/chat-attachment-decision', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decisionId, file_id: fileId, decision, agent: activeAgent }),
+      body: JSON.stringify({ decisionId, file_id: fileId, decision, agent: activeAgent,
+        projectId: typeof activeProjectSpaceId === 'string' ? activeProjectSpaceId : null,
+        chatId: typeof activeSavedChatId === 'string' ? activeSavedChatId : null }),
     });
     if (!r.ok) throw new Error(await r.text());
     applyAttachmentDecisionOutcome(decisionId, decision);

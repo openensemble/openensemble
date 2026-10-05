@@ -105,10 +105,12 @@ async function init() {
       }
     });
     $('input').addEventListener('keydown', e => {
+      if (e.key === 'Escape' && $('slashMenu').style.display === 'block') {
+        e.preventDefault(); hideSlashMenu(); return;
+      }
       if (slashMenuItems.length) {
         if (e.key === 'ArrowUp')   { e.preventDefault(); slashMenuNav(-1); return; }
         if (e.key === 'ArrowDown') { e.preventDefault(); slashMenuNav(1);  return; }
-        if (e.key === 'Escape')    { e.preventDefault(); hideSlashMenu();   return; }
         if (e.key === 'Tab')       { e.preventDefault(); slashMenuItems[slashMenuIdx]?.action(); return; }
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); slashMenuItems[slashMenuIdx]?.action(); return; }
       }

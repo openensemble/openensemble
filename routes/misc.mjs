@@ -1,4 +1,5 @@
 import { projectSessionKey } from '../lib/project-context.mjs';
+import { getSavedChat } from '../lib/saved-chats.mjs';
 import { getProjectSpace } from '../lib/project-spaces.mjs';
 /**
  * Misc routes: /api/notes, /api/history/:id, /api/tasks, /api/dashboard
@@ -367,7 +368,12 @@ export async function handle(req, res) {
       try { getProjectSpace(authId, projectId); }
       catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Project space not found' })); return true; }
     }
-    const sessionId = projectSessionKey(authId, histMatch[1], projectId);
+    const chatId = historyUrl.searchParams.get('chat') || null;
+    if (chatId) {
+      try { getSavedChat(authId, chatId, projectId); }
+      catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Saved chat not found' })); return true; }
+    }
+    const sessionId = projectSessionKey(authId, histMatch[1], projectId, chatId);
     const messages = await loadSession(sessionId, 60);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(messages));

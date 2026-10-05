@@ -216,15 +216,17 @@ async function archiveProjectSpace() {
 }
 function enterProjectSpace(id) {
   rememberProjectDraft();
-  if (id === activeProjectSpaceId) { closeProjectSpaces(); return; }
-  const url = new URL(location.href); url.searchParams.delete('agent');
+  if (id === activeProjectSpaceId && !(typeof activeSavedChatId === 'string' && activeSavedChatId)) { closeProjectSpaces(); return; }
+  if (typeof preserveChatDraft === 'function' && !preserveChatDraft()) return;
+  const url = new URL(location.href); url.searchParams.delete('agent'); url.searchParams.delete('chat');
   if (id) url.searchParams.set('project', id); else url.searchParams.delete('project');
   location.assign(url.pathname + url.search);
 }
 function enterProjectAgent(id, agent) {
   rememberProjectDraft();
-  if (id === activeProjectSpaceId) { closeProjectSpaces(); switchAgent(agent); return; }
-  const url = new URL(location.href); url.searchParams.set('project', id); url.searchParams.set('agent', agent);
+  if (id === activeProjectSpaceId && !(typeof activeSavedChatId === 'string' && activeSavedChatId)) { closeProjectSpaces(); switchAgent(agent); return; }
+  if (typeof preserveChatDraft === 'function' && !preserveChatDraft()) return;
+  const url = new URL(location.href); url.searchParams.delete('chat'); url.searchParams.set('project', id); url.searchParams.set('agent', agent);
   location.assign(url.pathname + url.search);
 }
 async function uploadProjectFiles(files) {
