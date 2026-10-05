@@ -67,7 +67,7 @@ window._customDrawerInitPromise = window._customDrawerInitPromise ?? {};
 
 function customDrawerSignature(p) {
   return JSON.stringify([
-    p.version || '', p.name || '', p.icon || '', p.lucideIcon || '',
+    p.version || '', p.name || '', p.description || '', p.icon || '', p.lucideIcon || '',
     p.drawerId || '', p.btnId || '', p.html || '', p.initJs || '',
   ]);
 }
@@ -135,9 +135,8 @@ async function reconcileCustomDrawers(nextDrawers) {
 // Build DOM for any custom (skill-builder) drawer that isn't already mounted.
 function mountCustomDrawers() {
   const workspace = document.getElementById('workspace');
-  const strip     = document.getElementById('sidebarStrip');
-  const featureList = document.getElementById('sidebarFeatureScroll');
-  if (!workspace || !strip) return;
+  const skillGrid = document.getElementById('skillAppGrid');
+  if (!workspace || !skillGrid) return;
 
   for (const p of drawers) {
     if (!p.custom || !p.drawer) continue;
@@ -159,34 +158,25 @@ function mountCustomDrawers() {
       : null;
     const iconMarkup = lucideName
       ? `<i data-lucide="${escHtml(lucideName)}"></i>`
-      : `<span style="font-size:20px;line-height:1">${p.icon ?? '🔧'}</span>`;
+      : escHtml(p.icon ?? '🔧');
     const hdrIconMarkup = lucideName
       ? `<span class="drawer-icon"><i data-lucide="${escHtml(lucideName)}"></i></span>`
-      : `<span class="drawer-icon" style="font-size:18px">${p.icon ?? '🔧'}</span>`;
+      : `<span class="drawer-icon" style="font-size:18px">${escHtml(p.icon ?? '🔧')}</span>`;
 
-    // Sidebar button
+    // Launcher tile; retain the manifest's button ID for visibility and updates.
     if (!document.getElementById(btnId)) {
       const btn = document.createElement('button');
-      btn.className = 'strip-btn';
+      btn.type = 'button';
+      btn.className = 'skill-app';
       btn.id = btnId;
       btn.title = p.name;
-      // data-action, not an inline onclick attribute: CSP (script-src 'self',
-      // no unsafe-inline) blocks inline handlers, which left custom drawer
-      // buttons dead on desktop. Delegation matches the built-in strip buttons
-      // and the mobile menu reads the same attributes.
+      btn.dataset.skillSearch = `${p.name || ''} ${p.description || ''}`;
+      btn.setAttribute('aria-controls', drawerId);
+      btn.setAttribute('aria-expanded', 'false');
       btn.dataset.action = 'toggleDrawer';
       btn.dataset.args = JSON.stringify([drawerId, btnId]);
-      btn.innerHTML = `${iconMarkup}<span class="strip-tooltip">${escHtml(p.name)}</span>`;
-      // Keep drawer selectors in the independently-scrollable feature region;
-      // the profile and utility controls below it stay pinned.
-      if (featureList) {
-        featureList.appendChild(btn);
-      } else {
-        // Backwards-compatible fallback for an older page shell.
-        const spacer = strip.querySelector('.strip-spacer');
-        if (spacer) strip.insertBefore(btn, spacer);
-        else strip.appendChild(btn);
-      }
+      btn.innerHTML = `<span class="skill-app-icon" aria-hidden="true">${iconMarkup}</span><span class="skill-app-label">${escHtml(p.name)}</span>`;
+      skillGrid.appendChild(btn);
     }
 
     // Drawer panel
@@ -198,12 +188,13 @@ function mountCustomDrawers() {
         <div class="desk-drawer-hdr">
           ${hdrIconMarkup}
           <span class="drawer-label">${escHtml(p.name)}</span>
-          <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
+          <button class="btn-drawer-x" data-action="closeAllDrawers" aria-label="Close skill">✕</button>
         </div>
         <div class="desk-drawer-body">${p.html ?? ''}</div>
       `;
       workspace.appendChild(div);
     }
+    if (typeof prepareSkillDrawer === 'function') prepareSkillDrawer(drawerId);
 
     if (p.initJs) window._customDrawerInitJs[drawerId] = p.initJs;
     else delete window._customDrawerInitJs[drawerId];
@@ -285,6 +276,7 @@ function applyDrawerVisibility() {
   const inboxEnabled = drawers.some(p => p.id === 'inbox' && p.enabled);
   const tasksTabBtn = $('stab-tasks');
   if (tasksTabBtn && inboxEnabled) tasksTabBtn.style.display = '';
+  if (typeof filterSkillApps === 'function') filterSkillApps();
 }
 
 function renderDrawersSettings() {

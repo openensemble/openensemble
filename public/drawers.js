@@ -2,6 +2,11 @@
 let activeDrawerId = null;
 
 function toggleDrawer(drawerId, btnId) {
+  const drawer = $(drawerId);
+  if (!drawer || drawer.style.display === 'none') return;
+  const skillButton = [...document.querySelectorAll('#skillAppGrid .skill-app')]
+    .find(btn => btn.getAttribute('aria-controls') === drawerId);
+  if (skillButton) btnId = skillButton.id;
   // A drawer can have shortcuts to different sections (Devices / Routines).
   if (activeDrawerId === drawerId && (!btnId || $(btnId)?.classList.contains('active'))) {
     closeAllDrawers();
@@ -9,9 +14,21 @@ function toggleDrawer(drawerId, btnId) {
   }
   closeAllDrawers(false);
   activeDrawerId = drawerId;
-  $(drawerId).classList.add('open');
+  drawer.classList.add('open');
+  drawer.inert = false;
   $('drawerOverlay').classList.add('open');
-  if (btnId) $(btnId).classList.add('active');
+  if (btnId) $(btnId)?.classList.add('active');
+  if (drawerId === 'drawerSkills' || skillButton) {
+    $('sbtnSkills').classList.add('active');
+    $('sbtnSkills').setAttribute('aria-expanded', 'true');
+    if (skillButton) {
+      skillButton.setAttribute('aria-expanded', 'true');
+      drawer.querySelector('.skill-back-btn')?.focus({ preventScroll: true });
+    } else {
+      if (typeof filterSkillApps === 'function') filterSkillApps();
+      $('skillsTitle')?.focus({ preventScroll: true });
+    }
+  }
 
   // Side effects when opening specific drawers
   if (drawerId === 'drawerInbox') loadInboxPreview();
@@ -46,13 +63,24 @@ function toggleDrawer(drawerId, btnId) {
 }
 
 function closeAllDrawers(resetActive = true) {
+  const wasSkills = activeDrawerId === 'drawerSkills' || $(activeDrawerId)?.dataset.skillPanel;
   if (typeof closeEmailDetail === 'function') closeEmailDetail(false);
   if (activeDrawerId === 'drawerDevices' && typeof stopVoiceDiagnostics === 'function') stopVoiceDiagnostics();
   const wasMessages = activeDrawerId === 'drawerMessages';
   document.querySelectorAll('.desk-drawer.open').forEach(d => d.classList.remove('open'));
   $('drawerOverlay').classList.remove('open');
   document.querySelectorAll('.strip-btn.active').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('#skillAppGrid .skill-app.active').forEach(btn => {
+    btn.classList.remove('active');
+    btn.setAttribute('aria-expanded', 'false');
+  });
+  document.querySelectorAll('#drawerSkills, [data-skill-panel]').forEach(drawer => { drawer.inert = true; });
+  $('sbtnSkills')?.setAttribute('aria-expanded', 'false');
   if (resetActive) activeDrawerId = null;
+  if (resetActive && wasSkills) {
+    const launcher = $('sbtnSkills');
+    (launcher?.getClientRects().length ? launcher : $('btnMenu'))?.focus({ preventScroll: true });
+  }
   if (wasMessages && typeof closeMessagesDrawer === 'function') closeMessagesDrawer();
   if (typeof syncPrimaryViewToggle === 'function') syncPrimaryViewToggle();
 }

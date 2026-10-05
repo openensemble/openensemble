@@ -1,0 +1,60 @@
+/* Skill app launcher */
+#drawerSkills { width: 440px; }
+/* Keep the active skill surface above shadows from closed sibling drawers. */
+#drawerSkills.open, .desk-drawer[data-skill-panel].open { z-index: 103; }
+.skills-launcher-toolbar { padding: 18px 20px 16px; flex-shrink: 0; }
+.skills-launcher-toolbar p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+.skills-search {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px; color: var(--muted);
+}
+.skills-search:focus-within { border-color: var(--accent); }
+.skills-search input {
+  width: 100%; min-width: 0; background: none; border: 0; outline: none;
+  color: var(--text); font: inherit; font-size: 13px;
+}
+.skills-search input::placeholder { color: var(--muted); }
+.skills-launcher-body { padding: 8px 18px 24px; }
+.skill-app-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 8px; align-content: start; }
+.skill-app {
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  min-width: 0; padding: 10px 4px; border: 1px solid transparent; border-radius: 16px;
+  background: transparent; color: var(--text); font: inherit; cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.skill-app:hover { background: var(--bg3); }
+.skill-app:focus-visible, .skill-back-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.skill-app.active { background: var(--bg3); border-color: var(--accent); }
+.skill-app[hidden], .skills-empty[hidden] { display: none; }
+.skill-app-icon {
+  display: flex; align-items: center; justify-content: center; width: 66px; height: 66px;
+  border-radius: 19px; color: #fff; font-size: 30px; line-height: 1;
+  background: linear-gradient(145deg, #6587df, #4356ad);
+  box-shadow: inset 0 1px 1px #ffffff35, 0 5px 12px #0003;
+}
+.skill-app-icon svg, .skill-app-icon [data-lucide] { width: 29px; height: 29px; stroke-width: 1.7; }
+.skill-app-icon--finance { background: linear-gradient(145deg, #39ae96, #1d796d); }
+.skill-app-icon--tutor { background: linear-gradient(145deg, #ac80e5, #7851b4); }
+.skill-app:nth-child(4n) .skill-app-icon { background: linear-gradient(145deg, #d89a54, #ab6433); }
+.skill-app:nth-child(4n + 5) .skill-app-icon { background: linear-gradient(145deg, #cb7b9a, #974a70); }
+.skill-app-label { font-size: 12px; font-weight: 500; line-height: 1.45; text-align: center; overflow-wrap: anywhere; max-width: 100%; }
+.skills-empty { color: var(--muted); font-size: 13px; line-height: 1.6; text-align: center; padding: 32px 12px; }
+.skill-drawer-nav { padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.skill-back-btn {
+  display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 8px;
+  border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+}
+.skill-back-btn:hover { background: var(--bg3); color: var(--text); }
+.skill-back-btn svg { width: 16px; height: 16px; }
+#drawerExpenses[data-skill-panel] .exp-app { flex: 1; min-height: 0; height: auto; }
+@media (max-width: 640px) {
+  #drawerSkills { width: 100%; }
+  .skills-launcher-toolbar { padding: 16px; }
+  .skills-search input { font-size: 16px; }
+  .skills-launcher-body { padding: 8px 12px 24px; }
+  .skill-app-grid { gap: 14px 4px; }
+  .skill-back-btn { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skill-app { transition: none; }
+}

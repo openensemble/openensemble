@@ -142,9 +142,9 @@
         <i data-lucide="trending-up"></i>
         <span class="strip-tooltip">Markets</span>
       </button>
-      <button class="strip-btn" id="sbtnTutorToday" data-action="toggleDrawer" data-args="[&quot;drawerTutorToday&quot;, &quot;sbtnTutorToday&quot;]" title="Today · Tutor">
-        <i data-lucide="graduation-cap"></i>
-        <span class="strip-tooltip">Today · Tutor</span>
+      <button class="strip-btn" id="sbtnSkills" data-action="toggleDrawer" data-args='["drawerSkills", "sbtnSkills"]' title="Skills" aria-label="Skills" aria-controls="drawerSkills" aria-expanded="false">
+        <i data-lucide="layout-grid"></i>
+        <span class="strip-tooltip">Skills</span>
       </button>
       <button class="strip-btn" id="sbtnTasks" data-action="toggleDrawer" data-args="[&quot;drawerTasks&quot;, &quot;sbtnTasks&quot;]" title="Tasks">
         <i data-lucide="square-check"></i>
@@ -180,10 +180,6 @@
         <i data-lucide="message-circle"></i>
         <span class="strip-tooltip">Messages</span>
         <span class="strip-badge" id="notesBadge" style="display:none"></span>
-      </button>
-      <button class="strip-btn" id="sbtnExpenses" data-action="toggleDrawer" data-args="[&quot;drawerExpenses&quot;, &quot;sbtnExpenses&quot;]" title="Expenses">
-        <i data-lucide="wallet"></i>
-        <span class="strip-tooltip">Expenses</span>
       </button>
       <button class="strip-btn" id="sbtnSettings" data-action="toggleDrawer" data-args="[&quot;drawerSettings&quot;, &quot;sbtnSettings&quot;]" title="Settings">
         <i data-lucide="settings"></i>
@@ -341,6 +337,35 @@
 
     <!-- Drawer overlay (click to close) -->
     <div class="desk-drawer-overlay" id="drawerOverlay" data-action="closeAllDrawers"></div>
+
+    <!-- Drawer: Skill launcher -->
+    <div class="desk-drawer" id="drawerSkills" role="region" aria-labelledby="skillsTitle" inert>
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="layout-grid"></i></span>
+        <span class="drawer-label" id="skillsTitle" tabindex="-1">Skills</span>
+        <button class="btn-drawer-x" data-action="closeAllDrawers" aria-label="Close skills">✕</button>
+      </div>
+      <div class="skills-launcher-toolbar">
+        <p>Choose a skill to open its drawer.</p>
+        <label class="skills-search">
+          <i data-lucide="search" aria-hidden="true"></i>
+          <input id="skillsSearch" type="search" placeholder="Search skills…" aria-label="Search skills" autocomplete="off" data-input-action="filterSkillApps">
+        </label>
+      </div>
+      <div class="desk-drawer-body skills-launcher-body">
+        <div class="skill-app-grid" id="skillAppGrid">
+          <button type="button" class="skill-app" id="sbtnExpenses" data-action="toggleDrawer" data-args='["drawerExpenses", "sbtnExpenses"]' data-skill-search="Finance expenses receipts spending transactions" aria-controls="drawerExpenses" aria-expanded="false" title="Finance · Expenses">
+            <span class="skill-app-icon skill-app-icon--finance" aria-hidden="true"><i data-lucide="wallet"></i></span>
+            <span class="skill-app-label">Finance</span>
+          </button>
+          <button type="button" class="skill-app" id="sbtnTutorToday" data-action="toggleDrawer" data-args='["drawerTutorToday", "sbtnTutorToday"]' data-skill-search="Tutor Today learning study reviews" aria-controls="drawerTutorToday" aria-expanded="false" title="Tutor · Today">
+            <span class="skill-app-icon skill-app-icon--tutor" aria-hidden="true"><i data-lucide="graduation-cap"></i></span>
+            <span class="skill-app-label">Tutor</span>
+          </button>
+        </div>
+        <p class="skills-empty" id="skillsEmpty" role="status" hidden></p>
+      </div>
+    </div>
 
     <!-- Drawer: Agents -->
     <div class="desk-drawer" id="drawerAgents">
@@ -1946,6 +1971,7 @@
 <script src="/chat-send.js"></script>
 <script src="/chat.js"></script>
 <script src="/drawers.js"></script>
+<script src="/skill-launcher.js"></script>
 <script src="/agents.js"></script>
 <script src="/settings-models.js"></script>
 <script src="/settings-network.js"></script>

@@ -35,7 +35,7 @@ If you ask the skill-builder to add a new tool to an existing skill, double-chec
 
 ## Custom drawers
 
-A skill can ship its own UI panel that opens as a drawer in the sidebar. Add a `drawer` block to the manifest with `html`, optional `css`, and an `initJs` function. The drawer auto-loads alongside built-in drawers — see existing drawers under `drawers/` for examples.
+A skill can ship its own UI panel, available as an app icon inside **Skills** in the sidebar (**Menu → Skills** on mobile). Ask Skill Builder to include a drawer when creating the skill, or to add one to an existing skill. Its icon appears automatically alongside Finance and Tutor; select it to open the panel and use **All skills** to return to the launcher.
 
 ## Dashboard widgets
 

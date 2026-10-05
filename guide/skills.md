@@ -44,6 +44,8 @@ To change the *default* set for a role across all your agents using that role, e
 
 ## Per-skill setup
 
+Open **Skills** (the grid icon in the sidebar, or **Menu → Skills** on mobile) to see Finance, Tutor, and your custom skill drawers as app icons. Search by name, then select an icon to open that skill's drawer. **All skills** returns to the grid and keeps your search and scroll position. Custom skills with drawers appear here automatically; disabled drawers stay hidden.
+
 Some skills need additional configuration before they work:
 
 - **email** — connect at least one mailbox in **Settings → Profile → Connected Accounts**.

@@ -1,6 +1,6 @@
 # Expenses
 
-The Expenses drawer (sidebar wallet icon) is a personal-finance tracker tied into your agents. You don't have to type entries — drop a receipt or bank statement into chat and the expense agent extracts the line items.
+The Expenses drawer (**Skills → Finance**, or **Menu → Skills → Finance** on mobile) is a personal-finance tracker tied into your agents. You don't have to type entries — drop a receipt or bank statement into chat and the expense agent extracts the line items.
 
 ## Concepts
 

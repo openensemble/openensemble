@@ -164,6 +164,11 @@
 .mv-btn .icon, .mv-btn svg { width: 15px; height: 15px; }
 .mv-btn.active { background: rgba(91,141,239,.18); color: var(--accent); }
 
+/* Keep the menu reachable without horizontal scrolling on small phones. */
+@media (max-width: 360px) {
+  .mobile-header { gap: 6px; }
+}
+
 @media (max-width: 640px) {
   /* Hide desktop sidebar strip on mobile */
   .sidebar-strip { display: none; }
