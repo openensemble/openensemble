@@ -8,6 +8,8 @@ OpenEnsemble has a built-in scheduler that runs agent prompts on a schedule. Use
 
 For saved action sequences you trigger yourself, choose **Routines** next to **Tasks** in the sidebar, or **Menu → Routines** on mobile. **Open routines** at the top of Tasks takes you to the same editor, where you can create, edit, test, and delete routines.
 
+For saved phrases, webhooks, and waiting action sequences, see [Routines and saved fast paths](routines.md).
+
 ## Two flavours
 
 - **Recurring tasks** — fire on a cron-style schedule ("every weekday at 7am", "Sunday nights"). Best for routines: daily news briefing, weekly expense roll-up, nightly cleanup.
@@ -65,7 +67,7 @@ Four sources cover most needs:
 
 Each watch has a polling cadence (default 60 s) and an `on_fire` action: just notify (status bubble in chat) or run an agent (e.g., *"when the deploy log says READY, post a confirmation to Slack"*).
 
-Active watches show in **Sidebar → Tasks** alongside scheduled tasks. Click any to expand history; cancel from the same row. Each watch is owned by the agent that created it; conversations preserve their bubbles across browser refresh.
+Active watches are managed in **Tasks → Monitors**. Expand one to inspect it and use its controls to cancel or extend it. Node-health monitors are grouped into an expandable row. Each watch is owned by the agent that created it; conversations preserve their bubbles across browser refresh.
 
 ## Friction proposals — the bubble that asks "make this recurring?"
 
@@ -121,13 +123,28 @@ The System tab itself is owner/admin only — regular users don't see it. If you
 
 ## Reminder delivery
 
-Reminders fire through the channel you pick under **Settings → System → Reminder Delivery**:
+Reminders fire through the channel you pick under **Settings → Tasks → Reminder Delivery**:
 
 - **In-app** — banner + chime in the chat UI (default).
 - **Telegram** — DM through the bot you've linked.
 - **Email** — sent from one of your connected mailboxes (Gmail OAuth, Microsoft OAuth, or any IMAP account with SMTP). If you have multiple mailboxes, a second selector appears so you can pick which one sends. Defaults to the oldest connected account; falls back to the next sendable one if the chosen mailbox isn't usable when the reminder fires.
+- **Voice device** — speak on the selected paired device.
 - **All channels** — fan out to every channel above that you've configured. Anything not configured is silently skipped (no error in chat).
 
 Reminders fail open: if your preferred channel can't deliver (e.g. you picked Email but no mailbox is sendable), the system falls back to in-app so the reminder isn't silently lost. Check the server log for a `[reminder]` line if you expected delivery and didn't get it.
 
 > Reminder delivery only applies to **reminder-type** tasks (the simple "remind me to X at Y" kind, fired by the built-in `fireReminder` handler). For agent-run scheduled tasks — like a daily news briefing — the agent itself decides what to do; if you want it pushed to Telegram or email, say so in the prompt ("…and email it to me", "…send via telegram") and the agent will use the matching tool.
+
+## Monitoring from a custom skill
+
+Ask for the source, condition, checking cadence, and delivery you want: “Watch
+this feed hourly and notify me by email when a matching item appears.” A
+custom skill can combine a source fetcher, your preferences, and a notification
+path. Voice delivery needs a reachable paired device; email and Telegram need
+the corresponding account connections. Ask to change delivery or stop the
+monitor, then verify the saved entry in **Monitors**.
+
+Watchers keep their original agent targets when you switch account modes.
+Single assistant mode routes them through the primary; returning to ensemble
+restores their specialist targets. This differs from scheduled tasks assigned
+to parked agents. See [Single assistant and ensembles](single-assistant.md).

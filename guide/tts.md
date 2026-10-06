@@ -1,74 +1,70 @@
 # Text-to-speech
 
-OE turns agent replies into audio so a voice device can speak them. Configure the provider once at *Settings → Providers → Text-to-Speech*; the same setup is used for every voice device on the install.
+Text-to-speech (TTS) turns an assistant's reply into audio. Open **Settings →
+Providers → Text-to-Speech** as owner/admin, enable it, and choose a provider.
+This is separate from your chat and [speech-to-text](stt.md) models.
 
-## Provider options
+## Choose a provider
 
-| Provider | Hosting | Cost | Notes |
-|---|---|---|---|
-| **OpenAI-compatible** | Remote | per-character | Works with any service that speaks the `/v1/audio/speech` shape — the real OpenAI, Groq's hosted TTS, self-hosted OpenAI-compat servers, etc. Voices are named (alloy, echo, fable…). |
-| **ElevenLabs** | Remote | per-character | High-quality and supports voice cloning. Voices are catalog IDs (or your own clones). |
-| **Piper** | **Local** | free | Local libritts_r model, 904 speakers. Runs as a systemd user service on the OE server. ~80 MB download, no GPU needed. |
+| Option | Where processing runs | Voices |
+|---|---|---|
+| OpenAI-compatible | At the speech endpoint you configure | The endpoint's supported voice names |
+| ElevenLabs | Cloud | Your available voices and voice clones |
+| Piper | On the OE server | Downloadable voice catalog; some voices have multiple speakers |
+| KittenTTS | On the OE server, CPU | Eight preset voices |
+| Pocket TTS | On the OE server, CPU | Local voices and voice cloning from a clip |
 
-There used to be an F5-TTS option for zero-shot voice cloning on the OE box; it was retired 2026-05-15 (GPU-only, fragile setup). If you want voice cloning, use ElevenLabs.
+Cloud TTS receives the reply text you ask it to speak. Local engines download
+models during installation, then synthesize locally. The installer buttons use
+Linux systemd user services and are not supported inside the single-container
+Docker deployment. A separately hosted compatible endpoint is another option.
 
-## Setup
+## Set up remote speech
 
-### OpenAI-compatible
+Select **OpenAI-compatible** and enter the full speech URL, key, supported
+model, and default voice. For **ElevenLabs**, enter its key and choose a voice
+available to that account. Save, then use the speech preview to check the
+result. ElevenLabs also has a **Speech pace** control.
 
-1. Select **OpenAI-compatible** in the provider dropdown.
-2. Fill in the API URL (`https://api.openai.com/v1/audio/speech` for stock OpenAI; whatever endpoint your provider gave you otherwise).
-3. Paste the API key.
-4. Pick a model (e.g. `tts-1` for stock OpenAI) and a default voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`).
-5. Save.
+Use the endpoint's current model and voice choices; an example voice from
+another service is not guaranteed to work on it.
 
-The default voice is what plays when a slot doesn't override it. Per-slot voice overrides happen in *Settings → Voice devices → Voice config*.
+## Set up Piper
 
-### ElevenLabs
+1. Select **Piper** and choose an **Initial voice to download**.
+2. Choose **Install Piper** and wait for the service status to confirm it runs.
+3. Use the voice catalog to download additional voices. Newly installed voices
+   become available without restarting the service.
+4. Preview a voice. Use **Speech pace** to adjust delivery; it saves when you
+   finish moving the slider.
 
-1. Select **ElevenLabs** in the provider dropdown.
-2. Paste your `xi-api-key` from the ElevenLabs dashboard.
-3. Save.
+Voice slots show the installed voice names. Multi-speaker voices also have a
+speaker-ID choice. Older numeric-only choices refer to the LibriTTS-R voice.
 
-For per-slot voice selection, the device drawer fetches your ElevenLabs voice catalog (including any clones you've made) and shows it as a dropdown. No need to type voice IDs by hand.
+## Set up KittenTTS or Pocket TTS
 
-### Piper (local)
+Select the provider and use its install button. Wait for the service status,
+then choose and preview a voice. KittenTTS supplies presets. Pocket TTS also
+lets you upload a reference voice clip through its voice controls; use audio
+you have permission to use. Review the upload result and test before assigning
+it to a device.
 
-The first time you select Piper, the UI shows an **Install Piper (~80 MB)** button. Clicking it:
+## Choose voices for wake words
 
-- Creates a Python venv at `~/.openensemble/runtime/piper-venv` (separate from the OE git tree)
-- `pip install piper-tts flask`
-- Downloads `en_US-libritts_r-medium.onnx` from HuggingFace into `models/tts/`
-- Writes a `piper-tts.service` user-systemd unit
-- `enable --now`s it
-- Probes `127.0.0.1:5151` to confirm it's responding
+Open **Voice devices → Voice config**. Pick the voice for each wake-word slot,
+then choose **Save & Push** to send the saved settings to the paired devices.
+A slot's voice overrides the provider's global default. Offline devices receive
+the saved configuration when they reconnect.
 
-You watch the progress stream live in the install panel. Total: ~30 seconds on a decent connection. The same install path runs as an optional `y/N` prompt during `install.sh` for new OE installs.
+## Test and troubleshoot
 
-Piper voices are numeric speaker IDs from 0 to 903 (no useful per-ID metadata exists). The slot voice picker is a number input with a **Preview** button — type an ID, click Preview, the browser plays a short sample from that speaker. Iterate until you find one you like.
+First use the provider/voice preview, then test one paired device. If preview
+works but the device is silent, check its volume, connection, slot, and
+**Headphone / line-out mode**. Use [Voice diagnostics](voice-devices.md#voice-diagnostics)
+to separate speech generation from device playback.
 
-## How voice selection works
-
-When a voice device sends a chat, the server resolves the voice in this order, first match wins:
-
-1. **Explicit body param** — used by the preview button.
-2. **Slot assignment** — if the chat came from a voice-device with a `wake_slot` set and the slot has a custom `ttsVoice`, use it.
-3. **Server-global default** — `cfg.ttsVoice` (the "Default voice" field on the TTS panel).
-4. **Hardcoded fallback** — `alloy` for OpenAI, `0` for Piper, ElevenLabs uses the stock Rachel voice.
-
-So you can leave the global default alone and just override per-slot, or set a sensible global default and only override slots that need a different voice.
-
-## Latency by provider
-
-Rough rule of thumb for a 1-sentence reply on a typical home network:
-
-- **Piper (local):** ~200-400 ms first byte. No network round-trip.
-- **OpenAI / ElevenLabs:** ~500-900 ms first byte. Cloud round-trip dominates.
-
-OE streams TTS sentence-by-sentence, so the device starts speaking as soon as the first sentence comes back, not after the whole reply completes. This makes the perceived latency much smaller than the round-trip-per-sentence math suggests.
-
-## When TTS goes wrong
-
-- **Device says nothing after a wake word** — Check *Settings → Providers → Text-to-Speech* shows a configured provider (green status, key set or "Piper is running"). The TTS panel's preview button works without involving a device, so use it to confirm the provider works.
-- **Robotic / sped-up / pitched audio** — Sample rate mismatch. The device expects 16 kHz mono MP3; both Piper and ElevenLabs branches ffmpeg-resample server-side. If you're using a custom OpenAI-compat endpoint that returns 48 kHz, audio will play 3x speed. Either pick a model/voice that defaults to 16 kHz, or contact your provider.
-- **First sentence plays, then silence** — usually a server-side error mid-stream. Check the OE log (`/tmp/openensemble.log` if systemd-managed) for `[tts]` errors.
+For a remote 401/403, check the key and access to the selected voice. For a
+local install error, read the progress panel and confirm that the host supports
+systemd user services. For choppy playback, check device connection/audio
+health before changing the speech model. Hardware and voice choice affect
+latency; use the measured timings from your own installation.

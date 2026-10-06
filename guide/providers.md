@@ -1,6 +1,6 @@
 # LLM providers
 
-OpenEnsemble doesn't ship with a default model — you bring your own. Providers are configured in **Settings → Providers** (owner/admin only). All start disabled.
+Choose a chat provider for your assistant. The bundled Cortex models handle internal work and do not replace a chat model. Providers are configured in **Settings → Providers** (owner/admin only). All start disabled.
 
 ## How providers and agents fit together
 
@@ -40,25 +40,37 @@ Ollama local and cloud have separate URLs, credentials, and model selections. Lo
 
 If an older installation returns **401 Unauthorized** after selecting a local model, edit the affected agent, select the model again under **Ollama (local)**, and save. Older versions could save a local model as a cloud selection. Existing selections are not automatically moved between providers; reselecting after updating corrects the saved provider.
 
+## Add another compatible provider
+
+An owner/admin can ask an agent with the **OE Admin** role to register an
+OpenAI-compatible provider. Supply its display name, API base URL, and a model
+ID from that provider's documentation. Enter the API key in the credential
+prompt, then review and approve the requested restart.
+
+After restart, open **Settings → Providers**, enable its card, and check its
+model list. Select one of those models for an agent and send a short test
+message. Registration records an audit entry; ask OE Admin to list recent
+changes or revert that entry if the configuration is wrong.
+
 ## Environment-variable overrides
 
-Instead of pasting API keys into `config.json` (where they sit as plain text on disk), you can set them as shell environment variables before starting OE. The server reads from the environment first; values found there **override** anything in `config.json`.
+OE encrypts registered provider keys when saving configuration. Environment
+variables are another way to supply credentials and override saved values.
+Environment-only credentials are not included in OE backups; configure them
+again on a replacement host.
 
-Why you might want this:
-
-- **No secrets in the file.** If you back up the install dir or commit it to git, `config.json` won't contain real keys.
-- **Per-environment keys.** Dev vs. prod can use different keys without anyone editing the same file.
-- **Override without editing.** Set the env var and OE uses it, regardless of what's saved in Settings.
-
-Set them in your shell (or `~/.bashrc`, or your systemd unit) before launching OE:
+For a manual foreground start from the OE installation directory:
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
-./start.sh
+export ANTHROPIC_API_KEY="your-api-key"
+npm start
 ```
 
-You can leave the corresponding fields in **Settings → Providers** blank — OE picks them up from the environment automatically.
+For a systemd user service, set variables in that service's environment or an
+`EnvironmentFile`, then reload/restart the service. Editing `~/.bashrc` alone
+does not update a running systemd service. For Docker, supply variables to the
+container. Provider enablement and the agent's model selection still apply.
+See [Security model](security.md#encryption-and-backups).
 
 The variables OE recognises:
 
@@ -78,7 +90,7 @@ The variables OE recognises:
 ## Special-purpose providers
 
 - **Brave Search** — needed by the `web` skill. API key from brave.com/search/api.
-- **Vision** — set `OE_VISION_PROVIDER` and `OE_VISION_MODEL` if you want a specific model used for image analysis (`OE_VISION_PROVIDER=openai`, `OE_VISION_MODEL=gpt-4o`, etc.). Easier path: pick from the dropdown under **Settings → Profile → Vision model**, which filters every enabled provider's catalog down to models that actually accept image input. The same `supportsVision` annotation flows through every model-list endpoint, so future agent-side vision pickers reuse it.
+- **Vision** — set `OE_VISION_PROVIDER` and `OE_VISION_MODEL` if you want a specific model used for image analysis (`OE_VISION_PROVIDER=openai`, `OE_VISION_MODEL=gpt-4o`, etc.). Easier path: pick from the dropdown under **Settings → Profile → Vision model**, which filters every enabled provider's catalog down to models that actually accept image input. Choose an available vision model before testing a receipt or image.
 - **Text-to-Speech** — toggleable in **Settings → Providers**, used by the Tutor and read-aloud features.
 
 ## Subscription logins (ChatGPT / SuperGrok)
@@ -105,4 +117,4 @@ Notes:
 
 ## Choosing what to enable first
 
-If you only want to enable one thing: **Anthropic** or **OpenAI** covers most use cases. Add **Fireworks** if you want image generation, **Brave** if you want web search, and **Ollama**/**LM Studio** if you want offline fallback.
+Start with one chat provider you can access, then select a model for your assistant. Add an image-capable provider for image generation, Brave for Brave-backed search, or a local chat server for local inference. See [Getting started](getting-started.md) and [Which model does what](models-explained.md).

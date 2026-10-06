@@ -20,6 +20,19 @@ New chat answers show **Memories used as context** when stored memories were sup
 
 Use **This is outdated** to correct a memory for future answers. OE checks that another screen has not changed it first. Previous answers keep the context they originally received, and a correction preserves the original source conversation. Memory details are private to the owning profile.
 
+## Search remembered information
+
+Ask “Show me my food preferences” or “What do you know about me?” to search
+saved facts and notes. Refine the topic or request another page if needed; one
+short result is not a complete inventory. Search uses local Nomic and, when
+compatible and enabled, Cortex. The chat model receives bounded matching
+excerpts to explain.
+
+Memory search and supplied memory context share a 1,000-byte output allowance
+per turn, with at most two searches. Normal conversation and other tools have
+separate limits. Use the source controls and **This is outdated** to correct
+an entry you no longer want used.
+
 ## What you don't need to do
 
 - You don't need to download anything separately — the GGUFs ship with OpenEnsemble.
@@ -60,4 +73,4 @@ All of those are cacheable. The first one of each is slow; subsequent calls in t
 
 ## Privacy
 
-Cortex calls never leave the box. Your memory, your routing decisions, your task descriptions — none of it is sent to a third-party model. (Whatever cloud model you pick for *user-facing chat* obviously sees those messages.)
+Bundled Cortex inference runs on the OE host. If you select another runtime, requests go to its configured endpoint, which may be another machine. Retrieved memories supplied to a cloud chat model leave the server as part of that chat context. See [Which model does what](models-explained.md).

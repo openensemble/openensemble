@@ -1,64 +1,79 @@
 # Getting started
 
-This walk-through assumes you've already run `./install.sh` and copied the
-one-time first-run credential it printed. Open `https://{ip}:3739` and accept
-the self-signed certificate warning. If you lose the credential before setup,
-run `oe bootstrap` locally on the OpenEnsemble host. The goal is a working first
-chat, not a fully configured install.
+Get one assistant replying first. Email, calendar, voice devices, and other
+integrations can be added when you need them.
 
-## 1. Create the owner account
+## What you need
 
-The first time you visit the URL, OpenEnsemble shows a first-run screen. Enter
-the one-time credential, then pick a name, emoji, and password. That account
-becomes the **owner** — the only role that can manage providers, system
-settings, the Cloudflare tunnel, and the update channel.
+Run `./install.sh` on the OE server and keep the one-time first-run credential
+it prints. Installation requirements and Docker instructions are in the
+[installation guide](https://openensemble.github.io/openensemble/getting-started).
+If setup is incomplete and you lose the credential, run `oe bootstrap` on the
+server. In Docker, use `docker exec openensemble node scripts/first-run-bootstrap.mjs`.
 
-Already have a backup from another install? Use **"Already have an OpenEnsemble backup?"** on the first-run screen to restore it instead of starting empty.
+## 1. Open OE and create the owner
 
-## 2. Connect an LLM provider
+Open `https://<your-server-ip>:3739` in your browser. Replace the placeholder
+with the address of the machine running OE. The installer creates a self-signed
+certificate; check that you reached your own server before accepting its warning.
+A browser on that same machine can also use `http://localhost:3737`.
 
-Open **Settings → Providers** (sidebar gear icon). Pick a provider you have credentials for — Anthropic, OpenAI, Grok, Gemini, OpenRouter, Groq, Together, DeepSeek, Mistral, Perplexity, Fireworks, Z.ai, Ollama, or LM Studio. Paste the API key, toggle **Enable**, save.
+Enter the first-run credential, then choose the owner's name, emoji, and
+password. To move an existing installation, choose **Already have an
+OpenEnsemble backup?** instead. See [Backup and restore](backup-update.md).
 
-You don't need to pick "the right one" — agents can each use a different provider, and you can swap their model later from the agent panel. See **LLM providers** for guidance on what each one is good at.
+The owner manages this installation. Admins can also manage privileged settings
+such as providers and public access; regular users use the access granted to them.
+See [Users & access](users.md).
 
-If you don't have any cloud keys, the bundled local **Cortex** model handles light reasoning out of the box. You can also point at a local **Ollama** or **LM Studio** to run any open model.
+## 2. Connect one chat provider
 
-## 3. Create your first agent
+Open **Settings → Providers** as owner or admin. Choose one path:
 
-Open **Agents** (sidebar bot icon). Click **+ New Agent**. Give it:
+- **Cloud API:** enter your provider's API key, enable the provider, and save.
+- **Local model:** enable Ollama or LM Studio and enter the address of the
+  machine running it. Install/load a chat model there first.
+- **Account login:** use an available provider login; each user connects their
+  own account. See [LLM providers](providers.md).
 
-- a name and emoji
-- a role — pick "Coordinator" if you want a delegating front-door agent, or pick a specialist role like "Researcher" or "Coder"
-- a model from the providers you enabled
+For a local server on another machine, use that machine's address. `localhost`
+means the machine or container running OE. For Docker's host model server, see
+the installation guide's Docker section.
 
-Save. The agent appears in the list and is ready to chat.
+Cortex handles internal memory and reasoning tasks. You still need a chat
+provider for your assistant. See [Which model does what](models-explained.md).
 
-## 4. Talk to it
+## 3. Create your assistant
 
-Click the agent in the list, type into the input, hit enter. If you created a Coordinator, ask it broadly ("plan my day", "look up X and email me"); it will pull in other agents as needed. If you created a specialist, talk to it directly.
+Choose **Create Your Assistant** on the empty chat screen, or open
+**Agents → + New Agent**. Give it a name and emoji, choose a model from the
+provider you enabled, and save. Personality is optional.
 
-## 5. (Optional) Add more users
+New accounts start in **Single assistant** mode: that first assistant becomes
+your primary assistant and handles your enabled skills. Existing accounts keep
+their ensemble setup. To add specialists later, open **Settings → Agents →
+Agent setup → Agent ensemble**. See [Single assistant and ensembles](single-assistant.md).
 
-In **Settings → Users** you can add additional users on this install — each gets their own isolated agents, skills, sessions, chat history, uploads, and settings. The owner controls which providers and features each user can see.
+## 4. Check the first reply
 
-## Optional setup paths
+Send “Hello. What can you help me with?” A successful setup produces a reply
+from your selected assistant. Then try one capability you have enabled.
+Web search, email, and calendar each need their own setup; a working chat model
+does not connect those services automatically.
 
-These are useful, but none of them are required for your first chat.
+If there are no models to choose or the reply fails, use
+[Troubleshooting](troubleshooting.md#no-models-or-no-first-reply).
 
-| Area | When to set it up |
+## Add the next thing you need
+
+| Goal | Guide |
 |---|---|
-| Display dashboards | When you want a dedicated wall-tablet, room, or browser view with its own stable address |
-| Email, calendar, and web search | When agents need to act on your accounts or browse the web |
-| Public access | When OAuth callbacks, Telegram webhooks, or external sharing links need to reach this server |
-| MCP servers | When you want agents to use tools from external MCP servers |
-| Remote nodes and service profiles | When agents should manage another machine or service |
-| Backup and auto-update | Before relying on the install long-term |
-| Voice devices, STT, and TTS | When you want hands-free use or local speech features |
-
-## What to look at next
-
-- **Skills** — what each agent can actually *do*
-- **Tasks & scheduler** — recurring or one-shot agent jobs ("every morning at 7, brief me on the news")
-- **Display dashboards** — build per-profile tablet and browser views controlled from OE
-- **Remote nodes** — pair a homelab box, Pi, or workshop rig and have agents drive it
-- **Public access** — needed if you want OAuth logins (Gmail, MS, Google Calendar) or a Telegram bot to work
+| Keep separate conversations | [Saved chats](saved-chats.md) |
+| Organize an ongoing project | [Project spaces](project-spaces.md) |
+| Connect mail or Google Calendar | [Email & calendar](email-calendar.md) |
+| Control home devices | [Home Assistant](home-assistant.md) |
+| Connect external tools or another AI app | [MCP connections](mcp.md) |
+| Schedule work or notifications | [Tasks & scheduler](tasks.md) |
+| Build a tablet display | [Display dashboards](dashboards.md) |
+| Add hands-free interaction | [Voice devices](voice-devices.md) |
+| Protect and maintain your installation | [Backup, restore, auto-update](backup-update.md) |

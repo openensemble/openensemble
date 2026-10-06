@@ -1,130 +1,12 @@
-
 # OpenEnsemble
 
-Self-hosted, multi-user AI assistant platform. Run a team of specialist agents, choose the LLM providers they use, and keep each user's data isolated on your own server.
+A self-hosted AI assistant with your choice of local or cloud models. Start
+with one assistant, then add specialist agents, connected services, dashboards,
+or open-hardware voice devices. Each user has their own workspace.
 
-**Build your own private voice assistant.** OpenEnsemble pairs with an open-hardware, open-firmware **ESP32-S3 voice satellite** — say "Hey Ensemble" and talk to your agents hands-free, Alexa-style, except the audio, transcripts, and history never leave your server. Flash it from the browser, no toolchain needed. See [Voice devices](#voice-devices-beta) below and the [voice-device-firmware](https://github.com/openensemble/voice-device-firmware) repo.
+## Get your first reply
 
-![demo](docs/demo.gif)
-
-## Display dashboards
-
-**[Explore dashboards](https://openensemble.github.io/openensemble/dashboards)** · **[Read the complete guide](guide/dashboards.md)**
-
-Build up to 32 dashboards per profile for wall tablets, rooms, TVs, or ordinary browser tabs. Every dashboard keeps its own stable address, while optional swipe navigation lets you move through all of a profile's dashboards without typing another URL.
-
-![A customized OpenEnsemble dashboard showing Home Assistant controls, calendar, email, and remote-node status](docs/assets/display-dashboard.png)
-
-*One display can combine home controls with read-only Calendar, Email, Nodes, and custom-skill status cards.*
-
-- Customize sections, cards, page elements, text, themes, and colors.
-- Add Home Assistant controls, calendars, email summaries, read-only remote-node status, and safe read-only widgets supplied by custom skills.
-- Hide built-in elements—including the greeting, status, clock, summary, navigation, and section headings—to make each display your own.
-- Open **Display dashboards** from either **Dashboard** entry inside OpenEnsemble to configure everything, then launch the finished display at its individual address.
-
-Dashboard addresses use the signed-in OpenEnsemble profile and are not public sharing links. A dedicated, least-privilege profile is recommended for unattended tablets.
-
-<img width="378" height="315" alt="welcome" src="https://github.com/user-attachments/assets/8cfb9a9a-70cc-467f-95e6-0e9cef88b3d5" />
-
-OpenEnsemble is a single Node.js server that serves a web UI on port 3737. Create the owner account, connect at least one model provider, create an agent, and start a conversation.
-
-Built-in roles create dedicated specialists for coding, email, research, calendar, expenses, image generation, and more. A coordinator can delegate work between them: "Give me a briefing on the latest advancements in AI and email it to me" can route research to a research agent and delivery to an email agent.
-
-Multi-profile accounts keep each user's workspace, agents, skills, files, and settings separate. Owners and admins can enable or disable features and choose which models each user can access.
-
-<img width="526" height="719" alt="accountscreenshot" src="https://github.com/user-attachments/assets/94e31e21-e46e-4f53-9766-850ca943781b" />
-
-## Fastest path to first reply
-
-1. Run `./install.sh`.
-2. Copy the one-time first-run credential printed by the installer.
-3. Open **https://{ip}:3739** and accept the self-signed certificate warning.
-4. Create the owner account, or restore an existing backup, using that credential.
-5. Connect one provider in **Settings -> Providers**.
-6. Create a coordinator or specialist agent and send a message.
-
-Everything else - email, calendar, MCP servers, remote nodes, voice devices, tunnels, and backups - can be added later.
-
-## What it does
-
-### Core
-
-**Saved chats.** Start a new conversation or return to an earlier one from the chat button beside Attach. Messages, model context, drafts, and ongoing replies stay with their own chat. Existing conversations remain available as **Original chat**. See [Saved chats](guide/saved-chats.md).
-
-**Goals and prepared work.** Track ongoing goals across project conversations, prepare meeting briefs and private drafts, and follow up when connected sources change. Review preparations from the sidebar; choose suggestion or automatic preparation in Personalization settings. See [Personalization](guide/personalization.md#goals-and-prepared-work).
-
-**Project spaces.** Keep a shared brief, decisions, next steps, checklist, and reference files alongside separate project conversations with each agent. Project context follows delegated and scheduled work; switch spaces from the sidebar folder button. See [Project spaces](guide/project-spaces.md).
-
-**Resumable agent jobs.** Background workers and standalone delegations continue after a restart using saved tool results. Uncertain actions pause for review, and stopped jobs stay stopped. See [Resumable agent jobs](guide/resumable-jobs.md) for supported jobs and recovery limits.
-
-**Multi-agent chat.** A roster of specialist agents each tuned for a role. The Coordinator reads incoming messages and delegates to the right specialist, or you can talk to one directly.
-
-**Bring your own LLMs.** Providers include Anthropic, OpenAI (API key or ChatGPT-login/OAuth), Grok, Gemini, DeepSeek, Mistral, Groq, Together, Perplexity, Fireworks, OpenRouter, Z.ai, Ollama, and LM Studio. Enable what you want; assign different models per agent.
-
-<img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/202c580d-b2ca-4a8d-8a39-e827a9eb647e" />
-
-
-**Skills.** Capabilities agents can use, each defined by a small manifest:
-
-| Skill | What the agent can do |
-|---|---|
-| `coder` | Edit files and run shell commands inside a bubblewrap sandbox; manage multi-file projects |
-| `coordinator` | Delegate incoming messages to specialist agents |
-| `deep_research` | Multi-step web research saved as persistent research documents |
-| `email` | Unified Gmail / Microsoft-Exchange / IMAP mailbox access |
-| `expenses` | Parse receipts, invoices, bank statements; track spending across groups |
-| `gcal` | View and manage Google Calendar events |
-| `image_generator` | Text-to-image via Fireworks Flux |
-| `nodes` | Run commands and transfer files to remote machines via the OE node agent |
-| `role_tutor` | Adaptive tutor that tracks per-subject progress and mastery |
-| `role_video_generator` | Text-to-video generation |
-| `shared-docs` | Read uploaded documents, photos, and videos |
-| `skill-builder` | Create and edit custom skills at runtime |
-| `tasks` | Schedule recurring and one-time agent tasks |
-| `web` | Brave Search and URL fetch |
-
-Use the built-in skill builder to add new capabilities at runtime. A blueprint ships with the installation, so you can ask your coding agent or coordinator to create a skill for something like Home Assistant control without editing the core app by hand.
-
-**Roles.** Swap the persona/prompt on any agent without rebuilding it — role instructions live on the role, not the agent, so the coordinator can reassign roles cleanly.
-
-**Cortex — private reasoning & embeddings.** Bundled local models run in-process via `node-llama-cpp`: a reasoning model (`openensemble-reason-v1`, SmolLM2-based GGUF) and `nomic-embed-text-v1` embeddings. Retrieval, summarization, and classification can run without external calls or a GPU. Once OpenEnsemble is installed, run `oe bench` in the terminal to measure local performance.
-
-**Workspace & documents drawer.** A unified view of everything the user has: uploaded docs, AI-generated images, AI-generated videos, research reports, files shared from other users, and code projects — each with its own tab. Code projects are downloadable as zip archives.
-
-**Expenses.** Groups, books, receipt parsing, and per-user / per-group activity.
-
-**Background scheduler.** Cron-like recurring tasks. Custom built-in LLM to set and parse tasks. (e.g. a daily news briefing, a nightly uploads-folder cleanup) plus one-shot tasks an agent schedules for itself.
-
-**Per-user everything.** Agents, custom skills, sessions, chat history, uploads, AI outputs, code projects, and settings are all stored under `users/{userId}/` — a fresh install with multiple accounts is fully isolated.
-
-### Admin and advanced
-
-**Remote nodes.** Pair a machine with the server using a one-time code; the `oe-node-agent` then accepts exec and file-transfer commands scoped to that user. Useful for driving a homelab, a Raspberry Pi, or a workshop rig from the web UI. Have your agents keep your software up to date automatically, install new software, or debug your node. All from the chat interface.
-
-<img width="562" height="887" alt="nodes" src="https://github.com/user-attachments/assets/006a0158-50fa-4efc-9e0f-3b573b41d80d" />
-
-**Backup / restore.** Compressed `tar.gz` snapshots of the entire install; restore works from the first-run screen too, so a fresh box can pull in an existing user base in one step.
-
-**Public and private access.** Cloudflare Tunnel and Tailscale integrations can make an install reachable for OAuth callbacks, webhooks, sharing links, or private-network access without hand-rolling every host setup.
-
-**MCP servers.** Connect local or remote Model Context Protocol servers and assign their tools to specific agents. Each user manages their own MCP servers and credentials.
-
-### Voice devices (beta)
-
-Pair a physical wake-word device — say "hey ensemble" (or any of the bundled wake words) and talk to your agents hands-free; the reply gets spoken back through the device's speaker or 3.5 mm jack. It's a fully open, self-hosted alternative to an Alexa- or Google-Home-style smart speaker: on-device wake words, far-field capture with hardware echo cancellation, barge-in during playback, AirPlay, and device-side alarms that fire even if the server is down.
-
-Includes a browser-based flash wizard (WebUSB + Web Serial — no `dfu-util` or `esptool` needed), per-slot voice and wake-word routing, household sharing (one device can route "hey roommate" to a different user's account), and a fast-path voice-control router for "volume up / pause / stop" without an LLM round-trip.
-
-Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. See the in-app Guide -> Voice devices section for pairing and flashing. The device firmware is open source at [openensemble/voice-device-firmware](https://github.com/openensemble/voice-device-firmware); prebuilt binaries ship with OE, so you only need that repo to hack on the firmware itself.
-
-## Requirements
-
-- Linux (tested on Debian-family LXCs and VMs); macOS works for local dev
-- Node.js ≥ 22.12 (the installer pulls one via `nvm` if missing)
-- `build-essential`, Python ≥ 3.7 (`python3` and `python3-full`), `zip`, `bubblewrap`, `git`, `ffmpeg`, `openssl` (installer offers to install them — `git` is required for in-app auto-update; if you grabbed the source as a zip instead of cloning, install `git` and run `git clone --depth 1` over the install dir or auto-update will be disabled)
-- **For voice devices (beta, optional):** a **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. This is currently the only supported hardware. Other voice-hardware combinations may work but aren't tested or shipped with matching firmware. Chrome or Edge browser required for the in-app flash wizard (WebUSB + Web Serial).
-
-## Install
+On Linux, with Git installed:
 
 ```bash
 git clone --depth 1 https://github.com/openensemble/openensemble.git
@@ -132,131 +14,93 @@ cd openensemble
 ./install.sh
 ```
 
-`--depth 1` fetches the current revision, including the bundled voice-device
-firmware (~11 MB total instead of ~96 MB of history). Older commits contain
-superseded firmware images nobody needs to flash. In-app auto-update works
-normally on a shallow clone. Drop the flag if you want the full history for
-development.
+1. Keep the one-time first-run credential printed by the installer.
+2. Open `https://<your-server-ip>:3739`. Check that it is your server before
+   accepting the installer's self-signed certificate warning.
+3. Create the owner account, or restore a backup, using that credential.
+4. Open **Settings → Providers**, connect one chat provider, and enable it.
+5. Choose **Create Your Assistant**, pick its model, save, and send a greeting.
 
-The installer:
+New accounts use **Single assistant** mode. To add specialists later, switch
+**Settings → Agents → Agent setup** to **Agent ensemble**. Cortex provides
+internal reasoning and retrieval; your assistant still needs a chat provider.
 
-1. Checks for build tools and offers to install them
-2. Installs Node.js via `nvm` if needed
-3. Runs `npm install`
-4. Writes a default `config.json` (providers all disabled)
-5. Optionally registers a systemd user service so OE comes up at boot
+**Requirements:** Linux (Debian-family systems are the main install path),
+Node.js **22.12 or newer**, and the build/media/sandbox tools checked by the
+installer. macOS is a local-development option with different feature support.
+The installer can install missing dependencies and a systemd user service.
+Shallow clones support normal in-app updates.
 
-The installer prints a one-time credential for owner creation or initial restore.
-Open **https://{ip}:3739**, accept the self-signed certificate warning, and enter
-that credential. If you lose it before setup, run `oe bootstrap` locally on the
-OpenEnsemble host. The required path is short: create the owner account, connect
-one model provider, create an agent, and chat. Optional integrations can wait.
+[Installation and Docker](docs/getting-started.md) ·
+[First-run walkthrough](guide/getting-started.md) ·
+[Complete user guide](https://openensemble.github.io/openensemble/guide/) ·
+[Troubleshooting](guide/troubleshooting.md)
 
-For a clean Docker deployment:
+Run `oe bootstrap` on the server if you lose the credential before setup is
+complete. HTTP localhost on port 3737 is also available from a browser running
+on the OE host; remote first-run setup uses HTTPS.
 
-```bash
-docker build -t openensemble .
-docker run -d --name openensemble \
-  -p 3737:3737 -p 3739:3739 \
-  --add-host host.docker.internal:host-gateway \
-  -v oe-data:/app/users -v oe-state:/app/docker-data \
-  -v oe-plugins:/app/plugins -v oe-tls:/app/tls \
-  openensemble
-docker exec openensemble node scripts/first-run-bootstrap.mjs
-```
+![OpenEnsemble demo](docs/demo.gif)
 
-The final command prints the one-time credential. Open
-**https://localhost:3739** (or use the Docker host's address), accept the
-self-signed certificate warning, and enter the credential. The named volumes
-persist profiles, plugins, runtime state/configuration, and the generated TLS
-key.
+## What you can add
 
-Docker supports the core web app, remote providers, media conversion, and
-devices configured with the server address. Local Piper/Faster-Whisper install
-buttons target host systemd services and are not supported inside the single
-container; bridge networking also does not carry LAN discovery broadcasts.
-Set a host Ollama URL in Settings to `http://host.docker.internal:11434` when
-needed. Sandboxed coder shell commands and custom-skill subprocesses are also
-unavailable under Docker's default security profile; enabling nested sandboxing
-requires an operator-supplied security profile and should not be replaced with
-an unrestricted privileged container.
-See [Getting started](docs/getting-started.md) for the supported boundary.
+| Goal | Read next |
+|---|---|
+| Use one assistant or specialists with different models | [Single assistant and ensembles](guide/single-assistant.md), [Providers](guide/providers.md) |
+| Keep separate chats and ongoing projects | [Saved chats](guide/saved-chats.md), [Project spaces](guide/project-spaces.md) |
+| Connect mail and Google Calendar | [Email & calendar](guide/email-calendar.md) |
+| Control home devices and saved action sequences | [Home Assistant](guide/home-assistant.md), [Routines](guide/routines.md) |
+| Schedule work, reminders, and monitoring | [Tasks & scheduler](guide/tasks.md) |
+| Work with files, media, research, and code projects | [Documents & sharing](guide/documents.md) |
+| Create skills and connect external tools | [Skill Builder](guide/skill-builder.md), [MCP](guide/mcp.md) |
+| Manage a remote machine and its services | [Nodes](guide/nodes.md), [Service profiles](guide/services.md) |
+| Learn preferences and prepare useful drafts | [Personalization](guide/personalization.md) |
+| Inspect background work and recover a job | [Run Inspector](guide/run-inspector.md), [Resumable jobs](guide/resumable-jobs.md) |
 
-## Configuring LLM providers
+## Display dashboards
 
-Providers start disabled. Enable them from the web UI under Settings → Providers, or by editing `config.json`:
+Build up to 32 dashboards per profile, each with a stable address. Combine Home
+Assistant controls, calendar, email, node status, and custom-skill widgets.
+Customize portrait and landscape layouts, colors, and page elements; swipe
+between displays on a tablet.
 
-```jsonc
-{
-  "enabledProviders": { "anthropic": true, "openai": true, "ollama": true },
-  "anthropicApiKey": "sk-ant-…",
-  "openrouterApiKey": "sk-or-…",
-  "cortex": {
-    "reasonProvider": "auto",     // built-in, ollama, or lmstudio
-    "lmstudioUrl": "http://127.0.0.1:1234"
-  }
-}
-```
+![A customized OpenEnsemble dashboard](docs/assets/display-dashboard.png)
 
-Environment variables override config values: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY`, `FIREWORKS_API_KEY`, `GROK_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `OE_SESSION_EXPIRY`, `OE_VISION_PROVIDER`, `OE_VISION_MODEL`, `OE_VERIFY_GATE_URL`, `OE_VERIFY_GATE_SECRET`.
+Dashboard addresses use the signed-in profile and require normal OE login.
+Use a dedicated profile with limited access for an unattended display.
+[Dashboard guide](guide/dashboards.md).
 
-Wake verification is enabled with `verifyGateEnabled: true`.
-`verifyGateUpstreamUrl` (or `OE_VERIFY_GATE_URL`) must be the numeric loopback
-verifier endpoint, normally `http://127.0.0.1:5390/v1/verify`, and
-`verifyGateClientSecret` (or `OE_VERIFY_GATE_SECRET`) must match the gate's
-32+ character internal secret. The secret is encrypted at rest. Neither value
-is sent to a voice device: `server_caps` advertises only the fixed
-`/api/voice-gate/v1/verify` path.
+## Voice devices (beta)
 
-Voice-device firmware resolves that path against its already-paired OE origin
-and never accepts a free-form gate URL or sends its bearer to the loopback
-service. Plain HTTP is allowed only when the paired origin is a numeric private
-IPv4 address. OE independently requires the request's raw socket peer to be
-private/loopback and rejects proxy/CDN forwarding headers, so this endpoint is
-not supported through a tunnel, reverse proxy, or public/WAN address.
+Pair a **Seeed reSpeaker XVF3800 + XIAO ESP32-S3**, say “Hey Ensemble,” and talk
+to your assistant. The browser flash wizard uses Chrome or Edge; prebuilt
+firmware is included. Supported features include household wake-word routing,
+conversation mode, AirPlay, and device-side alarms.
 
-Private HTTP deliberately assumes a trusted or isolated LAN: the device bearer
-and wake clip are not encrypted from another party capable of intercepting LAN
-traffic. Use HTTPS instead where that assumption does not hold.
+Voice processing follows your provider choices: remote STT receives recordings,
+cloud chat receives transcript/context, and remote TTS receives reply text.
+Configure local STT, chat, and TTS for local voice processing, and check other
+integrations separately. [Voice setup](guide/voice-devices.md) ·
+[Model and privacy choices](guide/models-explained.md) ·
+[Open firmware](https://github.com/openensemble/voice-device-firmware).
 
-## Auto-update
+## Run and maintain your server
 
-Admin users see an "Update available" badge in the status bar and can apply updates from **Settings → System → Software Update** without dropping to a terminal. The server polls the configured git remote (default `origin`) every hour, fast-forwards the working tree on demand, runs `npm install` if `package.json` changed, then restarts itself using the same detached-respawn mechanism as the manual Restart button.
+- [Back up, restore, and update](guide/backup-update.md). Backups contain account
+  data, saved configuration, custom content, and decryption keys; they exclude
+  dependencies and bundled models. Password-protected exports use `.oeb`.
+- [Manage users and access](guide/users.md).
+- [Set up public or private access](guide/public-access.md) with Cloudflare,
+  a reverse proxy, or Tailscale.
+- [Understand security](guide/security.md). Browser sessions use HttpOnly
+  cookies; non-browser clients can use bearer tokens.
+- [Configure optional wake verification](guide/voice-verification.md).
+- [See added features and release history](guide/whats-new.md).
 
-Tunable in `config.json`:
-
-| Key | Default | Purpose |
-|---|---|---|
-| `updateCheckEnabled` | `true` | Master switch for periodic polling |
-| `updateCheckIntervalMs` | `3600000` | Poll interval (ms) — minimum 60000 |
-| `updateRemote` | `'origin'` | Git remote to follow |
-
-The flow refuses to update when the working tree is dirty or has unpushed commits — it will never `git stash` or `git reset --hard`. Resolve those manually with `git status` first.
-
-> **Trust note:** auto-update means anyone with push access to the configured `updateRemote` can ship code that runs on every install. If you don't fully trust the upstream, fork the repo and set `updateRemote` to your fork.
-
-## Security model
-
-- **Session tokens** live in the `Authorization: Bearer` header — never in URLs (URLs leak via Referer and access logs).
-- **Media tokens** are short-lived (10 min) URL-embedded tokens minted on demand, so `<img>` / `<video>` / `<iframe>` elements can authenticate. Downloads that can't use fetch use these.
-- **Coder shell sandbox** wraps every shell command with `bubblewrap`, giving the agent a read-only view of the system plus a writable bind-mount of just its own project directory. Network stays open (needed for npm / pip / git).
-- **Role-based access**: `owner`, `admin`, `user` — plus per-user access schedules that can block logins outside chosen hours.
-- **File-ownership enforcement**: every path going to shell / download / delete is `realpath`-checked against the caller's workspace before use, so symlinks can't escape.
-
-## Directory layout
-
-```
-agents/                 default agent definitions
-drawers/                built-in UI drawers (loaded alongside plugin drawers)
-plugins/                bundled plugins (markets, news, tutor-today)
-public/                 static front-end (HTML, CSS, JS)
-routes/                 HTTP route modules
-skills/                 built-in skills and SKILL_BLUEPRINT.md
-users/                  per-user state (created on first run; ignored by git)
-config.template.json    template copied to config.json on install
-server.mjs              entry point
-```
-<img width="939" height="463" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
+For development, `npm ci --ignore-scripts` installs dependencies without the
+model download; `npm start` uses the launcher. Local tests belong in ignored
+`tests/`. Follow [AGENTS.md](AGENTS.md) and
+[documentation maintenance](docs/development/documentation.md) when contributing.
 
 ## License
 

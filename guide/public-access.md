@@ -1,66 +1,85 @@
-# Public access (tunnel & Telegram)
+# Public and private access
 
-Some features work better — or only work — when OpenEnsemble has a stable public URL.
+Choose how other devices reach your OE server. Ordinary chat on your LAN does
+not need a public URL.
 
-| Feature | Needs the public internet? |
+| Need | Connection |
 |---|---|
-| **Telegram bot webhooks** | **Yes.** Telegram's servers need to push messages *into* your install, so it must be reachable on a public HTTPS URL. |
-| **OAuth callbacks** (Gmail, Microsoft, Google Calendar) | **Usually, on a homelab box.** Google/Microsoft require HTTPS redirect URIs and only accept a few exceptions (like `http://localhost`). If you're hitting OE at `http://192.168.x.x`, the provider will reject the redirect — a public HTTPS URL is the easiest fix. (If you're on the same machine as OE and use `http://localhost:3737`, OAuth works without a tunnel.) |
-| **External sharing links** | Only if you actually want them reachable outside your LAN. Intra-install sharing works without any of this. |
-| **Display dashboards** | Only if the tablet or browser is outside your LAN or private network. A dashboard address still requires a normal signed-in OE profile; it is not an anonymous sharing link. |
+| Devices at home | Your server's LAN address |
+| Your own devices away from home | Private network access, such as Tailscale |
+| Telegram webhooks or outside callers | A reachable public HTTPS URL |
+| Google/Microsoft sign-in | A registered callback URL; localhost can work from a browser on the OE host |
 
-The built-in **Cloudflare Tunnel** integration gives you a stable public HTTPS URL without opening ports on your router, getting a static IP, or running your own reverse proxy. It's the easy path. If you already have a real domain pointed at the install (nginx/Caddy + Let's Encrypt, etc.), you don't need the tunnel — that setup serves the same purpose.
+A public HTTPS domain can use Cloudflare Tunnel or your own reverse proxy.
+A dashboard address still requires a signed-in OE profile. Uploaded-document
+sharing is between OE users; enabling a tunnel does not publish your files.
 
-## Setting up the Cloudflare tunnel
+## Cloudflare Tunnel
 
-1. **Settings → System → Public Access (Cloudflare Tunnel)**.
-2. Click **Configure**. The server downloads `cloudflared` if it doesn't already have it.
-3. Sign in to Cloudflare in the popup that opens — this links your account.
-4. Pick or create a hostname (e.g. `oe.example.com`).
-5. Save. The tunnel comes up; the public URL is now reachable.
+Use an owner/admin OE account, a Cloudflare account, and a hostname you can
+configure there. Follow [Cloudflare's tunnel setup](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
+to create a remotely managed tunnel and a public hostname route.
 
-The tunnel is **server-wide** — owner/admin only — and survives restarts. Any user on the install benefits from the same URL.
+1. In Cloudflare, route the chosen hostname to `http://localhost:3737`, or the
+   actual local OE port shown in its Public Access panel. The connector runs
+   alongside OE, so this address is from the connector's point of view.
+2. Copy that tunnel's connector token. OE needs the token, not the entire
+   installation command Cloudflare displays.
+3. Open **Settings → System → Public Access (Cloudflare Tunnel)** in OE.
+4. Select **Cloudflare Tunnel**, paste **CF Tunnel Token**, and enter the
+   **Public hostname** you configured, such as `oe.example.com`.
+5. Choose **Save**, then **Start** if it is not running. OE downloads
+   `cloudflared` on first start when needed.
+6. Wait for the running status, open the displayed HTTPS address, and confirm
+   that you can sign into your OE account.
 
-## Display dashboards over a public URL
+The tunnel is shared across the installation. **Stop** stops its process;
+select **Off** and save to disable the configured public exposure. The panel
+shows startup errors if its token, hostname, or origin route is incorrect.
 
-A stable domain makes addresses such as
-`https://oe.example.com/dashboards/kitchen` convenient, but it does not make
-them public. The browser must sign in normally, and the active profile controls
-which same-named dashboard and data it receives. The URL contains no dashboard
-token or limited kiosk grant.
+## Private Mesh: Tailscale
 
-An unattended display holds a full browser session for that OE profile. Prefer
-a dedicated least-privilege profile, private HTTPS or network access when
-possible, and the tablet/browser's own lock. See **Display dashboards** and
-**Security model** in the Guide before placing a screen in a shared space.
+Open **Settings → System → Private Mesh (Tailscale)** as owner/admin. The panel
+shows installation status, tailnet IP, and MagicDNS name.
+
+If setup is needed, use its auth-key and sudo-password fields, or choose
+**Ask the coordinator instead** for the guided OE Admin flow. Enter credentials
+through those setup controls. Confirm **Joined to tailnet**, then connect your
+other device to the same tailnet and open OE using the displayed address and
+OE's port. OE login is still required.
+
+A private tailnet does not make a webhook publicly reachable by Telegram.
+Browser microphone/USB features still need HTTPS or localhost. See
+[Troubleshooting](troubleshooting.md#browser-microphone-or-flashing-is-unavailable).
 
 ## Telegram
 
-A Telegram bot is the easiest way to talk to your Coordinator from your phone or away from the desk.
+1. Create a bot with Telegram's **@BotFather** using `/newbot` and copy its token.
+2. Open **Settings → Profile → Telegram** and save that token.
+3. Register a webhook using your public HTTPS OE address in the Telegram panel.
+4. Open your bot in Telegram and send `/start` to complete the connection.
+5. Send a short question and confirm a reply from your primary assistant or
+   ensemble coordinator.
 
-1. Open Telegram, message **@BotFather**, run `/newbot`. Pick a name and username; it gives you a token.
-2. **Settings → Profile → Telegram → Token** — paste the token.
-3. Click **Register webhook**. The button registers `https://{your-tunnel-host}/api/telegram/{userId}/webhook` as the bot's webhook. (Requires the Cloudflare tunnel to be live.)
-4. Open Telegram → your bot → `/start`.
+Each OE user connects their own bot. A Cloudflare tunnel is one way to provide
+the public address; your own reachable HTTPS reverse proxy can also do so.
+Keep that address available for incoming webhook delivery.
 
-From then on, anything you message the bot is routed to your Coordinator agent, and the agent's reply comes back over Telegram. Long-running tasks can also push notifications to the bot.
+## OAuth callbacks and reverse proxies
 
-## Per-user Telegram bots
+Register the exact callback URLs used by your OE origin. See
+[Email & calendar](email-calendar.md#owner-setup-google) for Google and Microsoft
+setup. If using a reverse proxy, pass the correct forwarded protocol and
+support WebSocket connections as well as normal HTTP requests. Node agents
+should use the complete HTTPS server address when pairing through it.
 
-Each user on the install gets their own bot — they're not shared. The webhook URL embeds the user ID, so messages route correctly.
+## Common problems
 
-## Custom domains
-
-You don't have to use Cloudflare. If you have a static IP and a reverse proxy (nginx, Caddy), point your domain at port 3737, and OE will work the same. The tunnel is just the easy default.
-
-## When the tunnel is down
-
-OAuth flows that require the public URL will fail (Gmail can't redirect to your private IP). Telegram messages queue on Telegram's side and deliver when the webhook is reachable again — the messages aren't lost, but reply latency goes up.
-
-## Trust note
-
-Once the tunnel is live, your install is on the public internet. Auth is still required (no anonymous access), but you should:
-
-- Use strong passwords.
-- Enable access schedules on accounts that don't need 24/7 access.
-- Keep the install up to date (auto-update is on by default).
+- **Public site does not load:** check the tunnel state and its Cloudflare
+  hostname route before changing OE credentials.
+- **OAuth redirect mismatch:** compare the scheme, hostname, port, and callback
+  path with the provider's registration.
+- **Telegram receives no reply:** check the registered webhook's public URL,
+  that you sent `/start`, and that your assistant has a working chat model.
+- **Dashboard shows another layout:** dashboard slugs belong to the currently
+  signed-in profile. See [Display dashboards](dashboards.md#put-a-display-on-a-tablet).

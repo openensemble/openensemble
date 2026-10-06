@@ -1,0 +1,113 @@
+# Email & calendar
+
+Connect your own mailbox or Google Calendar to let your assistant read,
+organize, and act on that account. Connections belong to your OE profile.
+
+## What you need
+
+An administrator must allow the **Email** or **Calendar** role for your profile.
+Open **Settings → Profile → Connected Accounts**. If that section is hidden,
+ask the administrator to check your role access.
+
+Google needs the server setup below before the first connection. Microsoft can
+use OE's built-in login on localhost; a non-loopback callback needs your own
+Microsoft app registration. IMAP uses the mail server's connection details.
+
+## Connect an account
+
+1. Choose **+ Connect Gmail**, **+ Connect Microsoft**, or **Connect** beside
+   **Google Calendar**.
+2. Allow the sign-in popup, choose the intended account, and review its consent
+   screen. Gmail and Calendar are separate connections, even for one Google account.
+3. Return to OE and wait for **Connected**. After a server restart, a mailbox
+   may briefly show **Reconnecting…** while its credentials are checked.
+4. Ask “Show my latest email” or “What is on my calendar today?” Check that the
+   answer refers to the intended account before asking for a change.
+
+For another mailbox, repeat the connection flow. Use **Rename** to give each
+mailbox a recognizable label. **Delete** removes that connection from OE;
+Google Calendar has its own **Disconnect** button.
+
+## Add an IMAP mailbox
+
+Choose **+ Add IMAP…**, select a provider preset or **Custom / Self-hosted**,
+then enter a label, host, port, TLS setting, username, and password or app
+password. Use the settings your mail provider supplies. Choose **Connect** and
+check the account's status.
+
+Reading uses IMAP; sending also needs SMTP. Supported presets supply SMTP
+settings. The custom dialog does not expose a full SMTP editor: a custom
+read-only connection needs separate SMTP configuration through OE's account
+API before it can send. **SMTP From email** only sets the sender address.
+For accounts requiring modern OAuth, use the Gmail/Microsoft connection path.
+
+## Inbox and automatic labels
+
+Open **Inbox**, select an account, and use Refresh to retry a failed load.
+Open a message to read it; the back arrow returns to the list. Ask the assistant
+to draft a reply or organize a specific set of messages.
+
+For Gmail automatic labeling, open **Settings → Tasks → Auto-Label**. Select
+the account and review the rules and their **keep in inbox** settings before
+enabling unattended sorting. Learned sender corrections take priority over
+ordinary rules. Use **Recent activity** to inspect changes and **Put the last
+batch back** to undo the latest batch. Verify the affected messages afterwards.
+
+## Calendar follow-ups
+
+After “What's on my calendar today?”, try “What about Wednesday?” or “And next
+week?” Simple date questions can use OE's synchronized calendar mirror; more
+complex planning uses the agent's calendar tools. A connected calendar can
+also supply a read-only [dashboard card](dashboards.md#add-cards-and-widgets).
+
+## Owner setup: Google
+
+1. In your Google Cloud project, enable the Gmail API and/or Google Calendar
+   API. Configure the consent screen and access for the accounts that will connect.
+2. Create an OAuth client of type **Web application** and register the exact
+   redirect URL OE will use. See [Google's credential setup](https://developers.google.com/workspace/guides/create-credentials).
+3. Download that client's JSON and place it on the OE server as
+   `gmail-credentials.json` in the OE installation directory, readable only
+   by the OS account running OE. This is a server file, not a chat attachment.
+   Docker stores it with the persistent runtime state under `/app/docker-data/`.
+4. Have each user connect Gmail and Calendar from their own OE profile.
+
+Both Google connections use `/api/oauth/google/callback`. For example:
+
+- Local browser on the OE host: `http://localhost:3737/api/oauth/google/callback`
+- Stable HTTPS domain: `https://oe.example.com/api/oauth/google/callback`
+
+OE uses the saved `externalUrl` when present, otherwise the request host and
+forwarded protocol. A reverse proxy should pass the correct HTTPS protocol.
+For a fixed domain, an operator can set `externalUrl` to that origin in
+`config.json` while OE is stopped, then restart it. Register the same scheme,
+host, port, and path with Google. See [Public and private access](public-access.md).
+
+## Owner setup: Microsoft
+
+For remote access, register your own application, select the supported account
+types, and add the exact `/api/oauth/microsoft/callback` redirect URL for your
+OE origin. Follow [Microsoft's app registration guide](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app).
+OE requests delegated `Mail.ReadWrite`, `Mail.Send`, and `offline_access`.
+Your organization's policies may require administrator consent.
+
+On the OE server, stop OE and set `msClientId`, `msClientSecret` (the secret
+**value**, not its ID), and `msTenant` in the installation's `config.json`.
+Use the tenant required by your registration, or `common` for a registration
+that allows both personal and work accounts. Preserve the other settings,
+restrict file access to the OS account running OE, and restart the service.
+Each user then completes **Settings → Profile → Connected Accounts →
++ Connect Microsoft**.
+
+## Common problems
+
+- **Authorization will not start:** check the server's Google credentials file
+  or Microsoft app settings, and allow the popup.
+- **Redirect mismatch:** compare the exact callback URL with the registered
+  one. A public tunnel is one option; localhost works when the browser is on
+  the OE host. An HTTPS certificate alone does not configure OAuth.
+- **Token expired:** choose **Reconnect** on that mailbox and complete consent.
+- **IMAP Auth failed:** check the provider's required authentication method
+  and app password. Re-adding an IMAP connection is different from OAuth reconnect.
+- **Read works but send fails:** check SMTP for IMAP, or consent/sending access
+  for OAuth. Test with an explicitly requested message to yourself.

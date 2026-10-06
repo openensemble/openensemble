@@ -1,10 +1,10 @@
 ---
 title: Voice devices
-nav_order: 3
+nav_order: 6
 description: >-
   Build an open-source ESP32-S3 voice assistant: on-device wake words,
   far-field capture with hardware echo cancellation, and a self-hosted
-  alternative to Alexa or Google Home that keeps audio on your own server.
+  alternative to Alexa or Google Home with local or cloud speech processing.
 ---
 
 # Voice devices — an open, self-hosted voice assistant
@@ -12,7 +12,7 @@ description: >-
 Pair a physical wake-word device with your OpenEnsemble server: say
 **"Hey Ensemble"** (or any of the bundled wake words) and talk to your agents
 hands-free. The reply is spoken back through the device's speaker or 3.5 mm
-jack. Audio, transcripts, and conversation history never leave your server.
+jack. Choose local or cloud processing for each voice stage. Remote STT receives recordings, cloud chat receives transcript/context, and remote TTS receives reply text. See [Model and privacy choices]({{ site.baseurl }}/guide/models-explained/).
 
 It's a fully open alternative to an Alexa- or Google-Home-style smart speaker:
 open hardware, [open firmware](https://github.com/openensemble/voice-device-firmware),
@@ -57,8 +57,9 @@ matching firmware.
 
 OpenEnsemble ships prebuilt firmware and includes a **browser-based flash
 wizard** (WebUSB + Web Serial in Chrome or Edge) — no `dfu-util`, `esptool`,
-or toolchain needed. Open the in-app **Guide → Voice devices** section for
-pairing and flashing.
+or toolchain needed. Follow [Voice devices]({{ site.baseurl }}/guide/voice-devices/) and
+[Flashing voice devices]({{ site.baseurl }}/guide/voice-device-flashing/) for
+pairing, speech setup, and USB flashing. The same pages are in the in-app Guide.
 
 On first boot the device comes up as a Wi-Fi access point; a small captive
 portal form takes your Wi-Fi credentials, the server URL, and a pairing code.

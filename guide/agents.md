@@ -1,6 +1,6 @@
 # Agents
 
-An agent is one configurable participant in your ensemble. They're cheap to make and you'll usually have several — the Coordinator out front and specialists behind.
+An agent is a named assistant with a model, personality, and tools. New accounts start with one primary assistant. Switch to an ensemble when you want separate specialists; see [Single assistant and ensembles](single-assistant.md).
 
 ## What an agent has
 
@@ -12,6 +12,8 @@ An agent is one configurable participant in your ensemble. They're cheap to make
 - **Tools** — the specific skill tools this agent has unlocked. Roles set sensible defaults; you can adjust per-agent.
 
 ## Creating an agent
+
+In Single assistant mode, you can create your first assistant. To add another, switch to **Settings → Agents → Agent setup → Agent ensemble** first.
 
 Two ways:
 

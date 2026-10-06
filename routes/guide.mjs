@@ -2,6 +2,7 @@
 /**
  * Guide routes:
  *   GET /api/guide              — table of contents (sections + pages)
+ *   GET /api/guide/search?q=... — full-text matches across all indexed pages
  *   GET /api/guide/page/:slug   — markdown body of a page
  *
  * Pages live in `guide/` at the install root. The TOC is the source of truth
@@ -37,7 +38,7 @@ function listSlugs(idx) {
   const out = new Set();
   for (const s of idx.sections ?? []) {
     for (const p of s.pages ?? []) {
-      if (typeof p.slug === 'string') out.add(p.slug);
+      if (typeof p.slug === 'string' && /^[a-z0-9-]+$/.test(p.slug)) out.add(p.slug);
     }
   }
   return out;
@@ -56,6 +57,30 @@ export async function handle(req, res) {
   if (req.method !== 'GET' || !req.url.startsWith('/api/guide')) return false;
 
   const userId = requireAuth(req, res); if (!userId) return true;
+
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/api/guide/search') {
+    const query = (url.searchParams.get('q') ?? '').trim();
+    if (!query || query.length > 200) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Enter a search between 1 and 200 characters' }));
+      return true;
+    }
+    const terms = query.toLowerCase().split(/\s+/);
+    const idx = loadIndex();
+    const matches = [];
+    for (const slug of listSlugs(idx)) {
+      const meta = findPageMeta(idx, slug);
+      let body;
+      try { body = fs.readFileSync(path.join(GUIDE_DIR, slug + '.md'), 'utf8'); }
+      catch { continue; }
+      const text = [meta?.title, meta?.section, slug, body].join(' ').toLowerCase();
+      if (terms.every(term => text.includes(term))) matches.push(slug);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+    res.end(JSON.stringify({ query, matches }));
+    return true;
+  }
 
   if (req.url === '/api/guide' || req.url === '/api/guide/') {
     const idx = loadIndex();

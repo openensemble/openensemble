@@ -1,0 +1,51 @@
+# Run Inspector and agent activity
+
+Use agent activity to follow work. Use Run Inspector when you need to explain
+which model or tool handled a particular turn.
+
+## Follow background work
+
+Open the chat's **Agents** pop-out to see active workers, their current tool,
+and completed results. Ask “Is the researcher still working?” or “Check
+workers” for status. Use **Stop** to cancel work; cancellation follows the
+owned child jobs. A job is not complete just because its parent finished speaking.
+
+For scheduled runs, open **Tasks → Ledger**. Their output stays in the ledger.
+For an interrupted supported worker, use its **Review & resume** controls;
+see [Resumable agent jobs](resumable-jobs.md).
+
+## Inspect a turn
+
+Run Inspector is an owner/admin diagnostic. Open **Run Inspector** from the sidebar, or its tile in the mobile menu. Select the relevant run and compare:
+
+- the input source and matched skills;
+- requested and resolved provider, model, and reasoning effort;
+- tools offered to the model and actual tool-call results;
+- separate local records and provider-reported evidence;
+- failures and any actions that already completed before a later error.
+
+An unsupported or unavailable model is a setup problem, not proof that a tool
+failed. A tool that completed before a provider error may already have changed
+data. Check its result before retrying the whole request.
+
+## Why did a tool not run?
+
+Ask an administrator-enabled assistant “Why isn't my tool being called?”
+OE's diagnostic checks the capability gates, including manifest/handler
+registration, agent assignment, account permissions, routing, and voice access.
+Correct the reported gate, then retry one small request.
+
+For a custom skill, confirm the assigned agent in **Settings → Skills → Custom
+Skills**. For MCP, confirm **Assigned to** on its server card. A skill intended
+for voice use must declare that capability; see [Building custom skills](skill-builder.md).
+
+## Approval cards and errors
+
+When OE stages a consequential action, review the current **Approve / Cancel**
+card. Cards remain associated with their request after reload; a newer request
+can replace an older pending action. Approving the current card authorizes the
+action shown there.
+
+Short notices also report recovery such as token renewal or unsupported
+provider capabilities. Inspect the run when you need details. Estimated token
+counts are labeled as estimates; missing provider usage is not an exact zero.

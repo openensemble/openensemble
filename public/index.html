@@ -1692,12 +1692,13 @@
         <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
       </div>
       <div class="desk-drawer-body" id="drawerGuideBody" style="padding:0;display:flex;flex-direction:column;height:100%;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
-          <input id="guideSearch" type="search" placeholder="Search the guide…" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 10px;font-size:12px;box-sizing:border-box">
+        <div class="guide-search-row">
+          <button id="guideContentsToggle" type="button" aria-controls="guideToc" aria-expanded="false">Contents</button>
+          <input id="guideSearch" type="search" aria-label="Search all guide pages" aria-controls="guideToc" maxlength="200" placeholder="Search all guide pages…">
         </div>
-        <div style="display:flex;flex:1;min-height:0">
-          <div id="guideToc" style="width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;padding:8px 0;background:var(--bg2)"></div>
-          <div id="guideContent" class="msg-bubble" style="flex:1;overflow-y:auto;padding:18px 22px;line-height:1.55;font-size:13.5px"></div>
+        <div class="guide-layout">
+          <div id="guideToc"></div>
+          <div id="guideContent" class="msg-bubble"></div>
         </div>
       </div>
     </div>

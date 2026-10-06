@@ -36,6 +36,23 @@ default; owners can lower that ceiling with
 `OPENENSEMBLE_MAX_WORKSTREAMS_PER_OUTCOME`. Requests above the configured
 ceiling are reported explicitly rather than silently reduced.
 
+### Choose worker models and effort
+
+You can request a team on any models available to your profile, even when the
+parent uses another provider. For example: “Use two agents on my configured
+local model to compare these files,” or name a mixed team explicitly. OE checks
+each requested model and reasoning level; an unavailable choice is reported
+rather than silently replaced.
+
+Requested team size counts child workers; concurrency determines how many run
+at once. Agent activity and [Run Inspector](run-inspector.md) show requested
+and resolved provider, model, and effort for each worker. Ask “check workers”
+or open the **Agents** pop-out for status and Stop controls.
+
+In ensemble mode, a specialist can escalate a request to the coordinator when
+another capability is needed. Single assistant mode uses the primary's enabled
+skills and private workers instead of named-agent delegation.
+
 ## Direct chat vs. delegation
 
 This is the most important Coordinator concept:

@@ -3,7 +3,7 @@ title: Getting started
 nav_order: 2
 description: >-
   Install OpenEnsemble on your own server: one install script, a web UI on
-  port 3737, and your first agent replying in minutes.
+  HTTPS setup, and a first assistant reply.
 ---
 
 # Getting started
@@ -11,7 +11,7 @@ description: >-
 ## Requirements
 
 - Linux (tested on Debian-family LXCs and VMs); macOS works for local dev
-- Node.js ≥ 18 (the installer pulls one via `nvm` if missing)
+- Node.js ≥ 22.12 (the installer pulls one via `nvm` if missing)
 - `build-essential`, Python ≥ 3.7 (`python3` and `python3-full`), `zip`, `bubblewrap`, `git`,
   `ffmpeg`, `openssl` — the installer offers to install them
 
@@ -23,11 +23,8 @@ cd openensemble
 ./install.sh
 ```
 
-`--depth 1` fetches the current revision, including the bundled voice-device
-firmware (~11 MB total instead of ~96 MB of history). Older commits contain
-superseded firmware images nobody needs to flash. In-app auto-update works
-normally on a shallow clone. Drop the flag if you want the full history for
-development.
+A shallow clone downloads the current revision and supports in-app updates.
+Omit `--depth 1` if you need the full development history.
 
 The installer:
 
@@ -71,48 +68,21 @@ unrestricted privileged container as a shortcut.
 
 ## First run
 
-1. Copy the one-time credential printed by `install.sh` (or by the Docker
-   command above). On a host install, `oe bootstrap` recovers it locally before
-   setup is complete.
-2. Open `https://<your-server-ip>:3739` and accept the self-signed certificate
-   warning. Plain HTTP setup is restricted to a browser running directly on
-   the host at `http://localhost:3737`.
-3. Create the owner account, or restore an existing backup, using the credential.
-4. Connect one provider in **Settings → Providers**.
-5. Create your first assistant and send a message. New accounts use one
-   primary assistant by default; existing upgraded accounts keep their agent
-   ensemble unless they choose to switch.
+Copy the first-run credential printed by the installer, then follow
+[Getting started]({{ site.baseurl }}/guide/getting-started/). That walkthrough
+covers owner creation, connecting a chat provider, creating your single
+assistant, and testing its first reply. Run `oe bootstrap` on a host install
+if you lose the credential before setup is complete.
 
-Everything else — email, calendar, MCP servers, remote nodes, voice devices,
-tunnels, and backups — can be added later.
+Use HTTPS on port **3739** from another computer. Plain HTTP first-run setup
+is restricted to a browser on the OE host at `http://localhost:3737`.
 
-See [Single assistant and ensembles]({{ site.baseurl }}/single-agent-mode) for
-mode switching, preserved agents and memory, and the rollout/rollback runbook.
+## After your first reply
 
-## Configuring LLM providers
+- [Choose providers]({{ site.baseurl }}/guide/providers/) and
+  [understand the model choices]({{ site.baseurl }}/guide/models-explained/).
+- [Add an agent ensemble]({{ site.baseurl }}/guide/single-assistant/) when you need specialists.
+- [Back up and update]({{ site.baseurl }}/guide/backup-update/) before relying on the installation.
+- [Troubleshoot setup]({{ site.baseurl }}/guide/troubleshooting/) if a step fails.
 
-Providers start disabled. Enable them from the web UI under
-**Settings → Providers**, or by editing `config.json`:
-
-```jsonc
-{
-  "enabledProviders": { "anthropic": true, "openai": true, "ollama": true },
-  "anthropicApiKey": "sk-ant-…",
-  "openrouterApiKey": "sk-or-…",
-  "cortex": {
-    "reasonProvider": "auto",     // built-in, ollama, or lmstudio
-    "lmstudioUrl": "http://127.0.0.1:1234"
-  }
-}
-```
-
-Environment variables override config values: `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `BRAVE_API_KEY`, `FIREWORKS_API_KEY`, `GROK_API_KEY`,
-`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`.
-
-## Staying up to date
-
-Admin users see an "Update available" badge in the status bar and can apply
-updates from **Settings → System → Software Update**. The server polls the
-configured git remote hourly and fast-forwards on demand — it never
-`git stash`es or `git reset --hard`s a dirty tree.
+[Browse the complete user guide]({{ site.baseurl }}/guide/).

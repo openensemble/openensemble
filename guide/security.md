@@ -54,24 +54,37 @@ Every path passed to download / delete / shell is `realpath`-checked against the
 
 Some assets (images in chat bubbles, video previews, PDFs in iframes) need to authenticate but can't carry a Bearer header. For those, the server mints **short-lived (10-minute) URL-embedded media tokens** on demand. Static long-lived URLs aren't issued.
 
-## Per-user encryption at rest
+## Encryption and backups
 
-OpenEnsemble encrypts certain sensitive per-user fields at rest using a per-user 32-byte AES-256 key. There is no toggle to enable or disable this — the encryption is automatic for the fields that use it (currently IMAP account passwords; more will move under it in future releases).
+OE automatically encrypts registered provider API keys and other supported
+credentials, including Home Assistant and Telegram secrets, when saving them.
+Some records use a per-user key; global configuration uses the system key at
+`users/_system/.master-key`. Key files have `0600` permissions.
 
-How it works:
+This protects a copied encrypted record when its key is not also available.
+It does not protect against someone who can read the OE process's keys or
+memory. It is not whole-disk encryption: ordinary documents and conversation
+files are separate from these encrypted credential fields.
 
-- The first time a user has data that needs encrypting, OE generates a fresh key and writes it to `users/{userId}/.master-key` with file permissions `0600`.
-- Encryption uses AES-256-GCM with a fresh IV per record.
-- The key never leaves the install — it's not shown in the UI, not exported by any API, and not derivable from your password.
-- The key file is owned by the OS user the OE process runs as. Anyone with shell access on the host can read it; the protection is against backup theft and remote compromise, not against a malicious local admin.
+An ordinary `.tar.gz` backup includes the keys needed to restore credentials.
+Someone with that archive can recover those credentials. Use a
+password-protected **.oeb** export to protect the backup itself, and keep its
+password separately. Environment-only credentials need to be supplied again
+on the destination. Never remove master keys from a working installation or
+backup you expect to restore. See [Backup and restore](backup-update.md).
 
-Backups include `users/{userId}/.master-key` by default (it lives under the user dir, which is packed in full), so a restore on another host decrypts cleanly. If you want a backup without secrets, you'd need to manually exclude every `.master-key` file from the tarball — and accept that encrypted fields in that copy become unrecoverable on the destination.
+## Network and provider data
 
-## Network surface
-
-- **Inbound 3737** — the web UI and API. Required.
-- **Outbound** — to whichever LLM provider APIs you've enabled, plus optional Cloudflare tunnel (cloudflared establishes its own tunnel; you don't have to open inbound ports if you use it).
-- Telegram and OAuth callbacks come in over the Cloudflare tunnel if configured.
+- **HTTP 3737** serves the web UI/API; plain HTTP first-run setup is restricted
+  to localhost on the OE host.
+- **HTTPS 3739** is the installer's default TLS entry point and supports browser
+  microphone and USB features. Configure access for the interface you use;
+  do not assume public inbound ports are required for a tunnel.
+- Cloud chat receives the context included in its requests. Remote STT receives
+  recordings; remote TTS receives reply text. Local endpoints run where their
+  configured addresses point. See [Which model does what](models-explained.md).
+- Optional tunnels, OAuth callbacks, and Telegram use the connections explained
+  in [Public and private access](public-access.md).
 
 ## What OpenEnsemble does *not* protect against
 

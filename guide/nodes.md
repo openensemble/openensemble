@@ -85,6 +85,12 @@ For a server install (OE running on a Pi or NAS away from your daily-driver mach
 
 Commands that take longer than 10 seconds move to a background task. Updated node agents (v2.1.0+) track the process locally and send running status every five seconds, including when a command has no output. OE keeps the task running until the node reports its output and exit status. A brief connection loss resumes tracking the same job; the node retains completed results for up to ten minutes, subject to a bounded result cache, until OE acknowledges them. These updates show elapsed time and output activity, not an invented completion percentage.
 
+The agent reports the final result without another message from you. For work
+that continues after its launch command exits, ask it to track completion too.
+The node tool supports a read-only completion check for that purpose; SMART
+disk self-tests require one. An unknown outcome means the remote work may
+still be running, so check its state before starting it again.
+
 Omit `timeout` to let a tracked command run until it exits. An explicit value from 1 to 86400 seconds sets a hard execution deadline; `0` explicitly requests no deadline. Older agents use a 24-hour fallback when the timeout is omitted and should be updated for progress tracking. If job status is unavailable for 90 seconds, OE reports an unknown outcome without automatically restarting the work. Tracking survives a temporary node connection loss, but an OE server or node-agent process restart can still interrupt monitoring.
 
 ## Checking node + service health
@@ -130,3 +136,10 @@ Nodes drawer → hover the node → trash icon (confirm). That:
 - deletes local profile data under `users/<you>/nodes/<nodeId>/` (profiles, incidents, activity, snapshots).
 
 If you want to fully wipe the agent package on the machine as well, also run `systemctl disable --now oe-node-agent` there when it is still reachable.
+
+## Node command-line tools
+
+Use `oenode` on the paired machine for the node agent, for example
+`sudo oenode update` or `sudo oenode uninstall`. The `oe` command belongs to the
+OE server. When pairing through a reverse proxy, keep the complete HTTPS URL
+from the pairing instructions; do not replace it with an HTTP address on 3737.

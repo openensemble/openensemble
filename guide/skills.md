@@ -25,13 +25,12 @@ OpenEnsemble ships with a curated set under `skills/`, and each user can have th
 | `nodes` | Run commands and transfer files to remote machines via the OE node agent |
 | `role_tutor` | Adaptive tutor with per-subject mastery tracking |
 | `role_video_generator` | Text-to-video generation |
-| `shared-docs` | Read uploaded documents, photos, and videos |
+| `profile_files` | List and read profile documents and media, including files shared with you |
 | `skill-builder` | Create and edit custom skills at runtime |
 | `tasks` | Schedule recurring and one-time agent tasks |
 | `web` | Brave Search and URL fetch |
 | `self-mgmt` | Edit the agent's own memory, name, and prompt |
 | `delegate` | Hand work to other agents (used by the Coordinator) |
-| `profile_files` | Read user-uploaded profile documents |
 | `user-admin` | Manage users (owner/admin only) |
 | `logs` | Read server logs (admin only) |
 | `utility` | Time, calculator, small helpers |
@@ -48,12 +47,18 @@ Open **Skills** (the grid icon in the sidebar, or **Menu → Skills** on mobile)
 
 Some skills need additional configuration before they work:
 
-- **email** — connect at least one mailbox in **Settings → Profile → Connected Accounts**.
+- **email** — connect at least one mailbox in **Settings → Profile → Connected Accounts**; see [Email & calendar](email-calendar.md).
 - **gcal** — connect Google Calendar in the same place (uses Google OAuth).
 - **web** — needs a Brave Search API key in **Settings → Profile → Brave Search API**.
 - **image_generator** — needs at least one image-capable provider enabled in **Providers** (Fireworks Flux, xAI Grok image models, OpenAI's image models, etc.). Pick whichever you have a key for; the skill picks up any provider that exposes an image-generation model.
 - **nodes** — needs at least one paired node (see **Remote nodes**).
-- **shared-docs** — works automatically as soon as you upload anything.
+- **profile_files** — reads your uploaded files and accessible shares. See [Documents & sharing](documents.md).
+
+## Skill assignment
+
+**Settings → Skills** separates Roles, Custom Skills, and Tools. Assign a custom skill with its agent picker. In an ensemble, it has one stored owner; Single assistant mode makes enabled capabilities available to the primary while preserving those assignments for a later switch back. The `/claim` and `/release` menus include roles and custom skills.
+
+See [Roles](roles.md#choose-a-model-for-a-role-or-skill) for per-role and per-skill Execution settings, and [MCP connections](mcp.md) for external tool servers.
 
 ## Custom skills
 

@@ -31,7 +31,7 @@ If you leave the password field blank, the backup is plain `.tar.gz` exactly as 
 
 Two paths:
 
-- **Existing install** — Settings → Backup → Restore Backup → upload `.tar.gz`. Replaces current state.
+- **Existing install** — Settings → Backup → Restore Backup → upload `.tar.gz` or `.oeb` and enter its password if encrypted. Replaces current state.
 - **Fresh install** — on the first-run screen, click "Already have an OpenEnsemble backup?" and upload. Skips the rest of first-run.
 
 Restore validates the archive and stages it before restarting. The launcher applies it before loading accounts, encryption keys, scheduler tasks, or other in-memory state. Users, files, and custom drawers created after the snapshot are removed from the restored data. Browser and API sessions are cleared; sign in again after restart. Paired devices reconnect through the restored device registries.
@@ -44,7 +44,11 @@ Backups contain saved configuration, credentials, and the keys needed to decrypt
 
 ### Encryption keys
 
-OpenEnsemble auto-generates a per-user encryption key the first time a user has any data that needs encrypting at rest (saved IMAP passwords today; more secrets in future skills). The key is a 32-byte file at `users/{userId}/.master-key` with permissions `0600`. There's nothing to copy, paste, or write down — you don't see it in the UI, and it isn't a password.
+OpenEnsemble auto-generates keys for supported encrypted credential fields.
+Per-user keys live at `users/{userId}/.master-key`; global configuration uses
+`users/_system/.master-key`. Each is a 32-byte file with permissions `0600`.
+OE manages these files automatically. They are separate from the password you
+choose for an encrypted backup. See [Encryption and backups](security.md#encryption-and-backups).
 
 For backups specifically:
 
@@ -52,7 +56,7 @@ For backups specifically:
 - **What to be careful about.** If you ever pull `.master-key` *out* of a backup manually (e.g. to share a backup without secrets), the encrypted fields in that backup become unrecoverable on the destination box. The key is not derivable from anything else.
 - **File permissions.** OE chmods `.master-key` back to `0600` on every read, so it self-heals if a restore or rsync widens the permissions.
 
-In short: as long as you don't surgically remove `.master-key` from a backup, restore "just works".
+Keep the complete backup intact so its saved credentials and keys restore together.
 
 ## Software auto-update
 

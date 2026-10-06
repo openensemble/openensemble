@@ -20,7 +20,7 @@ Type `/chat` to list your chats in the suggestion box, with **New chat** at the 
 
 ## Agent mentions
 
-Type `@<agent-name> do this` at the start of a message to send that request to a specific agent. OE will switch to that agent's chat and route the message there.
+Type `@` to choose an agent or an existing profile file. An agent mention routes the message to that agent; file mentions such as `@audio/meeting.wav` let tools use an existing upload. See [Documents & sharing](documents.md#attach-keep-and-reference-files).
 
 ## Attaching files
 
@@ -32,7 +32,27 @@ Three ways:
 
 PDFs, images, CSVs, and code files all work. The active agent will see the attachment on its next turn.
 
-> The active agent's model has to be able to read whatever you attach. Drop an image onto an agent running a text-only model (LM Studio without a vision model, plain Ollama text models, etc.) and you'll get an error or the image will be silently ignored. Same for PDFs / CSVs on models that don't accept document input. If in doubt, send the attachment to an agent on a vision-capable provider (Anthropic, OpenAI, Gemini, Grok vision, etc.).
+You can attach up to six files to one message. Images need a vision-capable
+model or the configured vision workflow; audio/video transcription uses STT.
+See [Which model does what](models-explained.md) for those separate settings.
+
+## Mobile navigation
+
+Tap **Menu** (the three-dot button) to open the feature tiles, including Skills,
+Learn, Nodes, and Voice devices when your profile has access. The bottom agent
+control or **Agents** opens the agent picker; activity dots show running work.
+The top **Chat / Dashboard / Workspace** switch changes views. Use the sheet's
+handle or the area outside it to dismiss it.
+
+## Drafts and long conversations
+
+Unsent message text stays with its agent when you switch away and return. It
+is saved in this browser and restored after a reload; clearing browser storage
+removes local drafts.
+
+Scroll up during a reply to keep reading earlier messages. **Jump to latest**
+returns to the live reply. In a long conversation, **Load earlier messages**
+at the top fetches the next page of older messages.
 
 ## Switching views
 

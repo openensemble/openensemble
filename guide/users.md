@@ -69,6 +69,13 @@ Browser sessions have a fixed seven-day maximum. `OE_SESSION_EXPIRY` or
 hours; `0` disables the idle timeout but not the seven-day hard limit. This also
 applies to browsers left open as dashboard displays.
 
+### Log out other devices
+
+The session list identifies browsers and named node/voice-device connections.
+**Log out everywhere** revokes other browser sessions. Its optional device
+controls can also unpair nodes and voice devices; those need fresh pairing to
+connect again. Review those choices before confirming.
+
 ## Switching users
 
 The user pill at the bottom of the sidebar opens the profile picker. Switching is just re-auth — no data crosses between users.

@@ -1,34 +1,40 @@
 # Welcome to OpenEnsemble
 
-OpenEnsemble is a self-hosted, multi-user AI assistant platform. You run a single Node.js server, connect the LLM providers you want, and create a roster of specialist agents that talk to each other to get work done.
+OpenEnsemble is an AI assistant you host yourself. Connect a chat model, create
+your assistant, and enable the skills you want it to use. Each account keeps
+its own conversations, files, settings, and connected accounts.
 
-The first-run path is deliberately short: create the owner account, connect one model provider, create an agent, and send a message. Optional integrations can be added later from Settings.
+New accounts begin with one assistant. You can switch to a team of specialist
+agents later without deleting your existing work.
 
-## The mental model
+## Start here
 
-- **Agents** are the people on your team. Each one has a name, an emoji, a model, a role, and a set of skills. You can talk to any of them directly.
-- **Roles** are the persona and workflow rules an agent follows (Coder, Researcher, Email, Coordinator, …). Roles are swappable — the same agent can change role without losing its history.
-- **Skills** are the tools an agent can use. Web search, file editing in a sandbox, email, calendar, image generation, remote machine control, and so on. Each skill is a tiny manifest plus an `execute.mjs`.
-- **The Coordinator** is the agent at the front door. When you message it, it figures out which specialist should answer and delegates to them.
-- **Providers** are the LLM backends — Anthropic, OpenAI, Grok, Gemini, Ollama, LM Studio, OpenRouter, and others. You enable the ones you want; each agent picks one model.
-- **Display dashboards** are per-profile browser views for tablets and room screens. They can combine Home Assistant controls with read-only Calendar, Email, and custom-skill widgets at stable addresses.
+- [Getting started](getting-started.md) — connect one model and get your first reply.
+- [Which model does what](models-explained.md) — chat, memory, personalization, and voice.
+- [Single assistant and ensembles](single-assistant.md) — choose how to organize your agents.
+- [Troubleshooting](troubleshooting.md) — resolve common setup problems.
 
-## What it isn't
+## Terms you will see
 
-- It isn't a SaaS — you host it.
-- It isn't tied to one model vendor — every provider is optional.
-- It doesn't lock you in — your data is plain JSON and files under `users/{userId}/`.
+| Term | Meaning |
+|---|---|
+| Assistant or agent | A named participant with a model, personality, and tools |
+| Provider | The service or local model server that generates an answer |
+| Role | An agent's workflow instructions and default tools |
+| Skill | A capability, such as email, calendar, coding, or web search |
+| Coordinator | The agent that routes work to specialists in an ensemble |
+| Project space | Shared project notes and files alongside separate conversations |
+| Display dashboard | A dedicated browser view for a tablet, room, or status screen |
 
-## Feature maturity
+## Where your data goes
 
-- **Core:** agents, roles, skills, providers, documents, memory, tasks, per-user workspaces, and Display dashboards.
-- **Advanced:** remote nodes, service profiles, public access, backups, auto-update, MCP servers, and multi-user administration.
-- **Beta / hardware:** voice devices, flashing, local speech-to-text, and local text-to-speech.
+OE stores your account data on your server. The providers and integrations you
+select determine which information is sent elsewhere. A cloud chat model
+receives the conversation context supplied to it; cloud speech providers
+receive audio or reply text. See [Which model does what](models-explained.md)
+and [Security model](security.md).
 
-## Where to go next
-
-- Brand new install? → **Getting started**
-- Setting up which AIs OpenEnsemble can talk to? → **LLM providers**
-- Want to know what each built-in skill does? → **Skills**
-- Building a wall-tablet or room display? → **Display dashboards**
-- Need to expose your install to the internet (Telegram, OAuth callbacks)? → **Public access**
+Use the Guide search to search every page, including pages you have not opened.
+On a phone, **Contents** switches between the page list and the current page;
+search shows matching pages automatically. Select a result to read it.
+[What's new](whats-new.md) lists recent changes.

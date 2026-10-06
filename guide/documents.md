@@ -11,7 +11,31 @@ The **Docs** drawer (sidebar folder icon) is the unified view of every file in y
 - **Code projects** — sandboxed projects the coder has worked in. Downloadable as zip.
 - **Notes** — a separate tab for free-form personal notes.
 
-Tabs at the top of the drawer filter by kind (All / Photos / Videos / Code).
+Tabs at the top of the drawer filter by kind (All / Photos / Videos / Audio / Code).
+
+## Attach, keep, and reference files
+
+Attach up to six files to one message using the paperclip, drag-and-drop, or
+paste. Check the attachment tray before sending. The message keeps references
+to all of its sent attachments across a reload.
+
+When **Keep … in your files?** appears after a reply, **Keep** leaves the file
+in your profile and **Discard** deletes the saved file. Ignoring that prompt
+keeps it. Removing an unsent item from the tray is a separate action.
+
+Type `@` to find an agent or a saved file. For example, choose
+`@audio/meeting.wav` from autocomplete to reference an existing recording.
+
+## Transcribe audio and video
+
+Attach a recording and ask “Transcribe this,” or reference a saved audio/video
+file with `@`. OE uses its configured [STT service](stt.md); video transcription
+also needs ffmpeg to extract the audio. The upload limit is 500 MB, and the
+chosen transcription provider can have a smaller input limit.
+
+Uploaded audio appears under **Audio**, with an inline player. Earlier files
+may remain in their original Documents location. Cloud transcription sends
+the recording to that configured provider.
 
 ## Sharing with other users on the same install
 
@@ -53,10 +77,9 @@ Only the document's **owner** can edit or restore; docs shared with you are read
 ## Storage
 
 Files live under `users/{userId}/`:
-- `docs/` — uploads
-- `desktop/images/`, `desktop/videos/` — AI outputs
-- `research/` — research docs
-- `coder/projects/` — code projects
+- `documents/` — profile files, including document and media folders
+- `documents/code/` — code projects
+- Research and older media can also have their own legacy storage locations; use the Docs drawer and a full profile backup to include them.
 
 Backups (see **Backup, restore, auto-update**) include all of these.
 

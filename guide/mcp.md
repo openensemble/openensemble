@@ -1,0 +1,65 @@
+# MCP connections
+
+Model Context Protocol (MCP) connects AI applications to tools. OE supports
+two directions, both configured in **Settings → MCP** for adult accounts.
+
+| What you want | Use |
+|---|---|
+| Give an OE agent tools from another service | Add an MCP server and assign it to the agent |
+| Use your OE agents or memory from another application | Create an OE access token for that client |
+
+## Connect tools to an OE agent
+
+1. Open **Settings → MCP** and choose **Browse catalog**, or expand
+   **+ Add a server manually**.
+2. Give it a server ID using letters, numbers, and hyphens.
+3. Choose its **Transport** and fill in the provider's configuration:
+   - **stdio:** the command runs on the OE host. Enter its executable,
+     arguments one per line, and environment variables as `KEY=value`.
+   - **http:** enter the service's MCP endpoint. Choose static headers or
+     OAuth authentication. For headers, enter each as `HeaderName: value`.
+4. Choose **Add server**. For OAuth, choose **Authorize** on the saved card
+   and complete the consent screen.
+5. Select the intended agent under **Assigned to** and assign it. In Single
+   assistant mode, use your primary assistant.
+6. Wait for **ready** and a tools count. Ask that agent to perform one harmless
+   lookup supported by the connected server, and inspect its result.
+
+The catalog fills configuration fields; it does not supply your credentials.
+Each OE user adds their own connections. Secrets are stored encrypted.
+A local subprocess runs on the OE machine with access granted there; use a
+server you trust and credentials scoped to the work you need.
+
+## Use OE from another application
+
+1. Under **External access — use your agents from other apps**, expand
+   **+ Create an access token**.
+2. Give the token a name identifying the client.
+3. Select only the needed scopes: **Chat**, **Memory read**, or **Memory write**.
+   Optionally limit it to one agent.
+4. Leave additional agent tools empty for the default read-only tool access.
+   Grant exact extra tool names only when the client should be allowed to
+   perform those actions; grants do not bypass your account's permissions.
+5. Choose **Create token** and copy it immediately. OE only shows it once.
+6. Configure the client with OE's HTTP MCP endpoint, `https://<your-oe-host>/mcp`,
+   and the header `Authorization: Bearer <your-token>`. The creation panel
+   provides example client configurations using your current OE address.
+7. Test a simple question, then check **last used** on the token's card.
+
+This is an MCP access token, separate from your browser login. Use **Revoke**
+on its card to disconnect that client. Content sent through an external client
+may be sent to that client's AI provider and retained in its logs.
+
+## Common problems
+
+- **Command not found:** install the executable on the OE host or container
+  and make it available to the OE service's PATH. Installing it on your laptop
+  does not make it available to a remote OE server.
+- **Ready but the agent cannot use it:** check **Assigned to**, the agent you
+  are chatting with, and the account's access. See [Run Inspector](run-inspector.md).
+- **Authorization failure:** verify headers or choose **Re-authorize**. The
+  server card shows its last error; use **Reconnect** after correcting setup.
+- **External client cannot connect:** use an address and certificate that the
+  client can reach and trust. Check the `/mcp` path and bearer token.
+- **A write is denied:** read-only access is the default. Review the token's
+  scopes, exact tool grants, and account permissions before changing them.

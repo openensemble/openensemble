@@ -1,5 +1,6 @@
 ---
 title: "Design: per-user sandboxing"
+parent: Development
 nav_order: 5
 description: >-
   Design document for OpenEnsemble's v2 tenant boundary — generalizing the

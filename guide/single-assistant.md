@@ -1,0 +1,62 @@
+# Single assistant and ensembles
+
+Choose how many conversational agents you want to manage. This is a setting
+for your account; other users can choose differently.
+
+| Setup | How you use it |
+|---|---|
+| **Single assistant** | One primary assistant uses your enabled skills and keeps one conversational identity |
+| **Agent ensemble** | Separate specialists have their own roles and histories; a coordinator can delegate between them |
+
+## Defaults
+
+New accounts start in Single assistant mode. Their first successfully created
+assistant becomes the primary assistant. Existing accounts keep their ensemble
+setup when upgrading.
+
+## Change your setup
+
+1. Finish or stop any active reply.
+2. Open **Settings → Agents → Agent setup**.
+3. Choose **Single assistant** or **Agent ensemble**.
+4. For Single assistant, choose the **Primary assistant**.
+5. Send your next message; the new setup applies to it.
+
+You can also ask in chat: “Switch me to single-assistant mode,” “Use Avery as my
+primary assistant,” or “Switch me back to my agent ensemble.” If the primary
+is ambiguous, OE asks you to choose. A parent or administrator manages this
+setting for a child account.
+
+To create a second agent, switch to Agent ensemble first. A one-agent ensemble
+can add agents; a Single assistant account keeps one active primary.
+
+## What stays saved
+
+Switching to Single assistant parks the other agents. Their personas, role
+assignments, layouts, and histories remain stored and return when you switch
+back. Their private histories are not merged into the primary's history.
+Shared account preferences remain available. Tasks assigned to parked agents
+remain saved and are shown as parked.
+
+Deleting an agent is different from switching modes. Deleting the primary
+returns the account to ensemble mode; deletion is blocked while it has active
+work. See [Agents](agents.md).
+
+## Background work
+
+Ask explicitly for background work when you want a detached worker. Ask for
+multiple agents or parallel work when you want a team. The primary remains the
+conversational identity in Single assistant mode; it cannot delegate to named,
+parked specialists.
+
+Private workers use the account's permitted tools and relevant task context.
+They do not receive another agent's private conversation history or permission
+to change account setup. Ask “check workers” or “stop worker” to inspect or
+cancel them. See [The Coordinator](coordinator.md#background-worker-teams) and
+[Resumable agent jobs](resumable-jobs.md) for recovery limits.
+
+## Check that it worked
+
+In Settings, confirm the selected mode and primary. Send a short message to
+confirm which assistant answers. Switch back to ensemble when you want to
+return to a parked specialist's own conversation.

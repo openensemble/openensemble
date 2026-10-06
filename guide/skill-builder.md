@@ -6,7 +6,7 @@ OpenEnsemble's `skill-builder` lets your coder/coordinator write new skills at r
 
 Talk to a coder or coordinator agent and ask for what you want, e.g.:
 
-> "Build me a skill that turns on the lights in my living room via Home Assistant. The HA URL is `http://homeassistant.local:8123` and my long-lived token is in `~/.config/ha-token`."
+> "Build me a skill that checks my local library's public RSS feed for new books by my favorite authors. Assign it to my reading assistant."
 
 The agent will:
 
@@ -14,7 +14,7 @@ The agent will:
 2. Scaffold a folder under `users/{your-id}/skills/{slug}/`.
 3. Write a `manifest.json` (name, description, the tool calls).
 4. Write `execute.mjs` (the actual code).
-5. Add it to a role's tool list so an agent can use it.
+5. Assign the custom skill to the agent you chose so it can use the tools.
 
 Restart-free: the skill is picked up the next time an agent reasons.
 
@@ -22,16 +22,41 @@ Restart-free: the skill is picked up the next time an agent reasons.
 
 `skills/SKILL_BLUEPRINT.md` is the canonical reference. It's loaded into the skill-builder's context whenever it's writing a skill — your agent reads the same doc.
 
-## Manifest gotchas
+## Assignment, validation, and testing
 
-Three fields plus one alias must all be set or the tool silently won't show up to your agents:
+For a larger idea, Skill Builder can keep a draft with sources, proposed tools,
+credentials, and unanswered choices. Review it before asking to build. A small,
+specific edit can update an existing skill directly.
 
-- `manifest.tools` — defines the tool functions
-- `manifest.defaultToolIds` — which of those tools roles get by default
-- `manifest.systemPromptAddition` — instructions injected into the agent prompt when the skill is enabled
-- `TOOL_ALIASES` (in code) — maps tool ids to their handler
+Each custom skill has an assigned agent. Choose it in **Settings → Skills →
+Custom Skills**, or name it in your build request. In single-assistant mode,
+your primary handles the enabled skill set; stored assignments return when
+you switch back to the ensemble.
 
-If you ask the skill-builder to add a new tool to an existing skill, double-check those four. (This is a common cause of "I added it but the agent acts like it doesn't exist".)
+The builder checks code, manifest/handler consistency, and eligible smoke-test
+calls before saving. A validation error should be corrected before relying on
+the skill. Warnings identify checks that were skipped. User-authored tools are
+registered from their manifests; you do not edit core `TOOL_ALIASES` to add one.
+
+Ask the builder to test one tool with explicit arguments using `skill_try_tool`.
+That uses the production sandbox and can perform the tool's real action, so
+choose a read-only example first. Inspect returned results and the skill log.
+Code and manifest edits retain up to ten versions; `skill_rollback` can list
+and restore a previous version.
+
+For voice use, tell the builder the skill must work from a voice device. Its
+manifest needs `voice_device: true`. For a tool that still is not called, use
+[Run Inspector](run-inspector.md#why-did-a-tool-not-run).
+
+## Monitored sources and instant phrases
+
+Ask for a tracker with its source, filter, cadence, and delivery preference.
+The builder can implement the fetch/filter/check/notify sequence; inspect the
+resulting monitor in **Tasks → Monitors**. See [Tasks & scheduler](tasks.md#monitoring-from-a-custom-skill).
+
+Teach a short phrase for a frequently used tool and manage it through
+[Routines → Saved fast paths](routines.md#saved-fast-paths). Built-in requests
+keep their routing priority; a conflicting phrase may use ordinary chat instead.
 
 ## Custom drawers
 
@@ -62,7 +87,9 @@ resulting card, configuring it, and understanding display-session privacy.
 - `skills/{slug}/` — system-wide, available to all users (pre-bundled with OE).
 - `users/{userId}/skills/{slug}/` — visible only to that user, not shared.
 
-If you want to share a custom skill across users, the skill-builder can promote it to a system skill (owner/admin only).
+Creating a custom skill does not make it available to other accounts.
+Skill Builder manages user-created skills; bundled system skills are part of
+the installation.
 
 ## Editing existing skills
 

@@ -2,9 +2,10 @@
 #
 # CI gates, in order of speed:
 #   1. Syntax check every .mjs (catches typos before the test suite even imports)
-#   2. Danger-zone lint (flags filesystem patterns with a track record of
+#   2. Check that published Guide pages match the canonical sources
+#   3. Danger-zone lint (flags filesystem patterns with a track record of
 #      taking down installs; see scripts/danger-zone-lint.mjs)
-#   3. Typecheck opt-in files
+#   4. Typecheck opt-in files
 #
 # npm ci uses --ignore-scripts so the postinstall model fetch (~220 MB GGUF
 # weights) doesn't burn CI time.
@@ -50,6 +51,9 @@ jobs:
             -not -path './vendor/*' \
             -not -path './venv/*' \
             -print0 | xargs -0 -n1 -P4 node --check
+
+      - name: Check published guide matches its sources
+        run: node scripts/sync-guide-docs.mjs --check
 
       - name: Danger-zone lint
         run: node scripts/danger-zone-lint.mjs

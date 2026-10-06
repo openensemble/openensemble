@@ -1,0 +1,85 @@
+# Home Assistant
+
+Connect your Home Assistant installation to read device states, control
+supported devices, run routines, and build dashboard cards. OE uses one shared
+household connection, with access controlled per OE profile.
+
+## What you need
+
+- An owner/admin OE account for connection setup.
+- A Home Assistant URL reachable from the OE server.
+- A Home Assistant long-lived access token. Create it in your Home Assistant
+  profile's **Security → Long-Lived Access Tokens** area; see
+  [Home Assistant authentication](https://www.home-assistant.io/docs/authentication/).
+
+The token's Home Assistant permissions limit what OE can do. Regular OE users
+also need the **Home Assistant** role/skill enabled; owners and admins have
+runtime access automatically.
+
+## Connect
+
+1. Open **Settings → System → Home Assistant**.
+2. Enter the Home Assistant URL and token.
+3. If your own local HA uses a self-signed certificate, select **Allow
+   self-signed certificate** for that connection.
+4. Choose **Test connection**, then **Save**.
+5. Check the connection status, then ask “List my Home Assistant lights.”
+
+Use the HA server's address. `localhost` only works when HA is reachable from
+OE's own host/container at that address. Changing the saved connection affects
+every OE user who has access.
+
+## Test one device
+
+Ask for the state of a clearly named device first. Then request one reversible
+control, such as turning on a test light, and verify it in Home Assistant.
+If several devices have similar names, identify the intended device explicitly.
+
+OE listens for HA state events. A command can be accepted before the device
+reports its new state; in that case OE reports confirmation as pending. Check
+the device and live state before repeating the command.
+
+## Dashboards, routines, and aliases
+
+- Add HA cards through [Display dashboards](dashboards.md#add-cards-and-widgets).
+- Use [Routines](routines.md) for a saved sequence, including waits.
+- Teach a device name such as “call these lights the kitchen lights,” or save
+  a phrase for one exact device action. Review it in **Routines → Saved fast paths**.
+
+Dashboard visibility is separate from permissions. An unattended screen uses
+the full session of the profile signed into it.
+
+## Trigger a routine from Home Assistant
+
+An HA automation can fire `openensemble_event` with the routine's existing
+webhook token. In OE, save the routine and set its target device if it speaks
+or plays audio. Put its token in HA's `secrets.yaml`:
+
+```yaml
+actions:
+  - event: openensemble_event
+    event_data:
+      v: 1
+      action: run_routine
+      routine_id: goodnight
+      webhook_token: !secret oe_goodnight_token
+```
+
+The token identifies the routine and owner; event data cannot select another
+user or arbitrary tools. **Regen** in the routine editor revokes the old token.
+People who can inspect HA events or traces can see the runtime token, so limit
+that access. **Live states only** means state streaming works but routine-event
+subscription is not authorized; an HA administrator token may be needed for it.
+
+Events sent while HA or OE is offline are not replayed. A loop breaker stops a
+routine capability after 20 fires without a 12-hour quiet period. Investigate a
+loop before using **Regen** to reset that capability.
+
+## Common problems
+
+- **Connection fails:** test reachability from the OE host; check URL, token,
+  and certificate settings.
+- **No devices for a regular user:** check that profile's Home Assistant grant.
+- **Wrong device:** correct its alias or saved fast path before retrying.
+- **Read works but control fails:** check what the device and HA token permit.
+- **Routine does not speak:** choose an online **Target device** in its editor.

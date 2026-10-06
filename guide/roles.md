@@ -42,3 +42,14 @@ Per-agent you can:
 - Toggle individual tools on or off relative to the role's defaults
 
 If you find yourself making the same change to many agents with the same role, that's a hint the change belongs in a custom role instead. Custom roles are managed in **Settings → Skills → Roles**.
+
+## Choose a model for a role or skill
+
+Open **Settings → Skills**, find the role or custom skill, and expand its
+**Execution** section. Leave the profile inherited to use the normal model, or
+choose an available model and supported reasoning effort for this kind of work.
+This selection applies to that workflow, including Deep Research stages.
+Account model access still applies.
+
+Inspect the next relevant run to confirm its resolved provider, model, and
+effort. See [Run Inspector](run-inspector.md).

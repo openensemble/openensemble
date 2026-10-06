@@ -1,5 +1,6 @@
 ---
 title: "Security: skill sandbox"
+parent: Development
 nav_order: 4
 description: >-
   How OpenEnsemble isolates untrusted user-authored skills — a broker

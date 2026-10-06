@@ -15,6 +15,7 @@ agents, choose the LLM providers they use, and keep each user's data isolated
 on your own server.
 
 [Get started]({{ site.baseurl }}/getting-started){: .btn .btn-primary }
+[User guide]({{ site.baseurl }}/guide/){: .btn }
 [Explore dashboards]({{ site.baseurl }}/dashboards){: .btn }
 [View on GitHub](https://github.com/openensemble/openensemble){: .btn }
 
@@ -22,7 +23,7 @@ on your own server.
 
 ## What it is
 
-OpenEnsemble is a single Node.js server that serves a web UI on port 3737.
+OpenEnsemble runs a web interface on your server.
 Create the owner account, connect at least one model provider, create an
 agent, and start a conversation.
 
@@ -34,7 +35,7 @@ agent, and start a conversation.
   Fireworks, OpenRouter, Z.ai, Ollama, and LM Studio. Assign different models
   per agent.
 - **Voice satellites** — open-hardware ESP32-S3 smart speakers with on-device
-  wake words. A private, self-hosted alternative to Alexa or Google Home.
+  wake words. Choose local or remote providers for transcription, chat, and speech.
   See [Voice devices]({{ site.baseurl }}/voice-devices).
 - **Display dashboards** — build fully customizable, per-profile wall-tablet
   and browser views with stable addresses, swipe navigation, Home Assistant
@@ -58,11 +59,7 @@ cd openensemble
 ./install.sh
 ```
 
-`--depth 1` fetches the current revision, including the bundled voice-device
-firmware (~11 MB total instead of ~96 MB of history). Older commits contain
-superseded firmware images nobody needs to flash. In-app auto-update works
-normally on a shallow clone. Drop the flag if you want the full history for
-development.
+A shallow clone includes the current release and supports normal in-app updates.
 
 Copy the one-time credential printed by the installer, then open
 `https://<your-server-ip>:3739`, accept the self-signed certificate warning,

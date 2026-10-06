@@ -1,68 +1,194 @@
 {
   "sections": [
     {
-      "title": "Updates",
-      "pages": [
-        { "slug": "whats-new", "title": "What's new" }
-      ]
-    },
-    {
       "title": "Getting started",
       "pages": [
-        { "slug": "welcome",         "title": "Welcome to OpenEnsemble" },
-        { "slug": "getting-started", "title": "Getting started" },
-        { "slug": "providers",       "title": "LLM providers" }
+        {
+          "slug": "welcome",
+          "title": "Welcome to OpenEnsemble"
+        },
+        {
+          "slug": "getting-started",
+          "title": "Getting started"
+        },
+        {
+          "slug": "models-explained",
+          "title": "Which model does what"
+        },
+        {
+          "slug": "providers",
+          "title": "LLM providers"
+        }
       ]
     },
     {
       "title": "Working with agents",
       "pages": [
-        { "slug": "agents",        "title": "Agents" },
-        { "slug": "roles",         "title": "Roles" },
-        { "slug": "coordinator",   "title": "The Coordinator" },
-        { "slug": "resumable-jobs", "title": "Resumable agent jobs" },
-        { "slug": "skills",        "title": "Skills" },
-        { "slug": "skill-builder", "title": "Building custom skills" }
+        {
+          "slug": "single-assistant",
+          "title": "Single assistant and ensembles"
+        },
+        {
+          "slug": "agents",
+          "title": "Agents"
+        },
+        {
+          "slug": "roles",
+          "title": "Roles"
+        },
+        {
+          "slug": "coordinator",
+          "title": "The Coordinator"
+        },
+        {
+          "slug": "resumable-jobs",
+          "title": "Resumable agent jobs"
+        },
+        {
+          "slug": "skills",
+          "title": "Skills"
+        },
+        {
+          "slug": "skill-builder",
+          "title": "Building custom skills"
+        },
+        {
+          "slug": "run-inspector",
+          "title": "Run Inspector & agent activity"
+        }
       ]
     },
     {
       "title": "Daily use",
       "pages": [
-        { "slug": "saved-chats", "title": "Saved chats" },
-        { "slug": "project-spaces", "title": "Project spaces" },
-        { "slug": "dashboards", "title": "Display dashboards" },
-        { "slug": "tasks",      "title": "Tasks & scheduler" },
-        { "slug": "documents",  "title": "Documents & sharing" },
-        { "slug": "expenses",   "title": "Expenses" },
-        { "slug": "cortex",     "title": "Cortex (local models)" },
-        { "slug": "personalization", "title": "Personalization" }
+        {
+          "slug": "saved-chats",
+          "title": "Saved chats"
+        },
+        {
+          "slug": "project-spaces",
+          "title": "Project spaces"
+        },
+        {
+          "slug": "dashboards",
+          "title": "Display dashboards"
+        },
+        {
+          "slug": "tasks",
+          "title": "Tasks & scheduler"
+        },
+        {
+          "slug": "routines",
+          "title": "Routines & saved fast paths"
+        },
+        {
+          "slug": "documents",
+          "title": "Documents & sharing"
+        },
+        {
+          "slug": "expenses",
+          "title": "Expenses"
+        },
+        {
+          "slug": "cortex",
+          "title": "Cortex (local models)"
+        },
+        {
+          "slug": "personalization",
+          "title": "Personalization"
+        }
       ]
     },
     {
       "title": "Integrations",
       "pages": [
-        { "slug": "browser-bridge", "title": "OE Bridge" },
-        { "slug": "public-access", "title": "Public access (tunnel & Telegram)" },
-        { "slug": "nodes",         "title": "Remote nodes" },
-        { "slug": "services",      "title": "Service profiles" }
+        {
+          "slug": "email-calendar",
+          "title": "Email & calendar"
+        },
+        {
+          "slug": "home-assistant",
+          "title": "Home Assistant"
+        },
+        {
+          "slug": "mcp",
+          "title": "MCP connections"
+        },
+        {
+          "slug": "browser-bridge",
+          "title": "OE Bridge"
+        },
+        {
+          "slug": "public-access",
+          "title": "Public and private access"
+        },
+        {
+          "slug": "nodes",
+          "title": "Remote nodes"
+        },
+        {
+          "slug": "services",
+          "title": "Service profiles"
+        }
       ]
     },
     {
       "title": "Beta & hardware",
       "pages": [
-        { "slug": "voice-devices",         "title": "Voice devices" },
-        { "slug": "voice-device-flashing", "title": "Flashing voice devices" },
-        { "slug": "tts",                   "title": "Text-to-speech" },
-        { "slug": "stt",                   "title": "Speech-to-text" }
+        {
+          "slug": "voice-devices",
+          "title": "Voice devices"
+        },
+        {
+          "slug": "voice-device-flashing",
+          "title": "Flashing voice devices"
+        },
+        {
+          "slug": "tts",
+          "title": "Text-to-speech"
+        },
+        {
+          "slug": "stt",
+          "title": "Speech-to-text"
+        }
       ]
     },
     {
       "title": "Setup & administration",
       "pages": [
-        { "slug": "users",         "title": "Users & access" },
-        { "slug": "backup-update", "title": "Backup, restore, auto-update" },
-        { "slug": "security",      "title": "Security model" },
-        { "slug": "shortcuts",     "title": "Tips & shortcuts" }
+        {
+          "slug": "troubleshooting",
+          "title": "Troubleshooting"
+        },
+        {
+          "slug": "users",
+          "title": "Users & access"
+        },
+        {
+          "slug": "backup-update",
+          "title": "Backup, restore, auto-update"
+        },
+        {
+          "slug": "security",
+          "title": "Security model"
+        },
+        {
+          "slug": "shortcuts",
+          "title": "Tips & shortcuts"
+        },
+        {
+          "slug": "voice-verification",
+          "title": "Wake verification (advanced)"
+        }
+      ]
+    },
+    {
+      "title": "Updates",
+      "pages": [
+        {
+          "slug": "whats-new",
+          "title": "What's new"
+        }
       ]
     }
   ]
