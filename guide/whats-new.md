@@ -6,6 +6,22 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-06
+
+**Delete a project**
+Use **Delete project** at the bottom of a project's **Overview** to permanently remove its conversations, saved progress and results, goals, prepared work, and scheduled tasks. Confirmation names the project and explains what will be removed. OE blocks deletion during running replies or project tasks and rejects outdated project views. Profile files are kept, and open project tabs return to general chat. **Archive** remains available for keeping a finished project. See [Project spaces](project-spaces.md#saving-archiving-and-deleting).
+
+**Follow work across project chats**
+Project spaces now bring original and saved conversations together in **Chats & activity**, with running and waiting states, unread updates, and links to each conversation. **Project updates** surfaces finished replies and requests for input while you work elsewhere. Completed saved-chat turns now release their running status correctly.
+
+**Keep assignments and useful results with the project**
+Project tasks support an assigned agent and chat, prerequisites, status, file-overlap warnings, and result links. Save decisions, references, or outputs directly from replies, or save a checkpoint without clearing the conversation. **Outputs** collects generated documents, media, and supported code links with their source chats. See [Project spaces](project-spaces.md).
+
+**Keep chat usable when model discovery fails**
+A temporary error while loading the model list no longer crashes the chat UI. Error responses leave the model list empty until it can be loaded successfully.
+
+---
+
 ## 2026-10-05
 
 **One Skills drawer for Finance, Tutor, and custom panels**

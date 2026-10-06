@@ -7,6 +7,8 @@ let projectSpaceDraft = null;
 let projectSpaceTab = 'overview';
 let projectSpaceLoad = 0;
 let projectSpaceSaving = false;
+let projectSpaceDeleting = null;
+const deletedProjectSpaceIds = new Set();
 
 function projectDraftKey(id) {
   return `oe.projectDraft.${typeof _currentUser !== 'undefined' ? _currentUser?.id || '' : ''}.${id}`;
@@ -45,7 +47,7 @@ async function openProjectSpaces(id = activeProjectSpaceId) {
   if (!dialog.open) dialog.showModal();
   projectMessage('Loading projects…');
   try {
-    projectSpaces = await projectApi();
+    projectSpaces = (await projectApi()).filter(space => !deletedProjectSpaceIds.has(space.id));
     renderProjectSpaceList();
     if (id || projectSpaces.length) await selectProjectSpace(id || projectSpaces[0].id);
     else newProjectSpace();
@@ -69,7 +71,7 @@ async function selectProjectSpace(id) {
   const generation = ++projectSpaceLoad;
   try {
     const space = await projectApi(`/${encodeURIComponent(id)}`);
-    if (generation !== projectSpaceLoad) return;
+    if (generation !== projectSpaceLoad || deletedProjectSpaceIds.has(id)) return;
     selectedProjectSpace = space;
     projectSpaceDraft = { name: space.name, brief: space.brief, decisions: space.decisions, nextSteps: space.nextSteps, tasks: structuredClone(space.tasks), revision: space.revision };
     try {
@@ -104,7 +106,7 @@ function renderProjectSpaceDetail() {
   $('projectSpaceDetail').innerHTML = `
     <div class="project-detail-heading"><div><h2>${space ? escHtml(space.name) : 'New project'}</h2><p>Keep your conversations and shared context together.</p></div>
     ${space ? `<button class="project-primary" data-action="enterProjectSpace" data-args='${projectArgs(space.id)}'>Open chat</button>` : ''}</div>
-    ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['progress', 'Progress'], ['files', 'Files'], ['chats', 'Chats']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
+    ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['chats', 'Chats & activity'], ['saved', 'Saved results'], ['outputs', 'Outputs'], ['progress', 'Progress'], ['files', 'Files']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
     ${space ? `<button class="project-primary" data-action="openProactiveWork" data-args='${projectArgs(space.id)}'>Goals and prepared work</button>` : ''}
     <div id="projectSpaceTabBody"></div>`;
   renderProjectSpaceTab();
@@ -116,6 +118,8 @@ function setProjectSpaceTab(tab) {
 function renderProjectSpaceTab() {
   const body = $('projectSpaceTabBody');
   const space = selectedProjectSpace;
+  if (projectSpaceTab === 'saved' && space) { renderProjectSavedResults(); return; }
+  if (projectSpaceTab === 'outputs' && space) { loadProjectOutputs(); return; }
   if (projectSpaceTab === 'progress' && space) {
     loadProjectProgress();
     return;
@@ -127,21 +131,18 @@ function renderProjectSpaceTab() {
     return;
   }
   if (projectSpaceTab === 'chats' && space) {
-    const id = space.id;
-    body.innerHTML = '<p class="project-empty">Loading conversations…</p>';
-    projectApi(`/${id}/chats`).then(chats => {
-      if (selectedProjectSpace?.id !== id || projectSpaceTab !== 'chats') return;
-      body.innerHTML = chats.map(chat => `<button class="project-chat" data-action="enterProjectAgent" data-args='${escHtml(JSON.stringify([id, chat.agentId]))}'><strong>${escHtml(chat.emoji || '🤖')} ${escHtml(chat.name)}</strong><span>${chat.count ? escHtml(chat.preview) : 'Start a conversation in this project'}</span></button>`).join('') || '<p class="project-empty">Create an agent to start chatting.</p>';
-    }).catch(error => projectMessage(error.message, true));
+    body.innerHTML = '<div class="project-activity-toolbar"><input id="projectChatSearch" aria-label="Search project chats" placeholder="Search chats or agents" data-input-action="filterProjectChats" data-input-args=\'["$value"]\'><button data-action="loadProjectActivity">Refresh</button><button data-action="createProjectChat">+ New chat</button></div><div id="projectActivityRows" aria-live="polite">Loading conversations…</div>';
+    loadProjectActivity();
     return;
   }
   body.innerHTML = `${projectField('name', 'Project name', 'Voice firmware', 100, true)}
     ${projectField('brief', 'Shared brief', 'What are we building? Include the goal, important constraints, and useful background.', 12000)}
     ${projectField('decisions', 'Decisions', 'Record choices the agents should keep following.', 12000)}
     ${projectField('nextSteps', 'Current state and next steps', 'Where did we leave off? What should happen next?', 12000)}
-    <section class="project-checklist"><h3>Checklist</h3><div id="projectChecklist"></div><div class="project-task-input"><input id="projectNewTask" maxlength="1000" placeholder="Add a task" aria-label="New project task"><button data-action="addProjectTask">Add</button></div></section>
+    <section class="project-checklist"><h3>Tasks</h3><p class="project-help">Assign work, track prerequisites, and record results. Assignments do not start an agent automatically. Use the same workspace and file paths to spot overlapping work.</p><div id="projectTaskWarnings" role="status"></div><div id="projectChecklist"></div><div class="project-task-input"><input id="projectNewTask" maxlength="1000" placeholder="Add a task" aria-label="New project task"><button data-action="addProjectTask">Add</button></div></section>
     <div class="project-save-row"><button id="projectSave" class="project-primary" data-action="saveProjectSpace">${space ? 'Save changes' : 'Create project'}</button>
-    ${space ? `<button data-action="reloadProjectDraft">Reload saved version</button><button data-action="archiveProjectSpace">${space.archived ? 'Unarchive' : 'Archive'}</button>` : ''}</div>`;
+    ${space ? `<button data-action="reloadProjectDraft">Reload saved version</button><button data-action="archiveProjectSpace">${space.archived ? 'Unarchive' : 'Archive'}</button>` : ''}</div>
+    ${space ? '<div class="project-delete-row"><button id="projectDelete" class="project-danger" data-action="deleteSelectedProjectSpace">Delete project</button><p class="project-help">Permanently remove this project and its conversations. Files in your profile are kept.</p></div>' : ''}`;
   renderProjectChecklist();
 }
 async function loadProjectProgress(offset = 0) {
@@ -152,9 +153,9 @@ async function loadProjectProgress(offset = 0) {
   try {
     const data = await projectApi(`/${id}/progress?offset=${offset}`);
     if (selectedProjectSpace?.id !== id || projectSpaceTab !== 'progress') return;
-    body.innerHTML = `<p class="project-help">Project conversations are saved automatically before you clear context or older chat history is trimmed. These handoffs remain available to your agents. Summaries may finish shortly after saving; the full conversation is available immediately.</p>
+    body.innerHTML = `<p class="project-help">Save a checkpoint from Chats & activity at any time. Conversations are also saved before clearing context or trimming older history. Handoffs remain available to your agents.</p>
       <button data-action="loadProjectProgress">Refresh</button>
-      ${data.checkpoints.map(item => `<details class="project-progress-entry"><summary>${escHtml(new Date(item.savedAt).toLocaleString())} · ${item.reason === 'clear' ? 'Context cleared' : 'Older conversation saved'}</summary>
+      ${data.checkpoints.map(item => `<details class="project-progress-entry"><summary>${escHtml(new Date(item.savedAt).toLocaleString())} · ${item.reason === 'clear' ? 'Context cleared' : item.reason === 'manual' ? 'Checkpoint saved' : 'Older conversation saved'}</summary>
         <p class="project-help">${escHtml(agents.find(agent => agent.id === item.agentId)?.name || item.agentId)} · ${item.messageCount} messages · ${item.summaryKind === 'generated' ? 'Handoff summary' : 'Conversation excerpts'}</p>
         <pre>${escHtml(item.summary)}</pre><a href="/api/project-spaces/${id}/progress-file?id=${item.id}">Download saved conversation</a></details>`).join('') || '<p class="project-empty">Your chat is saved as you work. A handoff will appear here when context is cleared or older history is trimmed.</p>'}
       <div class="project-save-row">${offset ? `<button data-action="loadProjectProgress" data-args='[${Math.max(0, offset - 20)}]'>Newer</button>` : ''}${data.nextOffset !== null ? `<button data-action="loadProjectProgress" data-args='[${data.nextOffset}]'>Older</button>` : ''}</div>`;
@@ -166,7 +167,7 @@ async function loadProjectProgress(offset = 0) {
   }
 }
 function renderProjectChecklist() {
-  $('projectChecklist').innerHTML = projectSpaceDraft.tasks.map(task => `<div class="project-task"><label><input type="checkbox" ${task.done ? 'checked' : ''} data-change-action="toggleProjectTask" data-change-args='${escHtml(JSON.stringify([task.id, '$checked']))}'><span>${escHtml(task.text)}</span></label><button data-action="removeProjectTask" data-args='${projectArgs(task.id)}' aria-label="Remove task">×</button></div>`).join('');
+  renderProjectTaskEditor();
 }
 function addProjectTask() {
   const text = $('projectNewTask').value.trim();
@@ -178,10 +179,12 @@ function addProjectTask() {
 function toggleProjectTask(id, done) {
   const task = projectSpaceDraft.tasks.find(task => task.id === id);
   if (task) task.done = done;
+  if (task) task.status = done ? 'done' : 'todo';
   projectSpaceDraft.dirty = true; rememberProjectDraft();
 }
 function removeProjectTask(id) {
   projectSpaceDraft.tasks = projectSpaceDraft.tasks.filter(task => task.id !== id);
+  for (const task of projectSpaceDraft.tasks) task.dependsOn = (task.dependsOn || []).filter(dependency => dependency !== id);
   projectSpaceDraft.dirty = true; rememberProjectDraft(); renderProjectChecklist();
 }
 async function saveProjectSpace() {
@@ -213,6 +216,59 @@ function reloadProjectDraft() {
 async function archiveProjectSpace() {
   projectSpaceDraft.archived = !selectedProjectSpace.archived;
   projectSpaceDraft.dirty = true; rememberProjectDraft(); await saveProjectSpace();
+}
+async function deleteSelectedProjectSpace() {
+  const space = selectedProjectSpace;
+  const userId = typeof _currentUser !== 'undefined' ? _currentUser?.id : null;
+  if (!space || projectSpaceDeleting || projectSpaceSaving) return;
+  if (!confirm(`Permanently delete “${space.name}”?\n\nThis removes the project, all its chats, saved results, progress, notifications, goals, prepared work, and scheduled tasks. Unsaved project edits will be discarded.\n\nFiles in your profile and external workspaces are kept.\n\nThis cannot be undone.`)) return;
+  projectSpaceDeleting = space.id;
+  const button = $('projectDelete'); if (button) button.disabled = true;
+  projectMessage('Deleting project…');
+  try {
+    await projectApi(`/${space.id}`, projectJson('DELETE', { revision: space.revision }));
+    if (_currentUser?.id !== userId) return;
+    handleProjectSpaceDeleted(space.id);
+  } catch (error) { projectMessage(error.message, true); }
+  finally { projectSpaceDeleting = null; if (button?.isConnected) button.disabled = false; }
+}
+function forgetProjectSpaceDrafts(id) {
+  const userId = typeof _currentUser !== 'undefined' ? _currentUser?.id : null;
+  if (!userId) return;
+  try {
+    sessionStorage.removeItem(projectDraftKey(id));
+    const composer = `oe.composerDrafts.v1.${id}.${userId}`;
+    const attachments = `oe.chatAttachmentDraft.v1:${userId}:${id}`;
+    const outbox = ['oe.chatOutbox.v2:', 'oe.chatOutboxDone.v2:'].map(prefix => `${prefix}${encodeURIComponent(userId)}@${id}`);
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key === composer || key?.startsWith(composer + '.') || key === attachments || key?.startsWith(attachments + '.')
+        || outbox.some(prefix => key?.startsWith(prefix + ':') || key?.startsWith(prefix + '.'))) localStorage.removeItem(key);
+    }
+  } catch {}
+}
+function handleProjectSpaceDeleted(id) {
+  if (deletedProjectSpaceIds.has(id)) return;
+  deletedProjectSpaceIds.add(id);
+  forgetProjectSpaceDrafts(id);
+  projectSpaces = projectSpaces.filter(space => space.id !== id);
+  if (projectActivityData?.projectId === id) projectActivityData = null;
+  projectAttentionItems = projectAttentionItems.filter(item => item.projectId !== id);
+  if ($('projectAttentionDialog')?.open) renderProjectAttention();
+  pollProjectAttention();
+  if (selectedProjectSpace?.id === id) {
+    ++projectSpaceLoad; selectedProjectSpace = null; projectSpaceDraft = null;
+    if (projectSpaces.length) selectProjectSpace(projectSpaces[0].id).then(() => projectMessage('Project deleted.'));
+    else { newProjectSpace(); projectMessage('Project deleted.'); }
+  }
+  renderProjectSpaceList();
+  if (id !== activeProjectSpaceId) return;
+  clearTimeout(_draftSaveTimer);
+  $('input').value = ''; $('input').disabled = true; $('btnSend').disabled = true;
+  pendingAttachments = []; pendingSentAttempts.clear();
+  const url = new URL(location.href);
+  for (const key of ['project', 'chat', 'projectMessage']) url.searchParams.delete(key);
+  location.replace(url.pathname + url.search);
 }
 function enterProjectSpace(id) {
   rememberProjectDraft();

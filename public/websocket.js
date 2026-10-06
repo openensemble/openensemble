@@ -534,6 +534,10 @@ function reloadDocumentSession(agentId) {
 
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
+  if (msg.type === 'project_deleted') {
+    handleProjectSpaceDeleted(msg.projectId);
+    return;
+  }
   if (msg.type === 'saved_chat_deleted') {
     handleSavedChatDeleted(msg.chatId, msg.projectId);
     return;
@@ -1052,6 +1056,7 @@ function handleServerMessage(msg) {
         updateToolRunHeader(liveToolRun, true);
         sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents(), ...(state?.memoryRefs?.length ? { memoryRefs: state.memoryRefs } : {}), ...(state?.turnId ? { turnId: state.turnId } : {}), ...(state?.messageId ? { messageId: state.messageId } : {}), ...(state?.attemptId ? { attemptId: state.attemptId } : {}), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
         addTimestamp(streamEl.closest('.msg'));
+        if (typeof appendProjectReplyActions === 'function') appendProjectReplyActions(streamEl.closest('.msg'), streamBuf, sessions[msg.agent].at(-1).ts);
         if (msg.agent === activeAgent) updateSessionWarning();
       } else if (liveToolRun?.events?.length) {
         updateToolRunHeader(liveToolRun, true);

@@ -120,6 +120,10 @@ async function atomicRewrite(p, text) {
   }
 }
 
+export function hasSession(agentId) {
+  return fs.existsSync(sessionPath(resolveProjectSessionKey(agentId)));
+}
+
 export async function loadSession(agentId, limit = MAX_HISTORY) {
   agentId = resolveProjectSessionKey(agentId);
   const p = sessionPath(agentId);
@@ -898,10 +902,21 @@ export function resolveAttachmentDecision(agentId, { decisionId, fileId, decisio
   });
 }
 
+export function saveProjectCheckpoint(agentId, streamSnapshot = null) {
+  agentId = resolveProjectSessionKey(agentId);
+  if (!projectIdFromSession(agentId)) return Promise.reject(new Error('Open a project conversation first'));
+  return withSessionWriteLock(agentId, async () => {
+    let text = '';
+    try { text = await fsp.readFile(sessionPath(agentId), 'utf8'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return preserveProjectProgress(agentId, text, 'manual', streamSnapshot);
+  });
+}
+
 async function preserveProjectProgress(agentId, text, reason, streamSnapshot = null) {
   if (!projectIdFromSession(agentId)) return null;
   const rows = text.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
-  if (reason === 'clear') {
+  if (reason === 'clear' || reason === 'manual') {
     const stream = streamSnapshot || getStreamBuffer(agentId);
     if (stream && (stream.content || stream.toolEvents?.length)
         && !rows.some(row => row.role === 'assistant' && stream.turnId && row.turnId === stream.turnId && !row.partial)) {
@@ -912,7 +927,7 @@ async function preserveProjectProgress(agentId, text, reason, streamSnapshot = n
         ...(tool.preview ? { preview: redactTextForTrace(tool.preview) } : {}),
       }));
       rows.push({ role: 'assistant', content: redactTextForTrace(stream.content || ''), toolEvents,
-        turnId: stream.turnId || null, ts: stream.ts || Date.now(), partial: true, status: 'interrupted',
+        turnId: stream.turnId || null, ts: stream.ts || Date.now(), partial: true, status: reason === 'manual' ? 'running' : 'interrupted',
         ...(stream.hidden ? { hidden: true, excludeFromModel: true } : {}) });
     }
   }
@@ -1011,6 +1026,19 @@ export async function deleteSession(agentId, { strict = false } = {}) {
 }
 
 // Include histories from agents that have since been removed from the roster.
+export async function projectSessionKeys(userId, projectId) {
+  if (!/^user_[a-zA-Z0-9]+$/.test(userId) || !isProjectId(projectId)) throw new Error('Invalid project scope');
+  const dir = getSessionsDir(`${userId}_chat`);
+  let files;
+  try {
+    if ((await fsp.lstat(dir)).isSymbolicLink()) throw new Error('Invalid project session storage');
+    files = await fsp.readdir(dir);
+  } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  return [...new Set(files.map(file => file.split('.')[0])
+    .filter(id => /^[a-zA-Z0-9_-]+$/.test(id) && projectIdFromSession(id) === projectId)
+    .map(id => `${userId}_${id}`))];
+}
+
 export async function savedChatSessionKeys(userId, chatId, projectId = null) {
   if (!/^user_[a-zA-Z0-9]+$/.test(userId) || !isChatId(chatId) || (projectId && !isProjectId(projectId))) throw new Error('Invalid saved chat scope');
   let files;

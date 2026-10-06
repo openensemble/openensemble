@@ -431,6 +431,7 @@ export function abortAllChats() {
  * @param {{release: () => void}} busySlot  slot returned by markAgentBusy
  */
 export function finalizeTurn(scopedSessionKey, busySlot, ownAc = null) {
+  scopedSessionKey = resolveProjectSessionKey(scopedSessionKey);
   // Only tear down the abort/stream registries + buffer if THIS turn still owns
   // the key. A barge-in (a second interactive message on the same agent) calls
   // openTurn(), which replaces the controller under this key; without this

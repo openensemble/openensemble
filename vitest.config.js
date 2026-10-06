@@ -6,6 +6,6 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.mjs'],
     testTimeout: 30000,
-    exclude: ['**/node_modules/**', 'vendor/**'],
+    exclude: ['**/node_modules/**', 'vendor/**', 'tests/artifacts/**'],
   },
 });

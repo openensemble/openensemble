@@ -6,7 +6,11 @@ let allModels = [];
 let drawers = [];
 
 async function loadModels() {
-  try { const r = await fetch('/api/models'); allModels = await r.json(); } catch { allModels = []; }
+  try {
+    const response = await fetch('/api/models');
+    const models = await response.json();
+    allModels = response.ok && Array.isArray(models) ? models : [];
+  } catch { allModels = []; }
 }
 
 // Populated by loadFireworksModels(). Empty until the server confirms an API key

@@ -1,4 +1,5 @@
 import { projectContext, currentProjectId, currentChatId, projectEvent, matchesProject } from '../lib/project-context.mjs';
+import { recordProjectEvent } from '../lib/project-feed.mjs';
 /**
  * User/device WebSocket delivery helpers (broadcast, sendTo*, online probes).
  * Extracted from ws-handler.mjs — pure move. Main connection setup stays there.
@@ -35,6 +36,7 @@ export function stampChatEvent(userId, event) {
   event = projectEvent(userId, event);
   if (!event || typeof event !== 'object' || !event.agent) return event;
   if (Number.isFinite(event.chat_revision)) return event;
+  recordProjectEvent(userId, event).catch(error => console.warn('[projects] Activity could not be saved:', error.message));
   const key = chatRevisionKey(userId, event.agent, event.projectId || null, event.chatId || null);
   const revision = (_chatRevisions.get(key) ?? 0) + 1;
   _chatRevisions.set(key, revision);

@@ -14,6 +14,7 @@ import { log } from './logger.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
 import { appendTaskRun } from './lib/task-runs.mjs';
 import { tryAcquireUserTurnLease } from './chat-dispatch/slot-registry.mjs';
+import { getProjectSpace } from './lib/project-spaces.mjs';
 
 // Run-history is only meaningful for user-owned tasks — system tasks (owned
 // by the 'system' pseudo-owner) live outside any user's directory and have
@@ -267,7 +268,10 @@ export async function addTask(task) {
   // modifyTasksForOwner goes through withLock and is async — must await or callers
   // get a Promise where they expect a task object (then `task.enabled` is
   // undefined, scheduleTask bails, and chat outcomes show "label=undefined").
-  const saved = await modifyTasksForOwner(entry.ownerId ?? 'system', tasks => { tasks.push(entry); return entry; });
+  const saved = await modifyTasksForOwner(entry.ownerId ?? 'system', tasks => {
+    if (entry.projectId) getProjectSpace(entry.ownerId, entry.projectId);
+    tasks.push(entry); return entry;
+  });
   if (_broadcast) {
     _broadcast({ type: 'task_created', task: saved, ownerId: saved.ownerId ?? null });
   }
@@ -280,6 +284,7 @@ export async function removeTask(id, ownerId = null, { completed = false } = {})
     const i = tasks.findIndex(t => t.id === id);
     if (i !== -1) return tasks.splice(i, 1)[0];
   }, ownerId);
+  if (removed && _timers.has(id)) { clearTimeout(_timers.get(id)); _timers.delete(id); }
   await deviceAlarmLifecycle(completed ? 'completeScheduledDeviceAlarm' : 'cancelScheduledDeviceAlarm', removed);
 }
 
@@ -514,7 +519,7 @@ export function registerBuiltin(name, fn) {
 // Run a task: builtin handler OR agent chat stream
 async function runTask(task, broadcast, opts = {}) {
   return projectContext.run({ userId: task.ownerId, projectId: task.projectId || null, chatId: task.chatId || null }, async () => {
-    if (!task.chatId) return runTaskInProject(task, broadcast, opts);
+    if (!task.chatId && !task.projectId) return runTaskInProject(task, broadcast, opts);
     const { getSavedChat } = await import('./lib/saved-chats.mjs');
     let lease;
     for (let attempt = 0; attempt < 80 && !lease; attempt++) {
@@ -523,7 +528,8 @@ async function runTask(task, broadcast, opts = {}) {
     }
     if (!lease) throw new Error('Chat is busy. Try this task again in a moment.');
     try {
-      getSavedChat(task.ownerId, task.chatId, task.projectId || null);
+      if (task.projectId) getProjectSpace(task.ownerId, task.projectId);
+      if (task.chatId) getSavedChat(task.ownerId, task.chatId, task.projectId || null);
       return await runTaskInProject(task, broadcast, opts);
     } finally { lease.release(); }
   });

@@ -437,6 +437,7 @@ function appendAssistantBubble(content, ts = Date.now(), scroll = true) {
   const el = msgEl('assistant');
   applyMarkdown(el.querySelector('.msg-bubble'), content);
   addTimestamp(el, ts); insertBefore(el);
+  if (typeof appendProjectReplyActions === 'function') appendProjectReplyActions(el, content, ts);
   if (scroll) scrollToBottom();
   return el;
 }

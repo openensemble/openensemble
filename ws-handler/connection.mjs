@@ -471,6 +471,15 @@ export function onConnection(ws, req) {
       return;
     }
 
+    if (ws._projectId) {
+      try { getProjectSpace(ws._userId, ws._projectId); }
+      catch {
+        ws._authenticated = false;
+        ws.send(JSON.stringify({ type: 'project_error', message: 'This project is no longer available.' }));
+        ws.close(4004, 'Project unavailable');
+        return;
+      }
+    }
     if (ws._chatId) {
       try { getSavedChat(ws._userId, ws._chatId, ws._projectId); }
       catch {

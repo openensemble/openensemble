@@ -1,9 +1,13 @@
 import fs from 'node:fs';
 import { requireAuth, readBody, isUserTimeBlocked, getAgentsForUser } from './_helpers.mjs';
-import { createProjectSpace, listProjectSpaces, getProjectSpace, updateProjectSpace, changeProjectFile, projectFilePath, ProjectError } from '../lib/project-spaces.mjs';
-import { projectSessionKey } from '../lib/project-context.mjs';
-import { loadSession } from '../sessions.mjs';
+import { createProjectSpace, listProjectSpaces, getProjectSpace, updateProjectSpace, changeProjectFile, projectFilePath, ProjectError, saveProjectItem, removeProjectItem } from '../lib/project-spaces.mjs';
+import { projectContext } from '../lib/project-context.mjs';
+import { saveProjectCheckpoint } from '../sessions.mjs';
 import { listProjectProgress, readProjectCheckpoint } from '../lib/project-progress.mjs';
+import { checkProjectConversation, readProjectMessage, listProjectConversations, projectAttention } from '../lib/project-work.mjs';
+import { markProjectRead } from '../lib/project-feed.mjs';
+import { getSavedChat } from '../lib/saved-chats.mjs';
+import { deleteProjectSpace } from '../lib/project-spaces.mjs';
 
 const reply = (res, status, value) => {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -18,13 +22,45 @@ export async function handle(req, res) {
   try {
     const parts = url.pathname.slice('/api/project-spaces'.length).split('/').filter(Boolean);
     const [id, action] = parts;
+    const agents = getAgentsForUser(userId);
     if (parts.length > 2) throw new ProjectError(404, 'Not found');
-    if (!id && req.method === 'GET') reply(res, 200, listProjectSpaces(userId));
+    if (id === 'attention' && !action && req.method === 'GET') reply(res, 200, projectAttention(userId, agents));
+    else if (!id && req.method === 'GET') reply(res, 200, listProjectSpaces(userId));
     else if (!id && req.method === 'POST') reply(res, 201, await createProjectSpace(userId, JSON.parse(await readBody(req))));
     else if (id) {
       const space = getProjectSpace(userId, id);
       if (!action && req.method === 'GET') reply(res, 200, space);
-      else if (!action && req.method === 'PATCH') reply(res, 200, await updateProjectSpace(userId, id, JSON.parse(await readBody(req))));
+      else if (!action && req.method === 'DELETE') reply(res, 200, await deleteProjectSpace(userId, id, JSON.parse(await readBody(req))));
+      else if (!action && req.method === 'PATCH') {
+        const input = JSON.parse(await readBody(req));
+        if (Array.isArray(input?.tasks)) for (const task of input.tasks) {
+          if (task?.agentId && !agents.some(agent => agent.id === task.agentId)
+              && !space.tasks.some(old => old.id === task.id && old.agentId === task.agentId)) throw new ProjectError(400, 'Choose an available task agent');
+          if (task?.chatId) getSavedChat(userId, task.chatId, id);
+        }
+        reply(res, 200, await updateProjectSpace(userId, id, input));
+      }
+      else if (action === 'read' && req.method === 'POST') {
+        const input = JSON.parse(await readBody(req));
+        if (!input || !Array.isArray(input.ids || []) || (input.ids || []).length > 200 || !Number.isFinite(input.through ?? 0)) throw new ProjectError(400, 'Invalid activity receipt');
+        await markProjectRead(userId, id, input); reply(res, 200, { ok: true });
+      }
+      else if (action === 'save-result' && req.method === 'POST') {
+        const input = JSON.parse(await readBody(req));
+        const { row, source } = await readProjectMessage(userId, id, input, agents);
+        reply(res, 200, await saveProjectItem(userId, id, { revision: input.revision, kind: input.kind,
+          title: input.title, content: input.excerpt ?? row.content, source }));
+      }
+      else if (action === 'saved-result' && req.method === 'DELETE') reply(res, 200, await removeProjectItem(userId, id, JSON.parse(await readBody(req))));
+      else if (action === 'checkpoint' && req.method === 'POST') {
+        const input = JSON.parse(await readBody(req));
+        const key = checkProjectConversation(userId, id, input, agents);
+        const { getActiveStreamForClient } = await import('../chat-dispatch/slot-registry.mjs');
+        const result = await projectContext.run({ userId, projectId: id, chatId: input.chatId || null },
+          () => saveProjectCheckpoint(key, getActiveStreamForClient(userId, input.agentId)));
+        if (!result) throw new ProjectError(400, 'This conversation has no messages to save yet');
+        reply(res, 200, result);
+      }
       else if (action === 'progress' && req.method === 'GET') {
         const offset = Number(url.searchParams.get('offset') || 0);
         if (!Number.isInteger(offset) || offset < 0) throw new ProjectError(400, 'Invalid progress page');
@@ -46,13 +82,16 @@ export async function handle(req, res) {
         const location = projectFilePath(userId, file.fileId);
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name).replaceAll("'", '%27')}`, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
         fs.createReadStream(location).on('error', () => res.destroy()).pipe(res);
-      } else if (action === 'chats' && req.method === 'GET') {
-        const chats = await Promise.all(getAgentsForUser(userId).map(async agent => {
-          const messages = await loadSession(projectSessionKey(userId, agent.id, id), 60);
-          const visible = messages.filter(row => ['user', 'assistant'].includes(row.role) && !row.hidden);
-          return { agentId: agent.id, name: agent.name, emoji: agent.emoji, count: visible.length, preview: String(visible.at(-1)?.content || '').slice(0, 200), lastAt: visible.at(-1)?.ts || null };
-        }));
-        reply(res, 200, chats);
+      } else if (['chats', 'activity', 'outputs', 'output-file'].includes(action) && req.method === 'GET') {
+        const data = await listProjectConversations(userId, id, agents, { includeOutputs: ['outputs', 'output-file'].includes(action) });
+        if (action === 'output-file') {
+          const fileId = url.searchParams.get('id');
+          const output = data.outputs.find(item => item.fileId === fileId);
+          if (!output) throw new ProjectError(404, 'Output not found in this project');
+          const location = projectFilePath(userId, fileId);
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(output.name).replaceAll("'", '%27')}`, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
+          fs.createReadStream(location).on('error', () => res.destroy()).pipe(res);
+        } else reply(res, 200, action === 'chats' ? data.conversations : action === 'outputs' ? data.outputs : data);
       } else throw new ProjectError(405, 'Method not allowed');
     } else throw new ProjectError(405, 'Method not allowed');
   } catch (error) { reply(res, error.status || (error instanceof SyntaxError ? 400 : 500), { error: error.status || error instanceof SyntaxError ? error.message : 'Project request failed' }); }
