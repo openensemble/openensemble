@@ -197,6 +197,9 @@ async function startResumedJob(taskId, userId) {
         await _onComplete(taskId, userId, entry.coordinatorAgentId || entry.visibleAgentId, entry.agentName, entry.agentEmoji,
           text.trim() || 'Job completed.', null, null, toolEvents, agent.id, entry.originalTask, { images });
       } catch (error) {
+        // Failed/stopped recovery still has completed actions to inspect.
+        const saved = getJobCheckpoint(userId, taskId)?.checkpoint;
+        if (saved) toolEvents = checkpointToolEvents(saved);
         await _onComplete(taskId, userId, entry.coordinatorAgentId || entry.visibleAgentId, entry.agentName, entry.agentEmoji,
           null, ac.signal.aborted ? 'Job stopped by user.' : error.message, ac.signal.aborted ? 'cancelled' : 'error', toolEvents, agent.id, entry.originalTask, { images });
       }

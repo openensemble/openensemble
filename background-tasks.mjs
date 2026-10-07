@@ -1053,6 +1053,7 @@ function trackToolEvent(events, ev, agentId = null) {
       : (looksLikePendingBackgroundResult(text) ? 'pending' : 'done');
     target.preview = ev.preview || text.split('\n').find(l => l.trim()) || '';
     target.text = text.slice(0, 10000);
+    target.resultTruncated = text.length > 10000;
     if (ev.providerNative === true || ev.native === true) target.native = true;
   }
 }

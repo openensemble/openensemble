@@ -23,6 +23,32 @@ For scheduled runs, open **Tasks → Ledger**. Their output stays in the ledger.
 For an interrupted supported worker, use its **Review & resume** controls;
 see [Resumable agent jobs](../resumable-jobs/).
 
+## Inspect each agent's work
+
+Open **Agents** beside the chat composer, then expand **Progress, actions &
+conclusion** under a task. Everyone can inspect work from their own conversations;
+this view does not require owner or administrator access.
+
+Each task shows its assignment, current activity, reported milestones, recorded
+tool inputs and results, and the agent's conclusion or failure report. For a
+four-agent job, expand each agent separately to compare its work and conclusion.
+The view refreshes while open. An agent that has not finished has no final
+conclusion yet; a tool interrupted without a recorded result is marked
+**outcome not confirmed**. A conclusion is the agent's report, with observed tool
+results shown separately for checking its claims.
+
+Use **Download work record** to keep a JSON copy of the displayed evidence.
+Completed work reloads from the original conversation, including worker reports
+that do not appear as separate chat replies. It follows conversation retention
+and deletion: older project conversations remain in **Progress**, and clearing
+general chat removes its conversation record. Older tasks can have fewer details
+because only evidence that was recorded at the time is available.
+
+Long tool inputs and results are shortened, with a notice; credential values
+are redacted. The detail view displays at most 256 actions and the last 200
+progress updates and identifies omitted entries. It shows observable work and
+reported conclusions, not the model's private reasoning.
+
 ## Inspect a turn
 
 Run Inspector is an owner/admin diagnostic. Open **Run Inspector** from the sidebar, or its tile in the mobile menu. Select the relevant run and compare:

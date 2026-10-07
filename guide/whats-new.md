@@ -6,6 +6,13 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-07
+
+**Inspect each agent's work**
+Expand **Progress, actions & conclusion** in the chat's **Agents** panel to inspect each delegated task's assignment, live activity, recorded tool inputs and results, and final report. Individual worker conclusions remain available after reload through the original conversation, and **Download work record** exports the displayed evidence. Failed and stopped tasks preserve their recorded actions; missing outcomes are not shown as successful. See [Agent activity](run-inspector.md#inspect-each-agents-work).
+
+---
+
 ## 2026-10-06
 
 **Delete a project**

@@ -175,6 +175,9 @@ async function validateSkillExecution(userId, skillId, body) {
 }
 
 export async function handle(req, res) {
+  if (req.url === '/api/agent-work' || req.url.startsWith('/api/agent-work?')) {
+    return (await import('./agent-work.mjs')).handle(req, res);
+  }
   if (req.url.startsWith('/api/reasoning-efforts') && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const url = new URL(req.url, 'http://localhost');

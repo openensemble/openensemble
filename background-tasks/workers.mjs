@@ -126,6 +126,12 @@ export function pushWorkerProgress(taskId, entry) {
   if (!rec) return false;
   rec.progress = rec.progress || [];
   rec.progress.push({ ...entry, ts: Date.now() });
+  rec.workProgress ||= [];
+  rec.workProgress.push(rec.progress.at(-1));
+  if (rec.workProgress.length > 200) {
+    rec.workProgress.shift();
+    rec.workProgressDropped = (rec.workProgressDropped || 0) + 1;
+  }
   if (rec.progress.length > 20) rec.progress.shift();
   rec.lastActivityAt = Date.now();
   return true;
@@ -314,6 +320,7 @@ export function spawnWorker({
   (async () => {
     let fullText = '';
     const toolEvents = [];
+    taskRecord.auditToolEvents = toolEvents;
     const reportImages = [];
     const { isUserTimeBlocked } = await import('../routes/_helpers.mjs');
     if (isUserTimeBlocked(userId)) {

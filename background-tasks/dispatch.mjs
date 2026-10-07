@@ -262,6 +262,8 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       let toolsUsed = 0;
       let currentTool = null;
       const toolEvents = [];
+      const auditRecord = activeTasks.get(taskId);
+      if (auditRecord) auditRecord.auditToolEvents = toolEvents;
       // Phase-14b: wrap the streamChat loop in a task_proxy context so
       // ask_user_via_task (called inside the agent's tool chain) can find
       // this run's watcherId without any extra parameter threading.
@@ -1053,6 +1055,10 @@ async function completeInProject(taskId, userId, coordinatorAgentId, agentName, 
       content: notice,
       displayContent: content,
       toolEvents,
+      startedAt: rec.startedAt || null,
+      provider: rec.provider || null, model: rec.model || null,
+      runtimeProvider: rec.runtimeProvider || null, runtimeModel: rec.runtimeModel || null,
+      workProgress: rec.workProgress || [], workProgressDropped: rec.workProgressDropped || 0,
       ...(persistedImages.length ? { images: persistedImages } : {}),
       targetAgentId: targetAgentId || rec?.agentId || null,
       originalTask: originalTask || rec?.summary || '',

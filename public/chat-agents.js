@@ -45,6 +45,7 @@ function reconcileChatAgents(tasks, revisions = {}) {
 }
 
 function resetChatAgents(agent) {
+  if (typeof resetChatAgentWork === 'function') resetChatAgentWork();
   if (agent) {
     for (const [key, entry] of chatAgentTasks) if (entry.agent === agent) chatAgentTasks.delete(key);
     chatAgentHistory.delete(agent);
@@ -165,7 +166,7 @@ function chatAgentRows() {
       });
     }
   }
-  return rows;
+  return typeof mergeChatAgentWorkRows === 'function' ? mergeChatAgentWorkRows(rows) : rows;
 }
 
 function updateChatAgents() {
@@ -188,7 +189,7 @@ function updateChatAgents() {
   $('chatAgentsEmpty').hidden = rows.length > 0;
   const list = $('chatAgentsList');
   const existing = new Map([...list.children].map(el => [el.dataset.taskId, el]));
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     let el = existing.get(row.id);
     if (!el) {
       el = document.createElement('article');
@@ -211,7 +212,8 @@ function updateChatAgents() {
       if (part.textContent !== value) part.textContent = value;
       part.hidden = !value;
     }
-    list.appendChild(el);
+    if (typeof renderChatAgentWork === 'function') renderChatAgentWork(row, el);
+    if (list.children[index] !== el) list.insertBefore(el, list.children[index] || null);
   }
   for (const el of existing.values()) el.remove();
 }
@@ -220,6 +222,7 @@ function closeChatAgents(restoreFocus = true) {
   const panel = $('chatAgentsPanel');
   if (!panel || panel.hidden) return;
   panel.hidden = true;
+  if (typeof stopChatAgentWorkRefresh === 'function') stopChatAgentWorkRefresh();
   $('chatAgentsToggle').setAttribute('aria-expanded', 'false');
   if (restoreFocus) $('chatAgentsToggle').focus();
 }
@@ -229,6 +232,7 @@ $('chatAgentsToggle')?.addEventListener('click', () => {
   $('chatAgentsPanel').hidden = false;
   $('chatAgentsToggle').setAttribute('aria-expanded', 'true');
   updateChatAgents();
+  if (typeof refreshChatAgentWork === 'function') refreshChatAgentWork();
   $('chatAgentsClose').focus();
 });
 $('chatAgentsClose')?.addEventListener('click', () => closeChatAgents());
