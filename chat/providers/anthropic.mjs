@@ -93,6 +93,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         // Workstream children keep native search too — they're the heaviest
         // searchers, and Brave bills per call (see openai-responses.mjs).
         disabled: finalRound || nativeSearchDisabled,
+        metadata: agent._modelCapabilities,
       });
     let anthropicTools = !finalRound && functionTools?.length
       ? toAnthropicTools(functionTools)

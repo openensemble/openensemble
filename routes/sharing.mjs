@@ -139,6 +139,58 @@ export async function handle(req, res) {
   }
 
   // ── DELETE /api/sharing/:shareId — unshare (owner only) ───────────────────
+  const downloadMatch = pathname.match(/^\/api\/sharing\/([^/]+)\/download$/);
+  if (downloadMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const share = loadSharing().find(s => s.id === downloadMatch[1]);
+    if (!share || (share.ownerId !== userId && !share.sharedWith.includes(userId) && !share.sharedWith.includes('*'))) {
+      res.writeHead(404); res.end('Shared file unavailable'); return true;
+    }
+    const directory = { document: 'documents', research: 'research', image: 'images', video: 'videos', audio: 'audio', invoice: 'invoices' }[share.fileType];
+    if (!directory) { res.writeHead(404); res.end('Shared file unavailable'); return true; }
+    try {
+      const root = fs.realpathSync(path.join(getUserDir(share.ownerId), directory));
+      let name = share.filename;
+      if (share.fileType === 'document' || share.fileType === 'research') {
+        const index = JSON.parse(fs.readFileSync(path.join(root, share.fileType === 'document' ? 'docs-index.json' : 'index.json'), 'utf8'));
+        const doc = index.find(d => d.id === share.fileId);
+        if (!doc) throw new Error('Missing document');
+        name = share.fileType === 'document' ? doc.id + doc.ext : doc.filename;
+      }
+      if (typeof name !== 'string' || name !== path.basename(name) || name.includes('\\')) throw new Error('Invalid file');
+      const file = fs.realpathSync(path.join(root, name));
+      if (!file.startsWith(root + path.sep)) throw new Error('Invalid file');
+      const stat = fs.statSync(file);
+      if (!stat.isFile()) throw new Error('Invalid file');
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store',
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(path.basename(share.filename || name))}"`, 'Content-Length': stat.size });
+      const stream = fs.createReadStream(file); stream.on('error', () => res.destroy()); stream.pipe(res);
+    } catch { res.writeHead(404); res.end('Shared file unavailable'); }
+    return true;
+  }
+
+  const patchMatch = pathname.match(/^\/api\/sharing\/([^/]+)$/);
+  if (patchMatch && req.method === 'PATCH') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      const allowed = new Set(loadUsers().map(u => u.id)); allowed.add('*');
+      if (!Array.isArray(body.sharedWith) || body.sharedWith.some(id => typeof id !== 'string' || !allowed.has(id))) throw new Error('Choose valid recipients.');
+      if (body.expectedSharedWith !== undefined && !Array.isArray(body.expectedSharedWith)) throw new Error('Invalid expected recipients.');
+      let result;
+      await modifySharing(shares => {
+        const share = shares.find(s => s.id === patchMatch[1]);
+        if (!share || share.ownerId !== userId) { result = { status: 404, error: 'Share unavailable.' }; return; }
+        if (body.expectedSharedWith && JSON.stringify([...share.sharedWith].sort()) !== JSON.stringify([...body.expectedSharedWith].sort())) {
+          result = { status: 409, error: 'Recipients changed. Refresh before editing.' }; return;
+        }
+        share.sharedWith = [...new Set(body.sharedWith)]; result = { status: 200, ok: true, shareId: share.id };
+      });
+      res.writeHead(result.status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(result));
+    } catch (e) { safeError(res, e, 400); }
+    return true;
+  }
+
   const delMatch = pathname.match(/^\/api\/sharing\/([^/]+)$/);
   if (delMatch && req.method === 'DELETE') {
     const userId = requireAuth(req, res); if (!userId) return true;

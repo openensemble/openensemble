@@ -7,6 +7,8 @@ let projectResultSource = null;
 const projectStatusLabels = { idle: 'Ready', working: 'Working', waiting: 'Needs your input', finished: 'Finished', failed: 'Failed', stopped: 'Stopped', interrupted: 'Interrupted' };
 const projectActionArgs = (...args) => escHtml(JSON.stringify(args));
 function resetProjectWork() {
+  resetProjectGoals();
+  resetProactiveWork();
   rememberProjectDraft(); ++projectSpaceLoad;
   projectSpaces = []; selectedProjectSpace = null; projectSpaceDraft = null;
   deletedProjectSpaceIds.clear(); projectSpaceDeleting = null;
@@ -14,7 +16,7 @@ function resetProjectWork() {
   if ($('projectSpaceDetail')) $('projectSpaceDetail').innerHTML = '';
   if ($('projectSpaceList')) $('projectSpaceList').innerHTML = '';
   projectActivityData = null; projectAttentionItems = []; projectResultSource = null;
-  if ($('projectAttentionButton')) $('projectAttentionButton').hidden = true;
+  renderProjectAttentionIndicators();
   for (const id of ['projectResultDialog', 'projectAttentionDialog']) { const dialog = $(id); if (dialog?.open) dialog.close(); if (dialog) dialog.innerHTML = ''; }
 }
 
@@ -211,6 +213,16 @@ async function loadProjectOutputs() {
   } catch (error) { if (selectedProjectSpace?.id === id) projectMessage(error.message, true); }
 }
 
+function renderProjectAttentionIndicators() {
+  const count = projectAttentionItems.length;
+  const label = count ? `Projects and goals · ${count} unread update${count === 1 ? '' : 's'}` : 'Projects and goals';
+  const badge = $('projectsBadge');
+  if (badge) { badge.textContent = count ? String(count > 99 ? '99+' : count) : ''; badge.style.display = count ? '' : 'none'; }
+  const button = $('sbtnProjects');
+  if (button) { button.setAttribute('title', label); button.setAttribute('aria-label', label); }
+  const updates = $('projectUpdatesButton');
+  if (updates) { updates.hidden = !count; updates.textContent = count ? `Updates (${count})` : 'Updates'; }
+}
 async function pollProjectAttention() {
   if (projectAttentionLoading || typeof _currentUser === 'undefined' || !_currentUser?.id) return;
   projectAttentionLoading = true;
@@ -219,10 +231,7 @@ async function pollProjectAttention() {
     const items = (await projectApi('/attention')).filter(item => !deletedProjectSpaceIds.has(item.projectId));
     if (_currentUser?.id !== userId) return;
     projectAttentionItems = items;
-    const button = $('projectAttentionButton'); if (!button) return;
-    button.hidden = !items.length;
-    button.textContent = `${items.length} project update${items.length === 1 ? '' : 's'}`;
-    $('sbtnProjects')?.setAttribute('title', items.length ? `Project spaces · ${items.length} unread updates` : 'Project spaces');
+    renderProjectAttentionIndicators();
     if ($('projectAttentionDialog').open) renderProjectAttention();
     const visible = !document.hidden && typeof activeAgent === 'string' && typeof sessionsLoaded !== 'undefined' && sessionsLoaded.has(activeAgent)
       ? items.filter(item => item.projectId === activeProjectSpaceId && item.chatId === activeSavedChatId && item.agentId === activeAgent) : [];
@@ -247,8 +256,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const dialog = document.createElement('dialog'); dialog.id = id; dialog.className = 'project-mini-dialog project-spaces-dialog';
     dialog.setAttribute('aria-label', id === 'projectResultDialog' ? 'Save result to project' : 'Project updates'); document.body.appendChild(dialog);
   }
-  const button = document.createElement('button'); button.id = 'projectAttentionButton'; button.className = 'project-attention-button';
-  button.hidden = true; button.addEventListener('click', showProjectAttention); button.setAttribute('aria-live', 'polite'); document.body.appendChild(button);
   setInterval(() => {
     if (document.hidden) return;
     pollProjectAttention();

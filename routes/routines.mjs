@@ -100,6 +100,13 @@ export async function handle(req, res) {
         catch (e) { res.writeHead(503); res.end(JSON.stringify({ error: e.message })); return true; }
         for (const action of changed) validateHaDeviceAction(action, catalog.devices);
       }
+      // Check after asynchronous capability validation, immediately before the
+      // synchronous save. Existing web clients may continue omitting this field.
+      if (body.expectedVersion !== undefined && body.expectedVersion !== loadRoutines(userId).version) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Routines changed. Reload before saving.' }));
+        return true;
+      }
       saved = saveRoutines(userId, body.routines);
     }
     catch (e) {

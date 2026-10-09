@@ -6,6 +6,50 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-09
+
+**Project updates on the toolbar**
+Unread project updates now appear as a count on **Projects and goals**, including its mobile Tools tile. Open the project view and choose **Updates** to review them. The floating notice near the chat controls has been removed. Project prompts also preserve the requested helper count when the goal title repeats the prompt, and older goal controls now enforce the same pause, completion, and removal rules as project controls.
+
+**Direct requests to named models**
+Requests such as "Have Grok create a cat sitting in a tree" and "Use Gemini to summarize this document" now expose the model catalog and launch one worker on the named target. The launcher recognizes these requests without requiring the word "agent" or "background", preserves the selected provider, and rejects substitutions. See [Providers](providers.md#subscription-logins-chatgpt--supergrok).
+
+**Provider capability discovery**
+Settings and chat now share native capability readers for Claude, Gemini, OpenRouter, Grok, Ollama, and LM Studio. Discovery retains nested tool and thinking flags, supported parameters, context and output limits, and explicit restrictions. Gemini fills missing capabilities from exact official model pages; OpenRouter requests select endpoints that support their tools and reasoning parameters. Sources are retained, unknown fields remain unknown, and provider or skill permissions are unchanged. See [Providers](providers.md#provider-compatibility-and-connection-errors).
+
+**Current model capabilities and image editing**
+OE retains provider model capabilities through Settings, discovery, and chat, and fills missing OpenAI capability information from official model documentation. This restores hosted image editing and web search for GPT-6 models without adding a new model-name allowlist. Image edit follow-ups attach the original saved image. Existing skill permissions and provider restrictions still apply. See [Providers](providers.md#provider-compatibility-and-connection-errors).
+
+**Enter the project prompt up front**
+**What should this project accomplish?** is now a full prompt box for tasks, constraints, and requested agents. The saved prompt keeps its formatting and appears in a visible **Instructions for this run** box before **Start work**. Long prompts remain available after reload, and **Edit goal** lets you revise the saved instructions. See [Projects and goals](project-spaces.md).
+
+**Older goals join Projects and goals**
+Goals previously saved outside a project now appear in **General goals**, preserving their progress, status, deadlines, reference files, and prepared drafts. Existing projects and their goals stay in place. General chat can still access the converted goals, while earlier conversations and schedules remain where they were. Conversion saves a recovery copy and safely retries interrupted moves. See [Existing goals and projects](project-spaces.md#existing-goals-and-projects).
+
+---
+
+## 2026-10-08
+
+**Project goal controls and edit recovery**
+Manage project goals in Overview, including **Mark complete**, **Reopen goal**, and **Remove goal**. Completion asks you to verify the saved condition; removal keeps work conversations and files. Running work and pending requests must be paused before completing or removing a goal. Prepared work links project goals to these controls while keeping optional drafts and general goals available. Conflicting goal edits can be compared and combined without losing newer progress. New Project text and goal edit drafts survive a reload in the same tab. See [Projects and goals](project-spaces.md).
+
+**Projects and goals work together**
+Choose **Add Project** to open **New Project**, define its goal, and select reference files in one flow. Files are also visible in Overview and the Files tab beside it. Add further goals inside the project. The unused Preparation settings shortcut has been removed. Overview shows completion conditions, next steps, blockers, and live work status. **Start work** launches the selected lead agent in a separate project conversation so you can keep chatting. Continue keeps prior results, Pause stops that goal's work, and permission requests stay in its conversation. Existing project goals appear automatically; a finished reply does not automatically complete a goal. See [Projects and goals](project-spaces.md).
+
+**Provider updates are tested before use**
+OE checks Models.dev and LiteLLM for compatible provider changes. Supported changes receive a small test request before use; failed checks preserve the previous settings and explain the result in chat and **Settings → Providers → Provider updates**. SuperGrok's outdated-client recovery now tests the required version before saving it. Changes that need new adapter code are reported instead of silently applied. See [Providers](providers.md#provider-compatibility-and-connection-errors).
+
+**Provider connections and current model catalogs**
+Ollama Cloud validates replacement keys before saving and explains rejected credentials in Settings. Grok image/video selections now come from live catalogs. Together uses its current API host, Perplexity uses its documented Agent and Sonar endpoints, and Fireworks no longer adds unavailable legacy image models to its catalog. Compatible chat APIs remember successful parameter adjustments across restarts. See [Providers](providers.md#provider-compatibility-and-connection-errors).
+
+**Grok worker routing and automatic client recovery**
+Requests such as "Make a Grok agent…" and "Tell Grok to…" now expose the model catalog and worker launch tools. Grok 4.7 can use the hosted image tool when the account has Image Generator enabled. SuperGrok connections automatically recover once from an explicit outdated-client rejection and retain xAI's required version for future requests. See [Providers](providers.md#subscription-logins-chatgpt--supergrok).
+
+**Enable a needed skill from chat**
+When a needed skill is disabled, OE asks before enabling it. Reply yes or choose **Enable and continue** to resume the request; account restrictions and hidden-tool choices still apply. See [Skills](skills.md#enabling-skills-on-an-agent).
+
+---
+
 ## 2026-10-07
 
 **Inspect each agent's work**
@@ -16,7 +60,7 @@ Expand **Progress, actions & conclusion** in the chat's **Agents** panel to insp
 ## 2026-10-06
 
 **Delete a project**
-Use **Delete project** at the bottom of a project's **Overview** to permanently remove its conversations, saved progress and results, goals, prepared work, and scheduled tasks. Confirmation names the project and explains what will be removed. OE blocks deletion during running replies or project tasks and rejects outdated project views. Profile files are kept, and open project tabs return to general chat. **Archive** remains available for keeping a finished project. See [Project spaces](project-spaces.md#saving-archiving-and-deleting).
+Use **Delete project** at the bottom of a project's **Context & tasks** tab to permanently remove its conversations, saved progress and results, goals, prepared work, and scheduled tasks. Confirmation names the project and explains what will be removed. OE blocks deletion during running replies or project tasks and rejects outdated project views. Profile files are kept, and open project tabs return to general chat. **Archive** remains available for keeping a finished project. See [Project spaces](project-spaces.md#saving-archiving-and-deleting).
 
 **Follow work across project chats**
 Project spaces now bring original and saved conversations together in **Chats & activity**, with running and waiting states, unread updates, and links to each conversation. **Project updates** surfaces finished replies and requests for input while you work elsewhere. Completed saved-chat turns now release their running status correctly.

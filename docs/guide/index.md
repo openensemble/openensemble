@@ -36,7 +36,7 @@ New installation? Start with [installation](../getting-started), then
 ## Daily use
 
 - [Saved chats](./saved-chats/)
-- [Project spaces](./project-spaces/)
+- [Projects and goals](./project-spaces/)
 - [Display dashboards](./dashboards/)
 - [Tasks & scheduler](./tasks/)
 - [Routines & saved fast paths](./routines/)

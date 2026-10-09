@@ -8,6 +8,7 @@
 
 import { createHash, randomUUID } from 'crypto';
 import { loadConfig } from '../../routes/_helpers.mjs';
+import { resolveOllamaKey } from '../../lib/ollama-cloud.mjs';
 
 /**
  * Return a correlation-safe identity for a provider tool call. Native IDs are
@@ -97,8 +98,7 @@ export function getOllamaKey(agentOrProvider = null) {
   const provider = typeof agentOrProvider === 'string'
     ? agentOrProvider
     : agentOrProvider?.provider;
-  if (provider === 'ollama-local') return cfg?.cortex?.ollamaLocalApiKey ?? null;
-  return cfg?.cortex?.ollamaApiKey ?? cfg?.ollamaApiKey ?? null;
+  return resolveOllamaKey(cfg, provider);
 }
 
 // ── LM Studio — configurable like Ollama ─────────────────────────────────────
@@ -137,8 +137,8 @@ const STATIC_OPENAI_COMPAT_PROVIDERS = {
   deepseek:    { baseUrl: 'https://api.deepseek.com/v1',                             keyField: 'deepseekApiKey',    displayName: 'DeepSeek' },
   mistral:     { baseUrl: 'https://api.mistral.ai/v1',                               keyField: 'mistralApiKey',     displayName: 'Mistral' },
   groq:        { baseUrl: 'https://api.groq.com/openai/v1',                          keyField: 'groqApiKey',        displayName: 'Groq' },
-  together:    { baseUrl: 'https://api.together.xyz/v1',                             keyField: 'togetherApiKey',    displayName: 'Together AI' },
-  perplexity:  { baseUrl: 'https://api.perplexity.ai',                               keyField: 'perplexityApiKey',  displayName: 'Perplexity', modelsEndpoint: '/v1/models' },
+  together:    { baseUrl: 'https://api.together.ai/v1',                              keyField: 'togetherApiKey',    displayName: 'Together AI' },
+  perplexity:  { baseUrl: 'https://api.perplexity.ai',                               keyField: 'perplexityApiKey',  displayName: 'Perplexity', modelsEndpoint: '/v1/models', chatEndpoint: '/v1/sonar', responsesEndpoint: '/v1/agent' },
   gemini:      { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', keyField: 'geminiApiKey',      displayName: 'Google Gemini' },
   xai:         { baseUrl: 'https://api.x.ai/v1',                                     keyField: 'grokApiKey',        displayName: 'xAI Grok' },
   zai:         { baseUrl: 'https://api.z.ai/api/paas/v4',                            keyField: 'zaiApiKey',         displayName: 'Z.AI' },

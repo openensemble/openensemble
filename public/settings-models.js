@@ -5,6 +5,30 @@
 let allModels = [];
 let drawers = [];
 
+// Keep array responses compatible while exposing provider credential failures.
+async function fetchProviderModelList(url, provider, statusId) {
+  const response = await fetch(url, { cache: 'no-store' });
+  const data = await response.json();
+  const message = response.headers?.get?.('X-OE-Provider-Message');
+  const status = statusId ? document.getElementById(statusId) : null;
+  window._providerModelErrors ??= {};
+  const errorKey = `${provider}:${url}`;
+  if (message || !response.ok) {
+    const error = message || data?.error || `Model discovery failed (${response.status}).`;
+    window._providerModelErrors[errorKey] = { provider, message: error };
+    if (status) status.textContent = error;
+    return [];
+  }
+  const previousError = window._providerModelErrors[errorKey];
+  delete window._providerModelErrors[errorKey];
+  const remainingError = Object.values(window._providerModelErrors).find(error => error.provider === provider);
+  if (status && remainingError) status.textContent = remainingError.message;
+  else if (status && previousError && status.textContent === previousError.message) {
+    status.textContent = Array.isArray(data) && data.length ? 'API key verified.' : 'No models available.';
+  }
+  return Array.isArray(data) ? data : [];
+}
+
 async function loadModels() {
   try {
     const response = await fetch('/api/models');
@@ -25,31 +49,33 @@ let anthropicModels = [];
 
 async function loadAnthropicModels() {
   try {
-    const data = await fetch('/api/anthropic-models').then(r => r.json());
+    anthropicModels = [];
+    const data = await fetchProviderModelList('/api/anthropic-models', 'anthropic', 'providerAnthropicStatus');
     if (Array.isArray(data) && data.length) {
-      anthropicModels = data.map(m => ({ name: m.id, provider: 'anthropic', displayName: m.displayName, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
+      anthropicModels = data.map(m => ({ ...m, name: m.id, provider: 'anthropic', displayName: m.displayName, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
     }
   } catch {}
 }
 
-// Chat/reasoning models are populated dynamically from /api/grok-models so the list
-// tracks whatever xAI currently exposes. Media (image/video) models don't appear on
-// xAI's /v1/models, so we keep those as static slugs.
+// Both chat and media models are discovered from the provider's live catalogs.
 let grokChatModels = [];
-const grokMediaModels = [
-  { name: 'grok-imagine-image',     provider: 'grok', displayName: 'Grok Imagine (image)',     supportsImageGeneration: true, capabilities: ['image_generation'] },
-  { name: 'grok-imagine-image-quality', provider: 'grok', displayName: 'Grok Imagine Quality (image)', supportsImageGeneration: true, capabilities: ['image_generation'] },
-  { name: 'grok-imagine-video',     provider: 'grok', displayName: 'Grok Imagine (video)' },
-];
+let grokMediaModels = [];
 function getGrokModels() {
   return [...grokChatModels, ...grokMediaModels];
 }
 
 async function loadGrokModels() {
   try {
-    const data = await fetch('/api/grok-models').then(r => r.json());
+    grokChatModels = [];
+    grokMediaModels = [];
+    const [data, media] = await Promise.all([
+      fetchProviderModelList('/api/grok-models', 'grok', 'providerGrokStatus'),
+      fetchProviderModelList('/api/grok-media-models', 'grok', 'providerGrokStatus'),
+    ]);
+    grokMediaModels = media.map(m => ({ ...m, name: m.id, provider: 'grok' }));
     if (Array.isArray(data) && data.length) {
       grokChatModels = data.map(m => ({
+        ...m,
         name: m.id,
         provider: 'grok',
         displayName: `${m.displayName ?? m.id} (chat)`,
@@ -77,7 +103,7 @@ function getCompatProviderModels() {
   const store = window._compatProviderModels ?? {};
   for (const p of getCompatProviderIds()) {
     for (const m of store[p] ?? []) {
-      out.push({ name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] });
+      out.push({ ...m, name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] });
     }
   }
   return out;
@@ -85,18 +111,20 @@ function getCompatProviderModels() {
 
 async function loadFireworksModels() {
   try {
-    const data = await fetch('/api/fireworks-models').then(r => r.json());
+    fireworksModels = [];
+    const data = await fetchProviderModelList('/api/fireworks-models', 'fireworks', 'providerFireworksStatus');
     if (Array.isArray(data) && data.length) {
-      fireworksModels = data.map(m => ({ name: m.id, provider: 'fireworks', displayName: m.displayName, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
+      fireworksModels = data.map(m => ({ ...m, name: m.id, provider: 'fireworks', displayName: m.displayName, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
     }
   } catch {}
 }
 
 async function loadOpenRouterModels() {
   try {
-    const data = await fetch('/api/openrouter-models').then(r => r.json());
+    openrouterModels = [];
+    const data = await fetchProviderModelList('/api/openrouter-models', 'openrouter', 'providerOpenrouterStatus');
     if (Array.isArray(data) && data.length) {
-      openrouterModels = data.map(m => ({ name: m.id, provider: 'openrouter', displayName: m.name, contextLen: m.contextLen, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
+      openrouterModels = data.map(m => ({ ...m, name: m.id, provider: 'openrouter', displayName: m.name, contextLen: m.contextLen, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
     }
   } catch {}
 }
@@ -171,8 +199,10 @@ function renderModelBrowser() {
     for (const m of list) {
       const meta = [];
       if (m.contextLen) meta.push(`${Math.round(m.contextLen/1000)}k ctx`);
-      if (Array.isArray(m.capabilities) && m.capabilities.includes('tool_use')) meta.push('tools');
+      if (Array.isArray(m.capabilities) && m.capabilities.some(capability => ['tool_use', 'function_calling'].includes(capability))) meta.push('tools');
       if (m.supportsImageGeneration || (Array.isArray(m.capabilities) && m.capabilities.includes('image_generation'))) meta.push('image gen');
+      if (m.supportsVision) meta.push('vision');
+      if (m.capabilities?.some(capability => ['thinking', 'reasoning'].includes(capability))) meta.push('reasoning');
       if (m.loaded) meta.push('● loaded');
       const metaStr = meta.length ? `<span style="color:var(--muted);font-size:11px;margin-left:6px">${meta.join(' · ')}</span>` : '';
       const label = m.displayName && m.displayName !== m.name

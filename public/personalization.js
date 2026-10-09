@@ -339,7 +339,7 @@ function _pzInboxHtml() {
     const editKey = preferenceId ? _pzRef(preferenceId) : null;
     const controls = [
       event.kind === 'prepared_work' && event.metadata?.workId
-        ? `<button class="pz-btn pz-btn-small" data-action="openProactiveWork" data-args='${escHtml(JSON.stringify([event.metadata.projectId || null, event.metadata.workId]))}'>Open prepared work</button>` : '',
+        ? `<button class="pz-btn pz-btn-small" data-action="openProactiveWork" data-args='${escHtml(JSON.stringify([event.metadata.projectId || null, event.metadata.workId]))}'>Open Projects</button>` : '',
       controlActions.includes('useful')
         ? `<button class="pz-btn pz-btn-small" data-action="feedbackPersonalizationEvent" data-args='["$el","useful"]' data-pz-key="${eventKey}">Useful</button>` : '',
       controlActions.includes('acted')
@@ -588,7 +588,7 @@ function _pzRenderPanelHtml() {
       <option value="prepare" ${cfg.workMode === 'prepare' ? 'selected' : ''}>Prepare private drafts automatically</option>
     </select>
     <p class="pz-hint">Checks upcoming meetings, active goals, linked Gmail replies, and failed tasks. Preparing a draft sends the relevant goal, project notes, linked document excerpts, and enabled calendar or reply context to your selected personalization model. Background preparation is limited to four drafts per day. Delivery follows your quiet hours and briefing preference. Drafts stay in OE until you use them.</p>
-    <button class="pz-btn" data-action="openProactiveWork">Open goals and prepared work</button>
+    <button class="pz-btn" data-action="openProactiveWork">Open Projects</button>
     <div class="settings-section-title pz-section-heading pz-heading-actions"><span>Proactive activity</span>${_pzInbox.some(e => e.status !== 'read') ? '<button class="pz-link-btn" data-action="readAllPersonalizationEvents">Mark all read</button>' : ''}</div>
     <div class="pz-list">${_pzInboxHtml()}</div>
 

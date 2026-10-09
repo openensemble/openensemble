@@ -23,6 +23,10 @@ import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 import { capabilityNotice } from './_shared.mjs';
 import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
+import { getProviderCompatibility, rememberProviderCompatibility } from '../../lib/provider-compat.mjs';
+import { proposedProviderCompatibility } from '../../lib/provider-update-feeds.mjs';
+import { testProviderCompatibility } from '../../lib/provider-update-gate.mjs';
+import { recordProviderUpdate, providerUpdateMessage, providerUpdateId, isProviderCompatibilityError } from '../../lib/provider-update-status.mjs';
 
 export async function* streamOpenAICompat(providerKey, agent, systemPrompt, messages, signal, userId = 'default') {
   const cfg = OPENAI_COMPAT_PROVIDERS[providerKey];
@@ -32,7 +36,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     yield { type: 'error', message: `${cfg.displayName} API key not set. Add it in Settings → Providers.` };
     return;
   }
-  const endpoint = `${cfg.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const configuredEndpoint = `${cfg.baseUrl.replace(/\/$/, '')}${cfg.chatEndpoint || '/chat/completions'}`;
 
   const working = [
     { role: 'system', content: systemPrompt },
@@ -53,12 +57,41 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   let reasoningDisabled = false;
   // o-series / gpt-5 on /chat/completions reject max_tokens with "use
   // max_completion_tokens" — latch and resend with the renamed field.
-  let useMaxCompletionTokens = false;
+  const compatibility = getProviderCompatibility(configuredEndpoint, agent.model, apiKey);
+  let endpoint = compatibility.endpoint || configuredEndpoint;
+  let useMaxCompletionTokens = compatibility.useMaxCompletionTokens;
   // Strict-validation providers (e.g. Mistral) may reject stream_options —
   // latch and resend without it (usage then reads 0 for that provider only).
-  let streamUsageDisabled = false;
+  let streamUsageDisabled = compatibility.streamUsageDisabled;
+  let compatibilityChanged = false;
+  let maxTokenRetried = false;
+  let updateContext = null;
+  let feedRetried = false;
+  const testChange = proposal => testProviderCompatibility({ provider: providerKey, model: agent.model,
+    endpoint: configuredEndpoint, apiKey, userId, signal, ...proposal });
+  const failUpdate = reason => {
+    if (!updateContext) return null;
+    const row = recordProviderUpdate({ ...updateContext, status: 'rejected', reason });
+    updateContext = null;
+    return row ? providerUpdateMessage(row) : null;
+  };
+  const feed = await proposedProviderCompatibility(providerKey, cfg, { ...compatibility, endpoint });
+  if (feed) {
+    feedRetried = true;
+    const tested = await testChange(feed);
+    if (tested.ok) {
+      endpoint = feed.proposal.endpoint;
+      useMaxCompletionTokens = feed.proposal.useMaxCompletionTokens;
+      streamUsageDisabled = feed.proposal.streamUsageDisabled;
+      compatibilityChanged = true;
+      updateContext = tested.context;
+    } else {
+      yield { type: 'cortex_warning', provider: providerKey,
+        message: providerUpdateMessage({ ...tested.context, status: 'rejected', reason: tested.reason }) };
+    }
+  }
 
-  while (guard.tick()) {
+  try { while (guard.tick()) {
     appendPendingCoordinatorUpdate(working);
     const finalRound = guard.isFinalRound();
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
@@ -73,6 +106,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         // Workstream children keep native search too — they're the heaviest
         // searchers, and Brave bills per call (see openai-responses.mjs).
         disabled: finalRound || nativeSearchDisabled,
+        metadata: agent._modelCapabilities,
       });
     const compatFnTools = !finalRound && functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
@@ -107,14 +141,20 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         ?? (body.reasoning?.enabled === false ? 'off' : null),
     });
 
-    const res = await fetchWithRetry(endpoint, {
+    let res;
+    try { res = await fetchWithRetry(endpoint, {
       method: 'POST', signal,
+      redirect: 'error',
       headers: {
         'Content-Type':  'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
-    }, { label: providerKey });
+    }, { label: providerKey }); }
+    catch (error) {
+      failUpdate('The request could not complete. Previous settings were retained.');
+      throw error;
+    }
 
     if (!res.ok) {
       const errText = await res.text();
@@ -130,22 +170,51 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       // These two must run BEFORE the reasoning check: their rejection text
       // ("Unsupported parameter: …") also matches isReasoningUnsupportedError,
       // which would burn the reasoning retry on the wrong field and then fail.
-      if (!useMaxCompletionTokens && body.max_tokens !== undefined && res.status === 400 && /max_completion_tokens/i.test(errText)) {
+      if (!maxTokenRetried && !useMaxCompletionTokens && body.max_tokens !== undefined && res.status === 400 && /max_completion_tokens/i.test(errText)) {
+        const tested = await testChange({ proposal: { endpoint, useMaxCompletionTokens: true, streamUsageDisabled } });
+        if (!tested.ok) {
+          yield { type: 'error', message: providerUpdateMessage({ ...tested.context, status: 'rejected', reason: tested.reason }) };
+          return;
+        }
+        updateContext = tested.context;
         console.warn(`[${providerKey}] max_tokens rejected for ${agent.model}; retrying with max_completion_tokens`);
         useMaxCompletionTokens = true;
+        compatibilityChanged = true;
+        maxTokenRetried = true;
         const notice = capabilityNotice(providerKey, 'max_completion_tokens', 'Provider rejected the max_tokens parameter — retrying with its expected name.');
         if (notice) yield notice;
         continue;
       }
+      if (!maxTokenRetried && useMaxCompletionTokens && body.max_completion_tokens !== undefined
+        && res.status === 400 && /\bmax_tokens\b/i.test(errText)) {
+        const tested = await testChange({ proposal: { endpoint, useMaxCompletionTokens: false, streamUsageDisabled } });
+        if (!tested.ok) {
+          yield { type: 'error', message: providerUpdateMessage({ ...tested.context, status: 'rejected', reason: tested.reason }) };
+          return;
+        }
+        updateContext = tested.context;
+        useMaxCompletionTokens = false;
+        compatibilityChanged = true;
+        maxTokenRetried = true;
+        continue;
+      }
       if (!streamUsageDisabled && (res.status === 400 || res.status === 422) && /stream_options/i.test(errText)) {
+        const tested = await testChange({ proposal: { endpoint, useMaxCompletionTokens, streamUsageDisabled: true } });
+        if (!tested.ok) {
+          yield { type: 'error', message: providerUpdateMessage({ ...tested.context, status: 'rejected', reason: tested.reason }) };
+          return;
+        }
+        updateContext = tested.context;
         console.warn(`[${providerKey}] stream_options rejected; retrying without usage reporting`);
         streamUsageDisabled = true;
+        compatibilityChanged = true;
         const notice = capabilityNotice(providerKey, 'stream_options', 'Provider rejected usage reporting — continuing without token-usage stats for this provider.');
         if (notice) yield notice;
         continue;
       }
       if (agent._executionEffortLocked !== true
         && !reasoningDisabled
+        && !/\b(?:max_tokens|max_completion_tokens|stream_options)\b/i.test(errText)
         && isReasoningUnsupportedError(res.status, errText)) {
         console.warn(`[${providerKey}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
@@ -153,7 +222,28 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         if (notice) yield notice;
         continue;
       }
-      yield { type: 'error', message: `${cfg.displayName} error ${res.status}: ${errText}` };
+      if (!feedRetried && isProviderCompatibilityError(res.status, errText)
+        && !(agent._executionEffortLocked === true && /reasoning_effort|reasoning\.effort/i.test(errText))) {
+        feedRetried = true;
+        const fresh = await proposedProviderCompatibility(providerKey, cfg, { useMaxCompletionTokens, streamUsageDisabled, endpoint }, { refresh: true });
+        if (fresh) {
+          const tested = await testChange(fresh);
+          if (tested.ok) {
+            endpoint = fresh.proposal.endpoint;
+            useMaxCompletionTokens = fresh.proposal.useMaxCompletionTokens;
+            streamUsageDisabled = fresh.proposal.streamUsageDisabled;
+            compatibilityChanged = true;
+            updateContext = tested.context;
+            continue;
+          }
+          updateContext = tested.context;
+        } else {
+          updateContext = { id: providerUpdateId(userId, providerKey, configuredEndpoint, agent.model, apiKey, 'unhandled'),
+            userId, provider: providerKey, model: agent.model, source: 'provider response' };
+        }
+      }
+      const updateError = failUpdate('OE could not validate an automatic repair. An OE adapter update may be needed.');
+      yield { type: 'error', message: updateError || `${cfg.displayName} error ${res.status}: ${errText}` };
       return;
     }
 
@@ -166,7 +256,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     let firstTokenAt = null;
     let iterUsage    = null;
 
-    for await (const event of readAnthropicSSE(res.body)) {
+    try { for await (const event of readAnthropicSSE(res.body)) {
       if (event.__sseDone) { sawDone = true; continue; }
       // Keep the LAST usage seen this completion, accumulate after the loop.
       // Most providers send usage once on the final chunk; Perplexity sends a
@@ -177,7 +267,8 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       // partial/empty text that reads as success downstream.
       if (event.error) {
         const em = event.error.message || event.error.type || 'stream error';
-        yield { type: 'error', message: `${providerKey} error: ${em}` };
+        const updateError = failUpdate('The provider returned an error during streaming. Previous settings were retained.');
+        yield { type: 'error', message: updateError || `${providerKey} error: ${em}` };
         return;
       }
       const choice = event.choices?.[0];
@@ -215,6 +306,9 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       // No break on finish_reason: with stream_options.include_usage the usage
       // chunk arrives AFTER the final choice chunk — breaking here discarded it
       // (usage always read 0). The reader ends at [DONE]/EOF.
+    } } catch (error) {
+      failUpdate('The stream was interrupted. Previous settings were retained.');
+      throw error;
     }
     if (iterUsage) {
       totalInputTokens  += iterUsage.prompt_tokens     ?? 0;
@@ -224,6 +318,16 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       // Capture so we can log a hit rate parallel to Anthropic's explicit
       // cache_control telemetry. Not all providers populate this; missing = 0.
       cachedTokens += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
+    }
+
+    if (compatibilityChanged && (sawDone || finishReason) && (textContent.trim() || toolCalls.size)
+      && !(finalRound && toolCalls.size > 0)) {
+      rememberProviderCompatibility(configuredEndpoint, agent.model, apiKey, { endpoint, useMaxCompletionTokens, streamUsageDisabled });
+      if (updateContext) recordProviderUpdate({ ...updateContext, status: 'applied' });
+      compatibilityChanged = false;
+      updateContext = null;
+    } else if (compatibilityChanged) {
+      failUpdate('The provider did not return a complete, valid response. Previous settings were retained.');
     }
 
     if (finalRound && toolCalls.size > 0) {
@@ -358,6 +462,8 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       };
     }
     break;
+  } } finally {
+    failUpdate('The request ended before the update could be validated. Previous settings were retained.');
   }
 
   yield { type: '__content', content: assistantContent };

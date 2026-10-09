@@ -132,6 +132,7 @@ function buildMobileMenu() {
     if (btn.style.display === 'none') return; // feature disabled or role-gated
     const tile = document.createElement('button');
     tile.className = 'mm-tile';
+    if (btn.id) tile.dataset.srcBtn = btn.id;
     const iconWrap = document.createElement('span');
     iconWrap.className = 'mm-tile-icon';
     const icon = btn.querySelector('svg, [data-lucide], span:not(.strip-tooltip):not(.strip-badge):not(.strip-btn-alert):not(.session-dot)');
@@ -160,7 +161,6 @@ function buildMobileMenu() {
     if (btn.dataset.action === 'toggleDrawer' && btn.dataset.args) {
       tile.dataset.action = '_closeAndToggleDrawer';
       tile.dataset.args = btn.dataset.args;
-      if (btn.id) tile.dataset.srcBtn = btn.id;
     } else {
       // Custom skill drawers mount with onclick="toggleDrawer('id','btnId')".
       const m = (btn.getAttribute('onclick') || '').match(/toggleDrawer\('([^']+)'\s*,\s*'([^']+)'\)/);

@@ -27,7 +27,7 @@ import {
 import { refreshUserMcpTools, reconnectServer } from '../lib/mcp-tools.mjs';
 import { getServerStatus } from '../lib/mcp-client.mjs';
 import { getCatalog } from '../lib/mcp-catalog.mjs';
-import { OeOAuthProvider, registerPendingState, consumePendingState } from '../lib/mcp-oauth.mjs';
+import { OeOAuthProvider, registerPendingState, peekPendingState, consumePendingState } from '../lib/mcp-oauth.mjs';
 import { auth as runOAuth } from '@modelcontextprotocol/sdk/client/auth.js';
 import { isUrlSafe } from '../lib/url-guard.mjs';
 
@@ -252,6 +252,10 @@ export async function handle(req, res) {
   if (oauthStartMatch && req.method === 'POST') {
     const userId = requireAuth(req, res); if (!userId) return true;
     if (!requireAdult(req, res, userId)) return true;
+    let body;
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid JSON' })); return true;
+    }
     const serverId = decodeURIComponent(oauthStartMatch[1]);
     const own = getServersForUser(userId).find(s => s.id === serverId);
     if (!own) {
@@ -288,7 +292,7 @@ export async function handle(req, res) {
       const authUrl = provider.lastAuthorizationUrl;
       const state = authUrl.searchParams.get('state');
       if (!state) throw new Error('Authorization URL missing required state parameter');
-      registerPendingState(state, { ownerUserId: userId, serverId, serverUrl: own.url, redirectOrigin: browserOrigin(req) });
+      registerPendingState(state, { ownerUserId: userId, serverId, serverUrl: own.url, redirectOrigin: browserOrigin(req), nativeClient: body?.nativeClient === true });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ authUrl: authUrl.toString() }));
     } catch (e) {
@@ -299,26 +303,66 @@ export async function handle(req, res) {
     return true;
   }
 
+  // Native clients finish through an authenticated request. The browser callback
+  // returns only code/state; it cannot exchange tokens without the app's session.
+  const nativeComplete = req.url.match(/^\/api\/mcp\/servers\/([^/]+)\/oauth\/complete$/);
+  if (nativeComplete && req.method === 'POST') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    if (!requireAdult(req, res, userId)) return true;
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+    const pending = typeof body?.state === 'string' ? peekPendingState(body.state) : null;
+    const serverId = decodeURIComponent(nativeComplete[1]);
+    const own = getServersForUser(userId).find(s => s.id === serverId);
+    if (!pending?.nativeClient || pending.ownerUserId !== userId || pending.serverId !== serverId || !own || own.url !== pending.serverUrl || own.auth !== 'oauth'
+        || typeof body?.code !== 'string' || !body.code || body.code.length > 8192) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ error: 'Authorization expired or does not match this account and server. Start again.' })); return true;
+    }
+    consumePendingState(body.state);
+    try {
+      const provider = new OeOAuthProvider(pending);
+      const result = await runOAuth(provider, { serverUrl: pending.serverUrl, authorizationCode: body.code });
+      if (result !== 'AUTHORIZED') throw new Error('Authorization did not complete');
+      refreshUserMcpTools(userId).catch(() => {});
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, serverId }));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ error: 'Token exchange failed. Start authorization again.' }));
+    }
+    return true;
+  }
+
   // GET /api/mcp/oauth/callback — landing for the OAuth provider's redirect.
   // The user's browser arrives here with ?code= and &state=. We look up
   // the pending-state entry, complete the token exchange, and render a
   // tiny "you can close this window" page (or postMessage back to opener).
   if (req.url.startsWith('/api/mcp/oauth/callback') && req.method === 'GET') {
-    // Auth-required so a randomly-discovered callback URL can't be abused.
-    const userId = requireAuth(req, res); if (!userId) return true;
     const u = new URL(req.url, browserOrigin(req));
     const code = u.searchParams.get('code');
     const state = u.searchParams.get('state');
     const err = u.searchParams.get('error');
+    const handoff = state ? peekPendingState(state) : null;
+    if (handoff?.nativeClient) {
+      const target = new URL('openensemble://mcp-callback');
+      target.searchParams.set('state', state);
+      target.searchParams.set('server', handoff.serverId);
+      if (err || !code || code.length > 8192) target.searchParams.set('error', 'Authorization was cancelled or failed.');
+      else target.searchParams.set('code', code);
+      res.writeHead(302, { Location: target.toString(), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' }); res.end(); return true;
+    }
+    const userId = requireAuth(req, res); if (!userId) return true;
     const failHtml = (msg) => `<!doctype html><meta charset=utf-8><title>Authorization failed</title>
       <body style="font-family:sans-serif;padding:30px;max-width:600px">
       <h2>Authorization failed</h2><p style="color:#c33">${escapeHtml(msg)}</p>
       <p>You can close this window and try again from Settings → MCP.</p></body>`;
     if (err) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(failHtml(`${err}: ${u.searchParams.get('error_description') ?? ''}`)); return true; }
     if (!code || !state) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(failHtml('Missing code or state.')); return true; }
-    const pending = consumePendingState(state);
+    const pending = peekPendingState(state);
     if (!pending) { res.writeHead(400, { 'Content-Type': 'text/html' }); res.end(failHtml('State expired or unknown — start the flow again.')); return true; }
     if (pending.ownerUserId !== userId) { res.writeHead(403, { 'Content-Type': 'text/html' }); res.end(failHtml('The authenticated user does not match the user that started this flow.')); return true; }
+    consumePendingState(state);
     try {
       const provider = new OeOAuthProvider({
         ownerUserId: pending.ownerUserId,

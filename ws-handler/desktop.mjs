@@ -6,6 +6,7 @@
 import { WebSocketServer } from 'ws';
 import { log } from '../logger.mjs';
 import { getSessionMeta } from '../routes/_helpers/auth-sessions.mjs';
+import { registerDesktop, dropDesktop, handleDesktopResult, updateDesktopStatus } from '../lib/desktop-bus.mjs';
 
 export function initDesktopWss({
   maxPayload = 2 * 1024 * 1024,
@@ -13,13 +14,11 @@ export function initDesktopWss({
   maxMissedPongs = 3,
 } = {}) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: maxPayload });
-  wss.on('connection', async (ws, req) => {
+  wss.on('connection', (ws, req) => {
     ws._missedPongs = 0;
     ws._authenticated = false;
     ws._desktopClientId = null;
     ws.on('pong', () => { ws._missedPongs = 0; });
-
-    const { registerDesktop, dropDesktop, handleDesktopResult, updateDesktopStatus } = await import('../lib/desktop-bus.mjs');
 
     ws.on('message', async (raw) => {
       let msg;
@@ -59,7 +58,7 @@ export function initDesktopWss({
       }
 
       if (msg.type === 'result') {
-        handleDesktopResult(msg);
+        handleDesktopResult(ws, msg);
         return;
       }
       if (msg.type === 'status') {

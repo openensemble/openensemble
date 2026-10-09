@@ -297,6 +297,7 @@ async function respondToAttachmentDecision(el, decisionId, fileId, decision, kee
 function appendApprovalPendingBubble(pending, scroll = true) {
   const kind = pending.kind;
   if (!kind) return;
+  const skillActivation = kind === 'skill_activation';
   // Reuse one card per family. A new operation belongs beside its current
   // request; duplicate events for the same operation stay in place.
   const existing = document.querySelector(`.msg.approval-pending[data-approval-kind="${CSS.escape(kind)}"]`);
@@ -324,7 +325,7 @@ function appendApprovalPendingBubble(pending, scroll = true) {
 
   const label = document.createElement('div');
   label.style.cssText = 'margin-bottom:8px';
-  label.innerHTML = `⚠️ <strong>Waiting for approval:</strong> ${escHtml(pending.description || 'a staged action needs your confirmation')}`;
+  label.innerHTML = `${skillActivation ? '🔌 <strong>Skill not enabled:</strong>' : '⚠️ <strong>Waiting for approval:</strong>'} ${escHtml(pending.description || 'a staged action needs your confirmation')}`;
   el.appendChild(label);
 
   const actions = document.createElement('div');
@@ -332,7 +333,7 @@ function appendApprovalPendingBubble(pending, scroll = true) {
 
   const phrase = pending.phrase || 'APPROVE';
   const approveBtn = document.createElement('button');
-  approveBtn.textContent = `Approve (${phrase})`;
+  approveBtn.textContent = skillActivation ? 'Enable and continue' : `Approve (${phrase})`;
   approveBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--red, #f44336);background:var(--red, #f44336);color:#fff;border-radius:4px;cursor:pointer;font-size:12px';
   // Read the opId off the element at click time (not capture time) so a
   // re-staged pill that refreshed this bubble in place sends the CURRENT id.
@@ -517,4 +518,3 @@ async function refreshWatcherHistory(el, watcherId) {
     panel.textContent = `Failed to load history: ${e.message}`;
   }
 }
-

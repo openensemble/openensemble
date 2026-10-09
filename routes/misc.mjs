@@ -30,6 +30,7 @@ async function saveThreads(threads) {
   await withLock(THREADS_PATH, () => fs.writeFileSync(THREADS_PATH, JSON.stringify(threads, null, 2)));
 }
 import { loadSession } from '../sessions.mjs';
+import { projectMessagesForClient } from '../lib/project-message-key.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent, registerWatcher } from '../scheduler/watchers.mjs';
 import { cancelTask } from '../background-tasks.mjs';
@@ -376,7 +377,7 @@ export async function handle(req, res) {
     const sessionId = projectSessionKey(authId, histMatch[1], projectId, chatId);
     const messages = await loadSession(sessionId, 60);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(messages));
+    res.end(JSON.stringify(projectMessagesForClient(messages, projectId)));
     return true;
   }
 
@@ -648,8 +649,15 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const roleId = revokeRuleMatch[1];
     const idx = Number(revokeRuleMatch[2]);
-    const result = revokeRule(authId, roleId, idx);
-    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    let body;
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid JSON' })); return true;
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body) || (body.expectedText !== undefined && typeof body.expectedText !== 'string')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'expectedText must be a string' })); return true;
+    }
+    const result = revokeRule(authId, roleId, idx, body.expectedText);
+    res.writeHead(result.ok ? 200 : result.conflict ? 409 : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return true;
   }

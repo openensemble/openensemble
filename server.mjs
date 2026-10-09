@@ -56,6 +56,7 @@ import { handle as handleExpenses } from './routes/expenses.mjs';
 import { handle as handleResearch } from './routes/research.mjs';
 import { handle as handleDesktop }  from './routes/desktop.mjs';
 import { handle as handleMisc }     from './routes/misc.mjs';
+import { handle as handleMobile }   from './routes/mobile.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
 import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs';
 import { handle as handleProjectSpaces } from './routes/project-spaces.mjs';
@@ -107,6 +108,7 @@ import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundUserSendFn, bootRecoverInterruptedTasks } from './background-tasks.mjs';
 import { setNodesBroadcastFn } from './skills/nodes/execute.mjs';
 import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
+import { startProviderFeedRefresh } from './lib/provider-update-feeds.mjs';
 import { setSalienceNotifyBroadcast } from './lib/proposal-salience.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
 import { runBootCheck, aliveResponse, cancelCommitDeadline } from './lib/oe-admin-boot-check.mjs';
@@ -346,6 +348,7 @@ const routeHandlers = [
   handleEmailAccounts,  // /api/email-accounts, /api/inbox
   handleGmail,          // /api/gmail/autolabel*
   handleConfig,
+  handleMobile,
   handleAgents,
   handleAuth,
   handleUsers,
@@ -697,6 +700,7 @@ setNodesBroadcastFn(sendToUser);
 setUserBroadcastFn(broadcastToUsers);
 setUserSendFn(sendToUser);
 setRuntimeWarnBroadcast(broadcast);
+startProviderFeedRefresh();
 setRuntimeMetricsFn(() => ({
   wsClients: getWsClientCount(),
   nodeClients: getNodeClientCount(),
@@ -962,6 +966,13 @@ async function seedSystemTasks() {
 
 // ── Start ────────────────────────────────────────────────────────────────────
 if (!ISOLATED_LAB_RUNTIME) migrateUserDirs();
+if (!ISOLATED_LAB_RUNTIME) {
+  const { migrateStandaloneGoals } = await import('./lib/general-goals.mjs');
+  for (const user of loadUsers()) {
+    try { await migrateStandaloneGoals(user.id); }
+    catch (error) { console.warn('[project-goals] Existing goals kept; conversion deferred for', user.id, error.message); }
+  }
+}
 buildCSS();
 computeUiBuildId(); // after buildCSS so styles.css is part of the hash
 loadRoleManifests({ runMigrations: !ISOLATED_LAB_RUNTIME });

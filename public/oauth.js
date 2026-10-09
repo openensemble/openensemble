@@ -1015,7 +1015,7 @@ const COMPAT_BUILTIN_META = {
   mistral:       { icon: 'wind',     placeholder: 'API key', blurb: 'API key for Mistral AI (Mistral Large, Codestral, etc.).' },
   groq:          { icon: 'bolt',     placeholder: 'gsk_…',   blurb: 'API key for Groq ultra-fast inference (Llama, Mixtral, Qwen).' },
   together:      { icon: 'users',    placeholder: 'API key', blurb: 'API key for Together AI — hundreds of open-weight models.' },
-  perplexity:    { icon: 'search',   placeholder: 'pplx-…',  blurb: 'API key for Perplexity Sonar models (search-grounded).' },
+  perplexity:    { icon: 'search',   placeholder: 'pplx-…',  blurb: 'API key for Perplexity Agent API models and existing Sonar agents.' },
   zai:           { icon: 'zap',      placeholder: 'API key', blurb: 'API key for Z.AI (GLM-5.1, GLM-5V-Turbo — OpenAI-compatible).' },
 };
 
@@ -1193,6 +1193,8 @@ async function saveCompatProviderKey(providerId, keyField) {
 }
 
 async function loadCompatProviderModels(providerId, refresh = false) {
+  window._compatProviderModels ??= {};
+  window._compatProviderModels[providerId] = [];
   const box = $(`providerModels_${providerId}`);
   if (box) box.textContent = 'Loading models…';
   try {
@@ -1200,6 +1202,12 @@ async function loadCompatProviderModels(providerId, refresh = false) {
       cache: 'no-store',
     });
     const models = await res.json().catch(() => null);
+    const providerError = res.headers?.get?.('X-OE-Provider-Message');
+    if (providerError) {
+      const status = $(`providerStatus_${providerId}`);
+      if (status) status.textContent = providerError;
+      throw new Error(providerError);
+    }
     if (!res.ok) throw new Error(models?.error || `Model refresh failed (${res.status})`);
     if (!Array.isArray(models) || models.length === 0) {
       if (box) box.textContent = 'No models returned. Check that the API key is valid.';
@@ -1226,10 +1234,13 @@ async function loadCompatProviderModels(providerId, refresh = false) {
     if (typeof checkEmptyState === 'function') checkEmptyState();
   } catch (e) {
     if (box) box.textContent = `Error: ${e.message}`;
+  } finally {
+    renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.();
   }
 }
 
 async function loadProviderConfig() {
+  if (typeof _currentUser !== 'undefined' && ['owner', 'admin'].includes(_currentUser?.role)) loadProviderUpdates();
   try {
     const cfg = await fetch('/api/provider-config').then(r => r.json());
     // Refresh the runtime compat provider list FIRST so renderCompatProviderCards
@@ -1240,7 +1251,7 @@ async function loadProviderConfig() {
     $('providerFireworksStatus').textContent  = cfg.fireworksKeySet  ? 'API key is set.' : 'No API key configured.';
     $('providerGrokStatus').textContent       = cfg.grokKeySet       ? 'API key is set (chat + image + video).' : 'No API key configured.';
 
-    $('providerOllamaKeyStatus').textContent  = cfg.ollamaKeySet     ? 'API key is set.' : '';
+    $('providerOllamaKeyStatus').textContent = cfg.ollamaConnection?.message || (cfg.ollamaKeySet ? 'API key is set.' : 'No API key configured.');
     $('providerLmstudioKeyStatus').textContent = cfg.lmstudioKeySet  ? 'API key is set.' : '';
     // Cloud Ollama URL is fixed server-side — no input to populate.
     $('providerLmstudioUrl').value = cfg.lmstudioUrl ?? '';
@@ -1482,6 +1493,30 @@ async function loadProviderConfig() {
   loadProviderHa().catch(() => {});
 }
 
+async function loadProviderUpdates(refresh = false) {
+  const box = document.getElementById('providerUpdatesStatus');
+  if (!box) return;
+  const button = document.getElementById('providerUpdatesRefresh');
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch('/api/provider-updates', { method: refresh ? 'POST' : 'GET' });
+    if (!response.ok) throw new Error('Update status is unavailable.');
+    const data = await response.json();
+    const sources = Object.entries(data.sources || {}).map(([name, source]) => {
+      const label = name === 'modelsdev' ? 'Models.dev' : 'LiteLLM';
+      const when = source.checkedAt ? new Date(source.checkedAt).toLocaleString() : 'not checked yet';
+      return `${label}: ${source.status === 'available' ? 'checked' : 'unavailable; previous data retained'} (${when})`;
+    });
+    const rows = (data.results || []).slice(0, 12).map(row => `${row.message}${row.model ? ` Model: ${row.model}.` : ''}`);
+    box.textContent = [...sources, ...rows, ...(!rows.length ? ['No provider compatibility changes have needed testing yet.'] : [])].join('\n');
+    box.style.whiteSpace = 'pre-line';
+  } catch {
+    box.textContent = 'Could not load provider update status. Your provider settings have not changed.';
+  } finally { if (button) button.disabled = false; }
+}
+
+async function refreshProviderUpdates() { return loadProviderUpdates(true); }
+
 async function toggleProvider(provider, enabled) {
   _enabledProviders[provider] = enabled;
   const card = $(`providerCard_${provider}`);
@@ -1627,14 +1662,20 @@ async function saveProvider(provider) {
   try {
     const r = await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body) });
-    if (!r.ok) { showToast(`Save failed (${r.status})`); return; }
+    if (!r.ok) {
+      const data = await r.json().catch(() => null);
+      const message = data?.error || `Save failed (${r.status})`;
+      if ($(sel.statusEl)) $(sel.statusEl).textContent = message;
+      showToast(message);
+      return;
+    }
     if (key) { $(sel.keyEl).value = ''; }
     showToast(`${sel.label} saved`);
     // Re-pull authoritative state so the URL field shows the persisted value,
     // status lines reflect whether a key is now set, and the welcome card
     // re-evaluates against the freshly-stored enabledProviders.
     await loadProviderConfig();
-    if (provider === 'lmstudio' || provider === 'ollama-local') {
+    if (['lmstudio', 'ollama-local', 'ollama'].includes(provider)) {
       await loadModels();
       renderModelBrowser?.();
       renderAgentModelRows?.();

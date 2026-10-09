@@ -20,6 +20,8 @@ import { beginMemoryScope } from '../lib/memory-scope-context.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
 import { currentTaskContext } from '../lib/task-proxy-context.mjs';
 import { requiresResponsesTransport } from '../lib/provider-model-protocol.mjs';
+import { modelCapabilityPrompt } from '../lib/model-capabilities.mjs';
+import { imageEditContext } from '../lib/image-edit-context.mjs';
 import { filterToolsForMcpPolicy, getMcpToolPolicy } from '../lib/mcp-tool-policy.mjs';
 import {
   classifyClearlySplittableWork,
@@ -61,6 +63,7 @@ import { streamAnthropic } from './providers/anthropic.mjs';
 import { streamLMStudio } from './providers/lmstudio.mjs';
 import { streamOpenRouter } from './providers/openrouter.mjs';
 import { streamOpenAICompat } from './providers/openai-compat.mjs';
+import { withProviderUpdateFeedback } from '../lib/provider-update-status.mjs';
 import { streamOpenAIResponses } from './providers/openai-responses.mjs';
 import { streamOllama } from './providers/ollama.mjs';
 import {
@@ -636,6 +639,23 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     });
   }
 
+  // The final execution pair consumes the same catalog metadata as Settings
+  // and target discovery. Do not reuse the primary's capabilities on a worker.
+  const { resolveExecutionModelMetadata } = await import('../lib/execution-model-policy.mjs');
+  const priorCapabilityGuidance = agent._modelCapabilityGuidance
+    ?? modelCapabilityPrompt(agent.provider, agent.model, agent._modelCapabilities);
+  agent._modelCapabilities = await resolveExecutionModelMetadata(userId, agent.provider, agent.model);
+  const capabilityGuidance = modelCapabilityPrompt(agent.provider, agent.model, agent._modelCapabilities);
+  const replaceGuidance = text => {
+    if (typeof text !== 'string') return text;
+    if (priorCapabilityGuidance && text.includes(priorCapabilityGuidance)) return text.replace(priorCapabilityGuidance, capabilityGuidance);
+    return capabilityGuidance && !text.includes(capabilityGuidance) ? `${text}\n\n${capabilityGuidance}` : text;
+  };
+  agent.systemPrompt = replaceGuidance(agent.systemPrompt);
+  agent._systemPromptShell = replaceGuidance(agent._systemPromptShell);
+  if (agent._promptTiers) agent._promptTiers = { ...agent._promptTiers, stable: replaceGuidance(agent._promptTiers.stable) };
+  agent._modelCapabilityGuidance = capabilityGuidance;
+
   // Provider-hosted image generation is an implementation swap, never an
   // ambient capability grant. The Responses adapter additionally requires the
   // current (possibly tool-plan constrained or request_tools-expanded) surface
@@ -791,7 +811,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   // tool-heavy specialists: with 103 tools ≈ 19k tool tokens,
   // 32k×0.55 − 19k = NEGATIVE, so the budget clamps to 1000 and everything
   // in history gets trimmed.).
-  const ctxWindow  = agent.contextSize ?? _modelContextWindow(agent.model) ?? 131072;
+  const ctxWindow  = agent.contextSize ?? agent._modelCapabilities?.limits?.contextWindow ?? _modelContextWindow(agent.model) ?? 131072;
   const toolsBytes = JSON.stringify(agent.tools ?? []).length;
   const toolTokens = Math.ceil(toolsBytes / 4);
   const TOKEN_BUDGET = Math.max(1000, Math.floor(ctxWindow * 0.55) - toolTokens);
@@ -831,11 +851,19 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   // Build the current user turn — include image data for every attachment
   // that carries inline base64 (images only; see /api/chat-upload, base64 is
   // populated exclusively for isImage uploads).
-  const currentUserTurn = buildCurrentUserTurn(agent, userText, attachments);
+  const hasImageTool = tools => (tools ?? []).some(tool => (tool.function?.name ?? tool.name) === 'generate_image');
+  const canRecoverImageTool = agent.tools?.some(tool => tool.function?.name === 'request_tools')
+    && hasImageTool(_routerStore?.fullTools);
+  const editContext = agent._providerHostedImageBackend && !attachments.some(a => a?.base64)
+    && (hasImageTool(agent.tools) || canRecoverImageTool)
+    ? imageEditContext(userId, userText, _histSrc) : null;
+  const currentUserTurn = buildCurrentUserTurn(agent,
+    editContext ? `${userText}\n\n[${editContext.note}]` : userText,
+    editContext?.attachment ? [...attachments, editContext.attachment] : attachments);
 
   const working = [...trimmed, currentUserTurn];
 
-  const buildProviderGen = (agentObj, prompt, messages) => {
+  const buildRawProviderGen = (agentObj, prompt, messages) => {
     const compatProviderKey = agentObj.provider === 'grok' ? 'xai' : agentObj.provider;
     if (agentObj.provider === 'anthropic') {
       return { providerGen: streamAnthropic(agentObj, prompt, messages, signal, userId), withSignalWordsGate: true };
@@ -850,12 +878,14 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     // web_search stay on the /chat/completions (openai-compat) path below.
     const grokNativeSearch = (agentObj.provider === 'grok' || agentObj.provider === 'xai')
       && agentObj.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
+    const grokNativeImage = (agentObj.provider === 'grok' || agentObj.provider === 'xai')
+      && agentObj._providerHostedImageBackend === true;
     const responsesOnlyModel = requiresResponsesTransport(agentObj.provider, agentObj.model);
     // SuperGrok OAuth always uses the Responses adapter (CLI chat proxy).
     // API-key Grok also switches for native web search and for models such as
     // Grok 4.20 Multi-Agent that do not implement Chat Completions.
     if (agentObj.provider === 'openai-oauth' || agentObj.provider === 'xai-oauth'
-        || grokNativeSearch || responsesOnlyModel) {
+        || grokNativeSearch || grokNativeImage || responsesOnlyModel) {
       return { providerGen: streamOpenAIResponses(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
     if (OPENAI_COMPAT_PROVIDERS[compatProviderKey]) {
@@ -876,6 +906,13 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     // Preserve the legacy default for old durable agents that predate provider
     // validation. Newly explicit execution targets are locked and fail above.
     return { providerGen: streamOllama(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
+  };
+
+  const buildProviderGen = (agentObj, prompt, messages) => {
+    const result = buildRawProviderGen(agentObj, prompt, messages);
+    return { ...result, providerGen: withProviderUpdateFeedback(result.providerGen, {
+      userId, provider: agentObj.provider, model: agentObj.model,
+    }) };
   };
 
   const recomposeSystemPromptForCurrentTools = () => {
@@ -998,7 +1035,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     }
 
     // ── Image generation ───────────────────────────────────────────────────
-    const model  = agent.model ?? 'grok-imagine-image';
+    const model  = agent.model ?? 'grok-imagine-image-2.0';
     const prompt = userText || 'A beautiful image';
 
     const r = await fetch('https://api.x.ai/v1/images/generations', {
@@ -1077,7 +1114,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
         signal,
         body: JSON.stringify({ prompt, num_inference_steps: 30, guidance_scale: 7, width: 1024, height: 1024 }),
       });
-      if (!r.ok) { yield { type: 'error', message: `Fireworks error ${r.status}: ${await r.text()}` }; return; }
+      if (!r.ok) { yield { type: 'error', message: `Fireworks error ${r.status}: ${[404, 410].includes(r.status) ? 'Image generation is deprecated and this model is unavailable. Choose another image provider in Settings.' : await r.text()}` }; return; }
       mimeType = r.headers.get('content-type') ?? 'image/jpeg';
       const buf = await r.arrayBuffer();
       base64 = Buffer.from(buf).toString('base64');
@@ -1090,7 +1127,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
         signal,
         body: JSON.stringify({ prompt, aspect_ratio: agent.aspectRatio ?? '1:1' }),
       });
-      if (!r.ok) { yield { type: 'error', message: `Fireworks error ${r.status}: ${await r.text()}` }; return; }
+      if (!r.ok) { yield { type: 'error', message: `Fireworks error ${r.status}: ${[404, 410].includes(r.status) ? 'Image generation is deprecated and this model is unavailable. Choose another image provider in Settings.' : await r.text()}` }; return; }
       const data = await r.json();
       base64 = Array.isArray(data.base64) ? data.base64[0] : data.base64;
       if (!base64) { yield { type: 'error', message: 'Fireworks returned no image data.' }; return; }
@@ -1105,7 +1142,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
         signal,
         body: JSON.stringify(body),
       });
-      if (!r.ok) { yield { type: 'error', message: `Fireworks error ${r.status}: ${await r.text()}` }; return; }
+      if (!r.ok) { yield { type: 'error', message: `Fireworks error ${r.status}: ${[404, 410].includes(r.status) ? 'Image generation is deprecated and this model is unavailable. Choose another image provider in Settings.' : await r.text()}` }; return; }
       const { request_id } = await r.json();
       if (!request_id) { yield { type: 'error', message: 'Fireworks did not return a request ID.' }; return; }
 

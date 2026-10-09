@@ -580,6 +580,10 @@ export async function tryVoiceFollowupGate({ source, deviceId, userId, userText,
  * @returns {Promise<{ handled: true } | null>}
  */
 export async function tryApprovalIntercept({ userText, userId, agentId, onEvent }) {
+  const {
+    getPendingSkillActivation, clearPendingSkillActivation,
+    executePendingSkillActivation, isSkillActivationAllowed, SKILL_ACTIVATION_PHRASE,
+  } = await import('../lib/skill-activation.mjs');
   // Every get/execute/clear below is scoped to (userId, agentId): an approval
   // phrase only matches an op staged from THIS agent's chat, and the
   // clear-on-any-miss rule only cancels THIS agent's staged ops. Typing
@@ -599,11 +603,10 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
   // first let a reload land between the two and show an executed destructive
   // op with no record of it.
   const m = String(userText ?? '').trim().match(/^(.+?)\s*#([A-Za-z0-9_-]+)$/);
-  const phrase = (m ? m[1] : String(userText ?? '').trim()).toUpperCase();
+  let phrase = (m ? m[1] : String(userText ?? '').trim()).toUpperCase();
   const opId = m ? m[2] : null;
 
-  /** @param {string} text @returns {Promise<{handled: true}>} */
-  const finish = async (text) => {
+  const finish = async (text, followupPrompt = null) => {
     try {
       await appendToSession(`${userId}_${agentId}`,
         { role: 'user', content: userText, ts: Date.now() },
@@ -618,12 +621,18 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
       });
       return { handled: /** @type {true} */ (true) };
     }
-    onEvent({ type: 'token', text, agent: agentId });
-    onEvent({ type: 'done', agent: agentId });
-    return { handled: /** @type {true} */ (true) };
+    onEvent({ type: 'token', text: followupPrompt ? `${text}\n\n` : text, agent: agentId });
+    if (!followupPrompt) onEvent({ type: 'done', agent: agentId });
+    return { handled: /** @type {true} */ (true), ...(followupPrompt ? { followupPrompt, skillActivationContinue: true } : {}) };
   };
 
   const FAMILIES = [
+    {
+      phrase: SKILL_ACTIVATION_PHRASE, skillId: 'coordinator',
+      toolName: () => 'request_tools',
+      get: getPendingSkillActivation, clear: clearPendingSkillActivation, run: executePendingSkillActivation,
+      authorize: isSkillActivationAllowed,
+    },
     // "APPROVE WATCHER OP": staged cross-agent watcher cancel/update the
     // coordinator deferred when a specialist asked it to touch a watcher
     // owned by a different agent — see canActOnWatcher in skills/tasks.
@@ -656,6 +665,20 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
     },
   ];
 
+  // A plain yes is enough for the single skill question just asked. When
+  // another approval is also pending, require the explicit button/phrase.
+  const activation = getPendingSkillActivation(userId, agentId);
+  if (!opId && activation) {
+    if (/^(?:NO(?: THANKS| THANK YOU)?|CANCEL|DON'T ENABLE IT|DO NOT ENABLE IT)[.!]?$/i.test(phrase)) {
+      clearPendingSkillActivation(userId, agentId, activation.opId);
+      return finish(`Left ${activation.names.join(', ')} disabled. The waiting task was not resumed.`);
+    }
+    if (/^(?:YES(?:,? PLEASE)?|YES,? ENABLE (?:IT|THEM)(?: AND (?:CONTINUE|PROCEED))?|ENABLE (?:IT|THEM)(?: AND (?:CONTINUE|PROCEED))?|GO AHEAD)[.!]?$/i.test(phrase)
+        && !FAMILIES.slice(1).some(f => f.get(userId, agentId))) {
+      phrase = SKILL_ACTIVATION_PHRASE;
+    }
+  }
+
   // Approval-card Cancel buttons use a targeted phrase rather than the old
   // generic "cancel" message. Match the exact staged operation id so a stale
   // card cannot cancel a newer operation of the same family. Bare phrases and
@@ -686,7 +709,9 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
       // skill/tool was revoked after staging, compare-and-clear this exact op
       // and refuse it. Never clear a concurrently staged replacement.
       const toolName = matched.toolName(pending);
-      const authorized = await isPendingApprovalAuthorized(userId, matched.skillId, toolName);
+      const authorized = matched.authorize
+        ? await matched.authorize(userId, pending)
+        : await isPendingApprovalAuthorized(userId, matched.skillId, toolName);
       if (!authorized) {
         const cleared = matched.clear(userId, agentId, pending.opId ?? opId);
         return finish(cleared
@@ -697,9 +722,9 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
       // The expected id is validated and consumed in ONE store transaction.
       // The pre-read above exists only for a clearer stale-card message; it is
       // not relied on for safety.
-      const result = /** @type {string | { text?: string }} */ (await matched.run(userId, agentId, opId));
+      const result = /** @type {string | { text?: string, followupPrompt?: string }} */ (await matched.run(userId, agentId, pending.opId ?? opId));
       const text = typeof result === 'string' ? result : (result?.text ?? String(result));
-      return finish(text);
+      return finish(text, typeof result === 'object' ? result.followupPrompt : null);
     }
     // Typed phrase with nothing staged of that kind: fall through to the LLM
     // (and the miss-clear below), same as any other message.

@@ -1,11 +1,13 @@
-import { requireAuth, readBody, isUserTimeBlocked } from './_helpers.mjs';
+import { requireAuth, readBody, isUserTimeBlocked, getAgentsForUser } from './_helpers.mjs';
 import { getConfig } from '../lib/personalization/config.mjs';
 import { getProjectSpace } from '../lib/project-spaces.mjs';
 import { isProjectId } from '../lib/project-context.mjs';
-import { readWorkState, createWorkGoal, updateWorkGoal, deleteWorkGoal, getWorkItem, WorkError } from '../lib/personalization/work-store.mjs';
+import { readWorkState, createWorkGoal, updateWorkGoal, deleteWorkGoal, getWorkGoal, getWorkItem, WorkError } from '../lib/personalization/work-store.mjs';
+import { updateProjectGoal, removeProjectGoal } from '../lib/project-goals.mjs';
 import { discoverWork, prepareWorkItem, feedbackWorkItem, applyWorkProjectSuggestion } from '../lib/personalization/work-engine.mjs';
 import { signalWorkEvent } from '../lib/personalization/work-events.mjs';
 import { prunePreparedWorkEvents } from '../lib/personalization/proactive-inbox.mjs';
+import { migrateStandaloneGoals } from '../lib/general-goals.mjs';
 
 const reply = (res, status, value) => {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -26,12 +28,15 @@ export async function handle(req, res) {
       const projectId = url.searchParams.get('projectId');
       if (projectId && !isProjectId(projectId)) throw new WorkError(400, 'Invalid project');
       if (projectId) getProjectSpace(userId, projectId);
+      let goalConversion;
+      try { goalConversion = await migrateStandaloneGoals(userId); }
+      catch { goalConversion = { error: 'Your existing goals are kept here. Conversion could not finish; reopen this view to retry.' }; }
       const state = readWorkState(userId);
       const config = await getConfig(userId);
       const matches = row => !projectId || row.projectId === projectId;
       const goals = state.goals.filter(matches);
       const items = state.items.filter(matches).map(publicItem).reverse();
-      reply(res, 200, { goals, items, workMode: config.workMode, enabled: config.enabled && config.setupComplete && config.model !== 'off',
+      reply(res, 200, { goals, items, goalConversion, workMode: config.workMode, enabled: config.enabled && config.setupComplete && config.model !== 'off',
         metrics: { prepared: items.filter(item => item.preparedAt).length, used: items.filter(item => item.feedback === 'acted').length,
           useful: items.filter(item => item.feedback === 'useful').length, dismissed: items.filter(item => ['dismissed', 'not_useful'].includes(item.feedback)).length,
           completedGoals: goals.filter(goal => goal.status === 'completed').length } });
@@ -40,12 +45,19 @@ export async function handle(req, res) {
       signalWorkEvent(userId, { kind: 'goal', goalId: goal.id });
       reply(res, 201, goal);
     } else if (kind === 'goals' && id && !action && req.method === 'PATCH') {
-      const goal = await updateWorkGoal(userId, id, JSON.parse(await readBody(req)));
+      const body = JSON.parse(await readBody(req));
+      const current = getWorkGoal(userId, id);
+      const goal = current.projectId
+        ? await updateProjectGoal(userId, current.projectId, id, body, getAgentsForUser(userId))
+        : await updateWorkGoal(userId, id, body);
       signalWorkEvent(userId, { kind: 'goal', goalId: id });
       reply(res, 200, goal);
     } else if (kind === 'goals' && id && !action && req.method === 'DELETE') {
       const body = JSON.parse(await readBody(req));
-      const result = await deleteWorkGoal(userId, id, body.revision);
+      const current = getWorkGoal(userId, id);
+      const result = current.projectId
+        ? await removeProjectGoal(userId, current.projectId, { goalId: id, revision: body?.revision }, getAgentsForUser(userId))
+        : await deleteWorkGoal(userId, id, body?.revision);
       await prunePreparedWorkEvents(userId);
       reply(res, 200, result);
     } else if (kind === 'goals' && id && action === 'prepare' && req.method === 'POST') {

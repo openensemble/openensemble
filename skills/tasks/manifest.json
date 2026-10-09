@@ -308,6 +308,11 @@
               "type": "string",
               "description": "The explicit ongoing outcome the user wants help managing."
             },
+            "prompt": {
+              "type": "string",
+              "maxLength": 12000,
+              "description": "The user's full instructions for the goal, including constraints and requested agents."
+            },
             "nextStep": {
               "type": "string",
               "description": "The next agreed step, based on current evidence."
@@ -438,6 +443,11 @@
             "title": {
               "type": "string",
               "description": "The explicit ongoing outcome the user wants help managing."
+            },
+            "prompt": {
+              "type": "string",
+              "maxLength": 12000,
+              "description": "Change the saved instructions only when the user revises the goal; omit when recording progress."
             },
             "nextStep": {
               "type": "string",

@@ -41,7 +41,7 @@ function routedEntries(tools, userId) {
 }
 
 function providerNativeEntries(agent, trim, userId) {
-  if (!supportsImageGeneration(agent?.provider, agent?.model)) return [];
+  if (!supportsImageGeneration(agent?.provider, agent?.model, agent?._modelCapabilities)) return [];
   const routedSkills = trim?.skillsKept instanceof Set
     ? trim.skillsKept
     : (trim?.initiallyIncludedSkills instanceof Set ? trim.initiallyIncludedSkills : new Set());

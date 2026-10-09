@@ -246,6 +246,13 @@
               "type": "object",
               "description": "OPTIONAL. Provide ONLY if the user wants a drawer UI for this skill, opened from an app icon inside Skills. Omit entirely otherwise — most skills should not include a drawer.",
               "properties": {
+                "nativeUI": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "Optional native iOS screens. Version 1 declarative JSON only: {version:1,screens:[{id,title,request:{path,query?},presentation:\"list\"|\"record\",collection?,titleField?,subtitleField?,fields?:string[],create?:action,actions?:action[]}]}. An action is {title,method:\"POST\"|\"PUT\"|\"PATCH\"|\"DELETE\",request:{path,query?},body?:object,fields?:[{key,label,type:\"text\"|\"multiline\"|\"secret\"|\"number\"|\"toggle\"|\"choice\"|\"multiChoice\",required?,choices?:[{value,label}],initial?,help?}],destructive?,confirmation?}. Paths must stay within this skill’s generated /api/usr_<skill-id>/ namespace. In action paths, {field} substitutes one encoded row value; body/query values may use {\"$row\":\"field.path\"}. No JavaScript, HTML, headers, external URLs, or arbitrary core API access. Read skills/NATIVE_DRAWERS.md for the full contract. Omission preserves existing nativeUI; explicit null removes it."
+                },
                 "name": {
                   "type": "string",
                   "description": "Label shown below the app icon in Skills and in the drawer header (e.g. 'Home Assistant')"
@@ -752,6 +759,13 @@
               "type": "object",
               "description": "Complete replacement drawer definition.",
               "properties": {
+                "nativeUI": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "Optional native iOS screens. Version 1 declarative JSON only: {version:1,screens:[{id,title,request:{path,query?},presentation:\"list\"|\"record\",collection?,titleField?,subtitleField?,fields?:string[],create?:action,actions?:action[]}]}. An action is {title,method:\"POST\"|\"PUT\"|\"PATCH\"|\"DELETE\",request:{path,query?},body?:object,fields?:[{key,label,type:\"text\"|\"multiline\"|\"secret\"|\"number\"|\"toggle\"|\"choice\"|\"multiChoice\",required?,choices?:[{value,label}],initial?,help?}],destructive?,confirmation?}. Paths must stay within this skill’s generated /api/usr_<skill-id>/ namespace. In action paths, {field} substitutes one encoded row value; body/query values may use {\"$row\":\"field.path\"}. No JavaScript, HTML, headers, external URLs, or arbitrary core API access. Read skills/NATIVE_DRAWERS.md for the full contract. Omission preserves existing nativeUI; explicit null removes it."
+                },
                 "name": {
                   "type": "string",
                   "description": "Label shown below the app icon in Skills and in the drawer header."

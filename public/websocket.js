@@ -1399,9 +1399,12 @@ function handleServerMessage(msg) {
       }
       agents = msg.agents;
       const requestedProjectAgent = new URLSearchParams(location.search).get('agent');
-      if (typeof activeProjectSpaceId === 'string' && activeProjectSpaceId && requestedProjectAgent && agents.some(a => a.id === requestedProjectAgent)) {
+      if (requestedProjectAgent && agents.some(a => a.id === requestedProjectAgent)) {
         activeAgent = requestedProjectAgent;
         const cleanUrl = new URL(location.href); cleanUrl.searchParams.delete('agent'); history.replaceState(null, '', cleanUrl);
+        if (!(activeAgent in sessions)) sessions[activeAgent] = [];
+        requestAgentSession(activeAgent);
+        renderSession();
       }
       if (agents.length > 0 && !agents.find(a => a.id === activeAgent)) {
         activeAgent = agents[0].id;

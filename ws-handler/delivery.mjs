@@ -9,6 +9,7 @@ import { getOrchestrationPolicy, getRequestedOrchestrationPolicy } from '../lib/
 import { getMainWss } from './main-wss.mjs';
 import { log } from '../logger.mjs';
 import { fleetSpeechActiveElsewhere, isVoicePolicyEnabled } from '../lib/voice-policy.mjs';
+import { notifyMobileEvent } from '../lib/mobile-push.mjs';
 
 // Monotonic per-user/per-agent watermark for live chat/session events. A
 // session load captures this value BEFORE its async disk read; if the browser
@@ -84,8 +85,9 @@ export function broadcastToUsers(userIds, msg) {
 
 /** Send a message to every tab the given user has open. Returns delivery count. */
 export function sendToUser(userId, msg) {
-  if (!getMainWss()) return 0;
   const stamped = typeof msg === 'string' ? msg : stampChatEvent(userId, msg);
+  notifyMobileEvent(userId, stamped);
+  if (!getMainWss()) return 0;
   const data = typeof stamped === 'string' ? stamped : JSON.stringify(stamped);
   let delivered = 0;
   for (const client of getMainWss().clients) {

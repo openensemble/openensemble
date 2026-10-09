@@ -89,6 +89,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
         // Workstream children keep native search too — they're the heaviest
         // searchers, and Brave bills per call (see openai-responses.mjs).
         disabled: finalRound || nativeSearchDisabled,
+        metadata: agent._modelCapabilities,
       });
     const orFnTools = !finalRound && functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
@@ -115,6 +116,9 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     if (!finalRound && orTools) body.tools = orTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, 'openrouter', agent);
+    // Model catalogs describe the union of their hosting endpoints. Require
+    // a route that can honor the tools/reasoning actually sent this turn.
+    if (body.tools?.length || body.reasoning) body.provider = { require_parameters: true };
 
     yield modelCallTraceEvent({
       provider: 'openrouter', model: agent.model, tools: body.tools, round: guard.count,

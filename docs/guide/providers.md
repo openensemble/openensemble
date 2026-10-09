@@ -29,10 +29,32 @@ Choose a chat provider for your assistant. The bundled Cortex models handle inte
 | **Mistral** | Open-weight family, EU host | API key |
 | **Groq** | Very fast inference of open models | API key |
 | **Together** | Hosted open-weight models | API key |
-| **Perplexity** | Web-grounded chat | API key |
-| **Fireworks** | Image generation (Flux), open models | API key — one of several providers that can power `image_generator` |
+| **Perplexity** | Web-grounded chat | API key; live Agent API catalog, with existing Sonar agents kept on the Sonar endpoint |
+| **Fireworks** | Legacy image assignments | Image generation is deprecated by Fireworks. OE lists only image models still returned by its API; choose another image provider if yours is unavailable. |
 | **OpenRouter** | One key, many models | Single key; pick from hundreds of models |
 | **Z.ai** | GLM family | API key |
+
+## Provider compatibility and connection errors
+
+Ollama Cloud checks a new key before saving it. A rejected key leaves the previous setting intact and displays the reason in **Settings → Providers → Ollama (cloud)**. Cloud model discovery requires successful authentication; Ollama's public model list alone does not mean a key works. Local Ollama keeps its own connection and credentials. Cloud tags retained by a local daemon are hidden when the model's metadata endpoint explicitly reports that it is missing or retired.
+
+Provider model lists refresh from the provider, including Grok's separate image and video catalogs. Refreshing clears models that are no longer returned. The Image Generator supports an explicitly configured Grok Imagine Image 2.0 assignment; OE does not silently replace your selected model with a different paid model.
+
+Model catalogs retain advertised input/output modalities, tools, features, limits, and explicit capability restrictions. Settings and chat share the same readers and account-scoped metadata. Claude's nested hosted-tool, thinking, effort, and context-management declarations are retained. OpenRouter's supported parameters and per-model reasoning options are retained, with hosting-endpoint details fetched when a model is used. Tool and reasoning requests require an OpenRouter endpoint that supports the requested parameters.
+
+Gemini discovery uses Google's native Models API for generation methods, thinking support, and token limits. Missing Gemini and OpenAI capabilities are supplemented from the exact model's official documentation, cached for six hours. Features marked as available only in AI Studio are not advertised as Gemini API capabilities. Ollama's model-details endpoint supplies capabilities missing from its model list. LM Studio preserves native tool, vision, reasoning, and loaded-context information; a model's maximum context remains separate from its running configuration. Mistral and other compatible catalogs retain explicit capability flags and supported parameters when provided.
+
+A missing field stays unknown; an explicit provider restriction takes precedence. Metadata keeps its source and fetch time, and failed refreshes preserve the last available metadata. Model support, access through your connection, and an implemented OE tool are separate requirements: discovering a capability does not enable a provider or skill, or add a new execution adapter. Providers that publish incomplete metadata may still need adapter support.
+
+With **Image Generator** enabled, a supported ChatGPT-login model can generate and edit images through its hosted image tool when no separate usable image backend is assigned. Follow-up edits load the original saved image from the current conversation. Refresh the provider's model list after a model rollout to pick up new capability information.
+
+OE checks the public Models.dev and LiteLLM provider registries every six hours. These feeds propose compatible API addresses and parameter mappings; the provider's own catalog remains authoritative for available models. Feed entries do not change your chosen model, enable providers or skills, or grant new capabilities. Check **Settings → Providers → Provider updates** to see feed availability and the latest test results, or choose **Check update feeds** to refresh the sources.
+
+When you use a compatible chat provider, OE tests a supported proposal with a small separate request before sending your work with that change. The test contains no conversation content or tools, checks the response format and completion, and may consume a small amount of your provider allowance. OE saves the change after the real request also returns a complete response. Failed or interrupted tests keep the previous settings and report the issue in chat and the provider update panel. Repeated failed proposals are held for six hours to avoid repeated test charges. Provider-reported changes are distinguished from possible changes found in a community feed; credential, billing and network failures are described separately.
+
+Supported adjustments include `max_completion_tokens` replacing `max_tokens`, omitting unsupported streaming usage reports, and compatible endpoint paths on the existing provider host. Successful adjustments are remembered for that endpoint, model, and credential for seven days, including across restarts. The cache contains no keys or prompts. Changes to the provider host, authentication or unknown transformations need an adapter update; OE reports them instead of applying them automatically. SuperGrok tests its explicitly required client version before saving it or retrying your work. ChatGPT catalog versions are saved only after a valid model-list response.
+
+These mechanisms update catalogs and known compatibility settings without an OE release. Coverage depends on what the feeds and provider responses expose; a feed cannot repair every provider API. Native protocols, incompatible request formats, and retired services may still require an adapter change. Invalid API keys, missing subscription access, and billing problems are reported for you to resolve.
 
 ## Local providers
 
@@ -123,6 +145,23 @@ Notes:
 - SuperGrok OAuth and the console **API key** are separate paths. Keep the API-key card for pay-as-you-go; use SuperGrok login to spend subscription quota.
 - xAI decides which subscription tiers can use the OAuth API surface. If login succeeds but chat returns 403/402, fall back to a console API key or check your plan at [x.ai/grok](https://x.ai/grok).
 - Non-admin users need an admin to grant **OAuth logins** for their account (same grant list as ChatGPT login).
+
+If xAI rejects a request because OE's Grok client version is outdated, OE saves
+the minimum version reported by xAI and retries the rejected request once.
+Later requests, including model discovery, use that version. This updates the
+connection handshake; it does not install software, change your selected model,
+or replay a request that already started. An administrator's explicit
+`OE_GROK_CLI_VERSION` setting takes precedence. Other API changes still require
+an OE update.
+
+Grok 4.7 can use hosted image generation when **Image Generator** is enabled
+for your account and no separate image backend is configured. A request such
+as "Have Grok create a cat sitting in a tree" or "Use Grok to generate an image" starts one
+temporary worker using an available Grok connection. It does not need a new
+saved agent or a change to your primary assistant's provider.
+Direct requests to other named providers or models use the same routing. The
+worker stays on the requested provider or model; unavailable targets report an
+error instead of switching providers.
 
 ## Choosing what to enable first
 

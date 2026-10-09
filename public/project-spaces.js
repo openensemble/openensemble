@@ -8,6 +8,7 @@ let projectSpaceTab = 'overview';
 let projectSpaceLoad = 0;
 let projectSpaceSaving = false;
 let projectSpaceDeleting = null;
+const newProjectDrafts = new Map();
 const deletedProjectSpaceIds = new Set();
 
 function projectDraftKey(id) {
@@ -42,36 +43,52 @@ async function refreshProjectSpaceBanner() {
   } catch (error) { showProjectUnavailable(error.message); }
 }
 async function openProjectSpaces(id = activeProjectSpaceId) {
+  if (projectSpaceSaving) return;
   if (typeof id !== 'string') id = activeProjectSpaceId;
+  const generation = ++projectSpaceLoad;
+  const profileKey = projectDraftKey('new');
   const dialog = $('projectSpacesDialog');
   if (!dialog.open) dialog.showModal();
   projectMessage('Loading projects…');
   try {
-    projectSpaces = (await projectApi()).filter(space => !deletedProjectSpaceIds.has(space.id));
+    const spaces = await projectApi();
+    if (profileKey !== projectDraftKey('new')) return;
+    if (generation !== projectSpaceLoad) {
+      // A click on Add Project wins over the default selection, but keep the list.
+      if (!selectedProjectSpace && !projectSpaceSaving) {
+        projectSpaces = spaces.filter(space => !deletedProjectSpaceIds.has(space.id));
+        renderProjectSpaceList();
+      }
+      return;
+    }
+    projectSpaces = spaces.filter(space => !deletedProjectSpaceIds.has(space.id));
     renderProjectSpaceList();
+    projectMessage('');
     if (id || projectSpaces.length) await selectProjectSpace(id || projectSpaces[0].id);
     else newProjectSpace();
-    projectMessage('');
-  } catch (error) { projectMessage(error.message, true); }
+  } catch (error) { if (generation === projectSpaceLoad) projectMessage(error.message, true); }
 }
 function closeProjectSpaces() { rememberProjectDraft(); $('projectSpacesDialog').close(); }
 function projectArgs(value) { return escHtml(JSON.stringify([value])); }
 function renderProjectSpaceList() {
   $('projectSpaceList').innerHTML = projectSpaces.map(space => `
     <button class="project-space-entry ${space.id === selectedProjectSpace?.id ? 'selected' : ''}" data-action="selectProjectSpace" data-args='${projectArgs(space.id)}'>
-      <strong>${escHtml(space.name)}</strong><span>${space.archived ? 'Archived' : `${space.tasks.filter(t => !t.done).length} open ${space.tasks.filter(t => !t.done).length === 1 ? 'task' : 'tasks'}`}${space.id === activeProjectSpaceId ? ' · Current' : ''}</span>
+      <strong>${escHtml(space.name)}</strong><span>${space.archived ? 'Archived' : escHtml(projectGoalSummary(space))}${space.id === activeProjectSpaceId ? ' · Current' : ''}</span>
     </button>`).join('') || '<p class="project-empty">Your projects will appear here.</p>';
 }
 function rememberProjectDraft() {
-  if (!projectSpaceDraft || !selectedProjectSpace) return;
-  try { sessionStorage.setItem(projectDraftKey(selectedProjectSpace.id), JSON.stringify(projectSpaceDraft)); } catch {}
+  if (!projectSpaceDraft) return;
+  if (!selectedProjectSpace) newProjectDrafts.set(projectDraftKey('new'), projectSpaceDraft);
+  try { sessionStorage.setItem(projectDraftKey(selectedProjectSpace?.id || 'new'), JSON.stringify(projectSpaceDraft)); } catch {}
 }
 async function selectProjectSpace(id) {
+  if (projectSpaceSaving) return;
   rememberProjectDraft();
   const generation = ++projectSpaceLoad;
+  const profileKey = projectDraftKey('new');
   try {
     const space = await projectApi(`/${encodeURIComponent(id)}`);
-    if (generation !== projectSpaceLoad || deletedProjectSpaceIds.has(id)) return;
+    if (generation !== projectSpaceLoad || profileKey !== projectDraftKey('new') || deletedProjectSpaceIds.has(id)) return;
     selectedProjectSpace = space;
     projectSpaceDraft = { name: space.name, brief: space.brief, decisions: space.decisions, nextSteps: space.nextSteps, tasks: structuredClone(space.tasks), revision: space.revision };
     try {
@@ -81,12 +98,17 @@ async function selectProjectSpace(id) {
     projectSpaceTab = 'overview';
     renderProjectSpaceList(); renderProjectSpaceDetail();
     projectMessage(projectSpaceDraft.dirty ? 'Restored your unsaved draft.' : '');
-  } catch (error) { projectMessage(error.message, true); }
+  } catch (error) { if (generation === projectSpaceLoad && profileKey === projectDraftKey('new')) projectMessage(error.message, true); }
 }
 function newProjectSpace() {
+  if (projectSpaceSaving) return;
   rememberProjectDraft(); ++projectSpaceLoad;
   selectedProjectSpace = null;
-  projectSpaceDraft = { name: '', brief: '', decisions: '', nextSteps: '', tasks: [] };
+  projectSpaceDraft = newProjectDrafts.get(projectDraftKey('new')) || { name: '', brief: '', decisions: '', nextSteps: '', tasks: [] };
+  try {
+    const draft = JSON.parse(sessionStorage.getItem(projectDraftKey('new')) || 'null');
+    if (draft && typeof draft.name === 'string' && Array.isArray(draft.tasks)) projectSpaceDraft = draft;
+  } catch {}
   projectSpaceTab = 'overview';
   renderProjectSpaceList(); renderProjectSpaceDetail(); projectMessage('');
   $('projectFieldName')?.focus();
@@ -104,10 +126,10 @@ function projectField(field, label, placeholder, limit, single = false) {
 function renderProjectSpaceDetail() {
   const space = selectedProjectSpace;
   $('projectSpaceDetail').innerHTML = `
-    <div class="project-detail-heading"><div><h2>${space ? escHtml(space.name) : 'New project'}</h2><p>Keep your conversations and shared context together.</p></div>
+    <div class="project-detail-heading"><div><h2>${space ? escHtml(space.name) : 'New Project'}</h2><p>${space ? 'Your goals, files, work, and results in one place.' : 'Name your project, define what it should accomplish, and add the files your agent will need.'}</p></div>
     ${space ? `<button class="project-primary" data-action="enterProjectSpace" data-args='${projectArgs(space.id)}'>Open chat</button>` : ''}</div>
-    ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['chats', 'Chats & activity'], ['saved', 'Saved results'], ['outputs', 'Outputs'], ['progress', 'Progress'], ['files', 'Files']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
-    ${space ? `<button class="project-primary" data-action="openProactiveWork" data-args='${projectArgs(space.id)}'>Goals and prepared work</button>` : ''}
+    ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['files', 'Files'], ['outputs', 'Outputs'], ['chats', 'Chats & activity'], ['context', 'Context & tasks'], ['saved', 'Saved results'], ['progress', 'Checkpoints']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
+    ${space?.origin === 'general-goals-v1' ? '<p class="project-help">Goals from general chat are collected here with their saved progress and reference files. General chat can still access them; their earlier conversations remain in general chat. Prepared drafts remain available in the Projects drawer.</p>' : ''}
     <div id="projectSpaceTabBody"></div>`;
   renderProjectSpaceTab();
   $('projectSpaceDetail').scrollTop = 0;
@@ -118,6 +140,7 @@ function setProjectSpaceTab(tab) {
 function renderProjectSpaceTab() {
   const body = $('projectSpaceTabBody');
   const space = selectedProjectSpace;
+  if (projectSpaceTab === 'overview' && space) { renderProjectGoalOverview(); return; }
   if (projectSpaceTab === 'saved' && space) { renderProjectSavedResults(); return; }
   if (projectSpaceTab === 'outputs' && space) { loadProjectOutputs(); return; }
   if (projectSpaceTab === 'progress' && space) {
@@ -125,9 +148,8 @@ function renderProjectSpaceTab() {
     return;
   }
   if (projectSpaceTab === 'files' && space) {
-    body.innerHTML = `<p class="project-help">Files stay in your profile and are available to every agent working in this space. Removing a link keeps the original file.</p>
-      <label class="project-upload">Add files<input type="file" multiple data-change-action="uploadProjectFiles" data-change-args='["$files"]'></label>
-      <div class="project-file-list">${space.files.map(file => `<div class="project-file"><a href="/api/project-spaces/${space.id}/file?id=${encodeURIComponent(file.fileId)}">${escHtml(file.name)}</a><button data-action="removeProjectFile" data-args='${projectArgs(file.fileId)}' aria-label="Remove ${escHtml(file.name)} from project">Remove link</button></div>`).join('') || '<p class="project-empty">Add reference documents, images, or other project files.</p>'}</div>`;
+    body.innerHTML = '<div id="projectFilesSection"></div>';
+    renderProjectFiles();
     return;
   }
   if (projectSpaceTab === 'chats' && space) {
@@ -135,15 +157,19 @@ function renderProjectSpaceTab() {
     loadProjectActivity();
     return;
   }
-  body.innerHTML = `${projectField('name', 'Project name', 'Voice firmware', 100, true)}
-    ${projectField('brief', 'Shared brief', 'What are we building? Include the goal, important constraints, and useful background.', 12000)}
+  body.innerHTML = `${projectField('name', 'Project name', 'Document review', 100, true)}
+    ${!space ? initialProjectGoalFields() : ''}
+    ${!space ? '<div id="projectFilesSection"></div><details><summary>Additional context and tasks (optional)</summary>' : ''}
+    ${projectField('brief', 'Shared context', 'Add constraints and useful background for agents working toward this goal.', 12000)}
     ${projectField('decisions', 'Decisions', 'Record choices the agents should keep following.', 12000)}
     ${projectField('nextSteps', 'Current state and next steps', 'Where did we leave off? What should happen next?', 12000)}
     <section class="project-checklist"><h3>Tasks</h3><p class="project-help">Assign work, track prerequisites, and record results. Assignments do not start an agent automatically. Use the same workspace and file paths to spot overlapping work.</p><div id="projectTaskWarnings" role="status"></div><div id="projectChecklist"></div><div class="project-task-input"><input id="projectNewTask" maxlength="1000" placeholder="Add a task" aria-label="New project task"><button data-action="addProjectTask">Add</button></div></section>
-    <div class="project-save-row"><button id="projectSave" class="project-primary" data-action="saveProjectSpace">${space ? 'Save changes' : 'Create project'}</button>
+    ${!space ? '</details>' : ''}
+    <div class="project-save-row"><button id="projectSave" class="project-primary" data-action="saveProjectSpace">${space ? 'Save changes' : 'Create Project'}</button>
     ${space ? `<button data-action="reloadProjectDraft">Reload saved version</button><button data-action="archiveProjectSpace">${space.archived ? 'Unarchive' : 'Archive'}</button>` : ''}</div>
     ${space ? '<div class="project-delete-row"><button id="projectDelete" class="project-danger" data-action="deleteSelectedProjectSpace">Delete project</button><p class="project-help">Permanently remove this project and its conversations. Files in your profile are kept.</p></div>' : ''}`;
   renderProjectChecklist();
+  if (!space) renderProjectFiles();
 }
 async function loadProjectProgress(offset = 0) {
   if (!Number.isInteger(offset)) offset = 0;
@@ -188,6 +214,7 @@ function removeProjectTask(id) {
   projectSpaceDraft.dirty = true; rememberProjectDraft(); renderProjectChecklist();
 }
 async function saveProjectSpace() {
+  if (!selectedProjectSpace) return createProjectGoalSpace();
   if (projectSpaceSaving) return false;
   projectSpaceSaving = true;
   const before = selectedProjectSpace?.id;
@@ -237,6 +264,8 @@ function forgetProjectSpaceDrafts(id) {
   if (!userId) return;
   try {
     sessionStorage.removeItem(projectDraftKey(id));
+    projectFileQueues.delete(projectFileKey(id));
+    sessionStorage.removeItem(`oe.projectGoalDraft.${userId}:${id}`);
     const composer = `oe.composerDrafts.v1.${id}.${userId}`;
     const attachments = `oe.chatAttachmentDraft.v1:${userId}:${id}`;
     const outbox = ['oe.chatOutbox.v2:', 'oe.chatOutboxDone.v2:'].map(prefix => `${prefix}${encodeURIComponent(userId)}@${id}`);
@@ -254,6 +283,7 @@ function handleProjectSpaceDeleted(id) {
   projectSpaces = projectSpaces.filter(space => space.id !== id);
   if (projectActivityData?.projectId === id) projectActivityData = null;
   projectAttentionItems = projectAttentionItems.filter(item => item.projectId !== id);
+  renderProjectAttentionIndicators();
   if ($('projectAttentionDialog')?.open) renderProjectAttention();
   pollProjectAttention();
   if (selectedProjectSpace?.id === id) {
@@ -284,37 +314,6 @@ function enterProjectAgent(id, agent) {
   if (typeof preserveChatDraft === 'function' && !preserveChatDraft()) return;
   const url = new URL(location.href); url.searchParams.delete('chat'); url.searchParams.set('project', id); url.searchParams.set('agent', agent);
   location.assign(url.pathname + url.search);
-}
-async function uploadProjectFiles(files) {
-  const id = selectedProjectSpace?.id;
-  if (!id) return;
-  try {
-    for (const file of Array.from(files || [])) {
-      if (selectedProjectSpace?.id !== id) return;
-      projectMessage(`Uploading ${file.name}…`);
-      const priorRevision = selectedProjectSpace.revision;
-      const data = new FormData(); data.append('file', file);
-      const response = await fetch('/api/chat-upload', { method: 'POST', body: data });
-      const uploaded = await response.json();
-      if (!response.ok) throw new Error(uploaded.error || 'Upload failed');
-      const space = await projectApi(`/${id}/files`, projectJson('POST', { revision: priorRevision, fileId: uploaded.file_id, name: file.name }));
-      if (selectedProjectSpace?.id !== id) return;
-      if (projectSpaceDraft.revision === priorRevision) projectSpaceDraft.revision = space.revision;
-      selectedProjectSpace = space; rememberProjectDraft();
-    }
-    renderProjectSpaceTab(); projectMessage('Files added to the project.');
-  } catch (error) { projectMessage(error.message, true); }
-}
-async function removeProjectFile(fileId) {
-  try {
-    const id = selectedProjectSpace.id;
-    const priorRevision = selectedProjectSpace.revision;
-    const space = await projectApi(`/${id}/files`, projectJson('DELETE', { revision: selectedProjectSpace.revision, fileId }));
-    if (selectedProjectSpace?.id !== id) return;
-    if (projectSpaceDraft.revision === priorRevision) projectSpaceDraft.revision = space.revision;
-    selectedProjectSpace = space; rememberProjectDraft(); renderProjectSpaceTab();
-    projectMessage('File link removed. The original file is still in your profile.');
-  } catch (error) { projectMessage(error.message, true); }
 }
 document.addEventListener('DOMContentLoaded', () => {
   $('projectSpacesDialog').addEventListener('cancel', rememberProjectDraft);

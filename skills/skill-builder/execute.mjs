@@ -1,3 +1,4 @@
+import { validateNativeDrawerUI } from '../../lib/native-drawer-ui.mjs';
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync,
   unlinkSync, renameSync,
@@ -272,6 +273,8 @@ function drawerDomIdFor(pluginId) { return 'drawer_' + safeDomSuffix(pluginId); 
 function drawerBtnIdFor(pluginId) { return 'sbtn_'   + safeDomSuffix(pluginId); }
 
 const DRAWER_HTML_MAX_BYTES = 512 * 1024;
+// Optional declarative mobile screens share the drawer's ownership/namespace.
+
 const DRAWER_INIT_MAX_BYTES = 512 * 1024;
 const DRAWER_SERVER_MAX_BYTES = 1024 * 1024;
 
@@ -329,6 +332,7 @@ function normalizeDrawerSpec(drawer, { skillName, skillIcon }) {
       html,
       initJs,
       serverCode,
+      ...(drawer.nativeUI !== undefined ? { nativeUI: drawer.nativeUI } : {}),
       description: `Drawer for skill ${skillName}`,
     },
   };
@@ -510,8 +514,13 @@ async function persistDrawerBundle({
       skillId,
       html: spec.html,
       initJs: spec.initJs,
+      ...((spec.nativeUI !== undefined ? spec.nativeUI : prior?.manifest?.nativeUI) != null
+        ? { nativeUI: spec.nativeUI !== undefined ? spec.nativeUI : prior.manifest.nativeUI }
+        : {}),
     };
     manifest.apiPrefixes = deriveDrawerApiPrefixes(manifest);
+    const nativeError = validateNativeDrawerUI(manifest.nativeUI, manifest.apiPrefixes);
+    if (nativeError) return nativeError;
 
     const nonce = `${process.pid}-${randomBytes(5).toString('hex')}`;
     const stageDir = path.join(PLUGINS_DIR, `.${pluginId}.stage-${nonce}`);
@@ -1937,6 +1946,7 @@ async function handleReadDrawer(args, userId) {
       ...(m.icon ? { icon: m.icon } : {}),
       html: m.html || '',
       initJs: m.initJs || '',
+      ...(m.nativeUI ? { nativeUI: m.nativeUI } : {}),
       serverCode: bundle.serverCode || '',
     },
   }, null, 2);

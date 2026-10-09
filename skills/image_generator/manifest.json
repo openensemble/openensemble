@@ -1,16 +1,21 @@
 {
   "id": "image_generator",
   "name": "Image Generator",
-  "description": "Generates or edits images using the server-configured Fireworks or Grok image provider.",
+  "description": "Generates or edits images with the current model's hosted image tool or the configured image provider.",
   "icon": "🎨",
   "category": "image",
   "service": true,
   "enabled_by_default": false,
   "intent_patterns": [
+    "\\b(?:edit|modify|expand|extend|outpaint|recolor|retouch|resize)\\s+(?:(?:this|that|the|my|previous|attached|same)\\s+){0,3}(?:image|picture|photo|portrait|illustration)\\b",
+    "\\b(?:image|picture|photo|portrait)\\b.{0,80}\\b(?:full.body|head.to.toe|change|edit|expand)\\b",
     "^(?:generate|make|create|draw|render)(?:\\s+me)?\\s+(?:an?\\s+)?(?:image|picture|photo|painting|drawing|illustration|render)\\b",
     "^(?:generate|make|create|render)\\s+(?:me\\s+)?an?\\s+(?:image|picture|photo|painting|illustration)\\s+of\\b"
   ],
   "intent_examples": [
+    "edit this image and change the background",
+    "take the cat girl photo and make it full body",
+    "expand the previous picture to show the whole character",
     "generate an image of a sunset",
     "create a picture of a cat on a windowsill",
     "draw me a landscape with mountains",
@@ -22,7 +27,7 @@
     "make a fantasy character portrait",
     "generate a black and white photo of a coffee shop"
   ],
-  "systemPromptAddition": "When the user asks for an image, call generate_image immediately — do not ask clarifying questions unless the request is completely unclear. Put the full visual description in the prompt argument. Omit quality to use the configured tier; request quality='quality' only when the user explicitly asks and the account has an approved quality model. To edit an attached profile image, pass its exact images: attachment ID as input_image_id; editing requires the configured model to be Flux Kontext. Never pass a path, URL, or base64 data. Provider and model selection are enforced server-side. After the image appears you may offer one brief suggestion, nothing more.",
+  "systemPromptAddition": "When the user asks to create or edit an image, use the available image tool immediately — do not ask clarifying questions unless the request is completely unclear. If the provider-hosted image_generation tool is available, use it directly; for edits, use the original image supplied in conversation context and preserve its identity. Hosted editing does not require a separate Flux or Grok assignment. If the available tool is the local generate_image function, put the full visual description in prompt, omit quality to use the configured tier, and request quality='quality' only when explicitly requested and approved. That local function accepts an exact images: attachment ID as input_image_id and requires a configured Flux Kontext model for edits; never pass a path, URL, or base64 data to it. Provider and model selection are enforced server-side. If the original image is missing, ask for it instead of pretending a new image is an edit. After the image appears you may offer one brief suggestion, nothing more.",
   "tools": [
     {
       "type": "function",

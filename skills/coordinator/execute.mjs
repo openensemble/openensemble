@@ -40,11 +40,23 @@ export default async function* execute(name, args, userId, agentId) {
   if (name === 'request_tools') {
     const { getToolRouterContext } = await import('../../lib/tool-router-context.mjs');
     const { expandToolsByReason } = await import('../../lib/tool-router.mjs');
+    const { findDisabledSkillRequirements, requestSkillActivation } = await import('../../lib/skill-activation.mjs');
     const {
       describeParallelWorkLaneRequirement,
       isParallelWorkGateLocked,
     } = await import('../../lib/parallel-work-gate.mjs');
     const ctx = getToolRouterContext();
+    const reason = typeof args?.reason === 'string' ? args.reason : null;
+    const groups = Array.isArray(args?.groups) ? args.groups : null;
+    const disabled = await findDisabledSkillRequirements({ userId, agentId, reason, groups });
+    if (disabled.length) {
+      const activation = await requestSkillActivation({
+        userId, agentId, skillIds: disabled, task: ctx?.routeText,
+        background: ctx?.agent?.ephemeral === true,
+      });
+      yield { type: 'result', text: activation.text };
+      return;
+    }
     if (!ctx) {
       // No per-turn routing context — nothing was trimmed, so there's nothing
       // to recover. The full toolset is already available this turn.
@@ -62,8 +74,6 @@ export default async function* execute(name, args, userId, agentId) {
       };
       return;
     }
-    const reason = typeof args?.reason === 'string' ? args.reason : null;
-    const groups = Array.isArray(args?.groups) ? args.groups : null;
     if (!reason && !groups) {
       yield { type: 'result', text: 'Pass either a `reason` (free text) or `groups` (array of skill IDs).' };
       return;
@@ -180,11 +190,11 @@ export default async function* execute(name, args, userId, agentId) {
   }
 
   if (name === 'list_roles') {
-    const { listRoles, getRoleAssignments } = await import('../../roles.mjs');
+    const { listRoles, getRoleAssignments, isSkillRuntimeEnabledForUser } = await import('../../roles.mjs');
     const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
     const assignments = getRoleAssignments(userId);
     const allAgents = getAgentsForUser(userId);
-    const all = listRoles(userId);
+    const all = listRoles(userId, { includeDisabled: true });
     const roles = all.filter(s => s.service);
     const customSkills = all.filter(s =>
       !s.service && s.category !== 'delegate' && !s.hidden && s.userScope === userId
@@ -208,6 +218,12 @@ export default async function* execute(name, args, userId, agentId) {
       for (const s of customSkills) {
         lines.push(`• ${s.icon ?? ''} ${s.name} (id: ${s.id}) — ${fmtOwner(s.id)}${s.description ? ` (${s.description})` : ''}`);
       }
+    }
+    const disabledSkills = all.filter(s => !s.hidden && !isSkillRuntimeEnabledForUser(s.id, userId, agentId));
+    if (disabledSkills.length) {
+      lines.push('', '## Disabled skills (ask before enabling)');
+      for (const s of disabledSkills) lines.push(`• ${s.name} (id: ${s.id}) — not enabled`);
+      lines.push('If needed for the user\'s task, call request_tools with the skill ID to ask whether to enable it and continue.');
     }
     yield { type: 'result', text: lines.length ? lines.join('\n') : 'No roles or custom skills defined yet.' };
     return;

@@ -123,8 +123,8 @@
   <!-- Left sidebar strip -->
   <div class="sidebar-strip" id="sidebarStrip">
     <div class="sidebar-feature-scroll" id="sidebarFeatureScroll">
-      <button class="strip-btn" id="sbtnProjects" data-action="openProjectSpaces" title="Project spaces"><i data-lucide="folder-open"></i><span class="strip-tooltip">Project spaces</span></button>
-      <button class="strip-btn" id="sbtnWork" data-action="openProactiveWork" title="Goals and prepared work"><i data-lucide="list-checks"></i><span class="strip-tooltip">Goals and prepared work</span></button>
+      <button class="strip-btn" id="sbtnProjects" data-action="openProjectSpaces" title="Projects and goals" aria-label="Projects and goals"><i data-lucide="folder-open"></i><span class="strip-tooltip">Projects and goals</span><span class="strip-badge" id="projectsBadge" style="display:none" aria-hidden="true"></span></button>
+      <button class="strip-btn" id="sbtnWork" data-action="openProactiveWork" title="Projects"><i data-lucide="list-checks"></i><span class="strip-tooltip">Projects</span></button>
       <button class="strip-btn" id="sbtnAgents" data-action="toggleDrawer" data-args="[&quot;drawerAgents&quot;, &quot;sbtnAgents&quot;]" title="Agents">
         <i data-lucide="bot"></i>
         <span class="strip-tooltip">Agents</span>
@@ -931,6 +931,13 @@
         <div class="stab-panel" id="stab-panel-providers" style="overflow-y:auto;max-height:calc(100dvh - 200px);padding-right:4px">
           <div style="font-size:11px;color:var(--muted);margin-bottom:14px">Configure LLM provider endpoints and API keys. Toggle providers on/off to control which models agents can use.</div>
 
+          <div class="provider-card" style="margin-bottom:16px">
+            <div class="settings-section-title">Provider updates</div>
+            <div class="settings-section-desc">OE checks for updates every six hours. Supported changes are tested when you use the provider, then saved after a successful response. Failed tests keep your previous settings. Test requests may use a small amount of your provider allowance.</div>
+            <button class="btn-secondary" id="providerUpdatesRefresh" data-action="refreshProviderUpdates">Check update feeds</button>
+            <div id="providerUpdatesStatus" role="status" aria-live="polite" style="font-size:12px;margin-top:8px">Loading update status…</div>
+          </div>
+
           <div class="provider-card" style="margin-bottom:16px" id="providerCard_anthropic">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <div class="settings-section-title" style="margin:0"><i data-lucide="key" style="width:14px;height:14px"></i> Anthropic</div>
@@ -954,7 +961,7 @@
               <label class="provider-toggle"><input type="checkbox" id="providerToggle_fireworks" checked data-change-action="toggleProvider" data-change-args="[&quot;fireworks&quot;, &quot;$checked&quot;]"><span class="provider-toggle-slider"></span></label>
             </div>
             <div id="providerBody_fireworks">
-              <div class="settings-section-desc" style="margin-bottom:8px">API key for image generation (Flux models).</div>
+              <div class="settings-section-desc" style="margin-bottom:8px">Fireworks has deprecated image generation. Only image models still returned by its API are listed. Choose another image provider if your model is unavailable.</div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <input type="password" id="providerFireworksKey" placeholder="fw_…" autocomplete="new-password"
                   style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
@@ -971,7 +978,7 @@
               <label class="provider-toggle"><input type="checkbox" id="providerToggle_ollama" checked data-change-action="toggleProvider" data-change-args="[&quot;ollama&quot;, &quot;$checked&quot;]"><span class="provider-toggle-slider"></span></label>
             </div>
             <div id="providerBody_ollama">
-              <div class="settings-section-desc" style="margin-bottom:8px">Ollama Cloud / Turbo — endpoint is fixed at <code>https://ollama.com/api</code>. Requires an API key.</div>
+              <div class="settings-section-desc" style="margin-bottom:8px">Use your Ollama Cloud account with an <a href="https://ollama.com/settings/keys" target="_blank" rel="noopener">API key</a>. OE checks the key before saving it.</div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <input type="password" id="providerOllamaKey" placeholder="API key" autocomplete="new-password"
                   style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
@@ -1943,18 +1950,20 @@
   <div id="savedChatsMessage" role="status" aria-live="polite"></div>
 </dialog>
 <dialog id="projectSpacesDialog" class="project-spaces-dialog" aria-labelledby="projectSpacesTitle">
-  <header class="project-spaces-header"><h2 id="projectSpacesTitle">Project spaces</h2><button data-action="enterProjectSpace" data-args="[null]">General chat</button><button data-action="closeProjectSpaces" aria-label="Close project spaces">✕</button></header>
-  <div class="project-spaces-layout"><aside class="project-spaces-nav"><button class="project-primary" data-action="newProjectSpace">+ New project</button><nav id="projectSpaceList" aria-label="Your projects"></nav></aside><main id="projectSpaceDetail" class="project-space-detail"></main></div>
+  <header class="project-spaces-header"><h2 id="projectSpacesTitle">Projects and goals</h2><button data-action="enterProjectSpace" data-args="[null]">General chat</button><button data-action="closeProjectSpaces" aria-label="Close projects">✕</button></header>
+  <div class="project-spaces-layout"><aside class="project-spaces-nav"><button class="project-primary" data-action="newProjectSpace">Add Project</button><button id="projectUpdatesButton" data-action="showProjectAttention" hidden>Updates</button><nav id="projectSpaceList" aria-label="Your projects"></nav></aside><main id="projectSpaceDetail" class="project-space-detail"></main></div>
   <div id="projectSpaceMessage" class="project-space-message" role="status" aria-live="polite"></div>
 </dialog>
 <script src="/event-delegation.js"></script>
 <script src="/core.js"></script>
 <dialog id="proactiveWorkDialog" class="proactive-work-dialog" aria-labelledby="proactiveWorkTitle">
-  <header><div><h2 id="proactiveWorkTitle">Goals and prepared work</h2><small id="proactiveWorkScope"></small></div><button data-action="closeProactiveWork" aria-label="Close goals and prepared work">✕</button></header>
+  <header><div><h2 id="proactiveWorkTitle">Projects</h2><small id="proactiveWorkScope"></small></div><button data-action="closeProactiveWork" aria-label="Close Projects">✕</button></header>
   <div id="proactiveWorkBody"></div><div id="proactiveWorkMessage" role="status" aria-live="polite"></div>
 </dialog>
 <script src="/proactive-work.js"></script>
 <script src="/project-spaces.js"></script>
+<script src="/project-files.js"></script>
+<script src="/project-goals.js"></script>
 <script src="/project-work.js"></script>
 <script src="/saved-chats.js"></script>
 <script src="/tutor.js"></script>

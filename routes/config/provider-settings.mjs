@@ -21,8 +21,11 @@ import {
   probeFfmpegAvailable,
   invalidateVoiceDepsCache,
 } from '../../lib/voice-deps.mjs';
-import { OPENAI_COMPAT_PROVIDERS } from '../../chat/providers/_shared.mjs';
+import { OPENAI_COMPAT_PROVIDERS, getCompatKey, getGrokKey, getAnthropicKey, getFireworksKey, getOpenRouterKey } from '../../chat/providers/_shared.mjs';
 import { log } from '../../logger.mjs';
+import { checkOllamaCloudKey, resolveOllamaKey } from '../../lib/ollama-cloud.mjs';
+import { refreshProviderFeeds, providerFeedStatus } from '../../lib/provider-update-feeds.mjs';
+import { listProviderUpdateResults, providerUpdateMessage } from '../../lib/provider-update-status.mjs';
 
 const COMPAT_PROVIDERS = OPENAI_COMPAT_PROVIDERS;
 const OLLAMA_DEFAULT = 'https://ollama.com/api';
@@ -41,6 +44,16 @@ export function bindProviderSettingsDeps(deps) {
 
 export async function tryHandleProviderSettings(req, res) {
 
+  if (req.url === '/api/provider-updates' && ['GET', 'POST'].includes(req.method)) {
+    const authId = requirePrivileged(req, res);
+    if (!authId) return true;
+    if (req.method === 'POST') await refreshProviderFeeds({ force: true });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ sources: providerFeedStatus(), results: listProviderUpdateResults(authId)
+      .map(row => ({ ...row, message: providerUpdateMessage(row) })) }));
+    return true;
+  }
+
   // Provider config: GET is readable by any authed user (so non-admin clients
   // can see which providers are enabled and populate the agent model picker);
   // POST stays admin-only since it writes API keys and toggle state.
@@ -53,8 +66,8 @@ export async function tryHandleProviderSettings(req, res) {
       const cfg = loadConfig();
       // Dynamic OpenAI-compat provider key flags (openaiKeySet, deepseekKeySet, …)
       const compatFlags = {};
-      for (const [prov, { keyField }] of Object.entries(COMPAT_PROVIDERS)) {
-        compatFlags[`${prov}KeySet`] = !!cfg[keyField];
+      for (const prov of Object.keys(COMPAT_PROVIDERS)) {
+        compatFlags[`${prov}KeySet`] = !!getCompatKey(prov);
       }
       // Self-describing compat provider list. The UI uses this to render the
       // Providers panel + the agent model-picker optgroups so that providers
@@ -67,7 +80,7 @@ export async function tryHandleProviderSettings(req, res) {
         displayName: p.displayName || id,
         baseUrl: p.baseUrl,
         keyField: p.keyField,
-        keySet: !!cfg[p.keyField],
+        keySet: !!getCompatKey(id),
         enabled: cfg.enabledProviders?.[id] !== false,
         source: userProviderIds.has(id) ? 'user' : 'static',
       }));
@@ -82,15 +95,20 @@ export async function tryHandleProviderSettings(req, res) {
         probeFasterWhisperAvailable(cfg),
         probeFfmpegAvailable(),
       ]);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const ollamaKey = resolveOllamaKey(cfg);
+      const ollamaConnection = cfg.enabledProviders?.ollama === false
+        ? { ok: false, code: 'disabled', message: 'Ollama Cloud is disabled.' }
+        : await checkOllamaCloudKey(ollamaKey);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
-        anthropicKeySet:   !!cfg.anthropicApiKey,
-        fireworksKeySet:   !!cfg.fireworksApiKey,
-        grokKeySet:        !!cfg.grokApiKey,
+        anthropicKeySet:   !!getAnthropicKey(),
+        fireworksKeySet:   !!getFireworksKey(),
+        grokKeySet:        !!getGrokKey(),
 
-        ollamaKeySet:      !!cfg.cortex?.ollamaApiKey,
+        ollamaKeySet:      !!ollamaKey,
+        ollamaConnection,
         lmstudioKeySet:    !!cfg.cortex?.lmstudioApiKey,
-        openrouterKeySet:  !!cfg.openrouterApiKey,
+        openrouterKeySet:  !!getOpenRouterKey(),
         ollamaUrl:    OLLAMA_DEFAULT,
         lmstudioUrl:  cfg.cortex?.lmstudioUrl  ?? LMS_DEFAULT,
         // Secondary, local-only Ollama endpoint. Users with Ollama Cloud for
@@ -171,6 +189,20 @@ export async function tryHandleProviderSettings(req, res) {
         }
         if (body.ollamaLocalUrl !== undefined) {
           body.ollamaLocalUrl = validateProviderUrl('ollamaLocalUrl', body.ollamaLocalUrl);
+        }
+        if (body.ollamaApiKey !== undefined && body.ollamaApiKey !== '') {
+          if (typeof body.ollamaApiKey !== 'string' || !body.ollamaApiKey.trim()) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Enter an Ollama Cloud API key.' }));
+            return true;
+          }
+          body.ollamaApiKey = body.ollamaApiKey.trim();
+          const connection = await checkOllamaCloudKey(body.ollamaApiKey, { refresh: true });
+          if (!connection.ok) {
+            res.writeHead(connection.code === 'authentication_failed' ? 422 : 502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `${connection.message} The new key was not saved.`, code: connection.code }));
+            return true;
+          }
         }
         // Brave Search API key — validate against Brave before saving so a
         // mistyped or wrong-vendor key fails loudly instead of silently

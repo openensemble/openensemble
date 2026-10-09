@@ -19,6 +19,14 @@ gmail-credentials.json
 /config/oe-admin-snapshots/
 /config/.pending-change.json
 
+# --- Generated provider metadata and compatibility state ---
+/config/openai-model-metadata.json
+/config/provider-model-documents.json
+/config/provider-update-feeds.json
+/config/provider-update-results.json
+/config/provider-compat.json
+/config/xai-client-compat.json
+
 # --- Per-user data (anchored to repo root) ---
 /users/
 /sessions/

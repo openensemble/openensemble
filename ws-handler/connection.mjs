@@ -1,6 +1,7 @@
 import { projectContext, projectSessionKey, projectIdFromSession, chatIdFromSession, matchesProject } from '../lib/project-context.mjs';
 import { getProjectSpace } from '../lib/project-spaces.mjs';
 import { getSavedChat } from '../lib/saved-chats.mjs';
+import { projectMessagesForClient } from '../lib/project-message-key.mjs';
 /**
  * Main browser/voice WebSocket connection handler.
  * Extracted from ws-handler.mjs — pure move.
@@ -22,6 +23,8 @@ import {
 } from '../routes/_helpers.mjs';
 import { getVoiceRef } from '../lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from '../lib/voice-tts-stream.mjs';
+import { startMobileVoiceStream, stopMobileVoiceStream } from '../lib/mobile-voice-stream.mjs';
+import { notifyMobileEvent } from '../lib/mobile-push.mjs';
 import { beginTurn, noteTurn, endTurn } from '../lib/voice-turn-journal.mjs';
 import { analyzePcm16 } from '../lib/voice-capture.mjs';
 import { recordScheduledAlarmReceipt, reconcileScheduledDeviceAlarms } from '../lib/scheduled-device-alarms.mjs';
@@ -321,7 +324,7 @@ export function onConnection(ws, req) {
       const sessionEpoch = getSessionEpoch(key);
       return {
         agent,
-        messages,
+        messages: projectMessagesForClient(messages, ws._projectId),
         completedTasks: completedTasksForSession(ws._userId, key, sessionEpoch),
         pendingStream: getStreamBuffer(key),
         sessionEpoch,
@@ -893,7 +896,13 @@ export function onConnection(ws, req) {
       return;
     }
 
+    if (msg.type === 'voice_stop') {
+      stopMobileVoiceStream(ws, msg.attempt_id);
+      return;
+    }
+
     if (msg.type === 'stop') {
+      stopMobileVoiceStream(ws, msg.turn_id);
       // Barge-in / mute: halt any in-flight server-side TTS push immediately so
       // the device stops getting audio frames, then abort the LLM turn.
       if (ws._deviceId) {
@@ -1032,7 +1041,8 @@ export function onConnection(ws, req) {
         const requestId = typeof msg.request_id === 'string' && msg.request_id.length <= 80
           ? msg.request_id : null;
         ws.send(JSON.stringify({
-          type: 'session_loaded', projectId: ws._projectId, chatId: ws._chatId, agent: agentId, messages, pendingStream,
+          type: 'session_loaded', projectId: ws._projectId, chatId: ws._chatId, agent: agentId,
+          messages: projectMessagesForClient(messages, ws._projectId), pendingStream,
           completedTasks: completedTasksForSession(ws._userId, key, sessionEpoch),
           activeStream: activeStream ? {
             ...activeStream,
@@ -1297,6 +1307,7 @@ export function onConnection(ws, req) {
       // on-device sentence accumulation / per-sentence pull / drain race. Old
       // firmware omits msg.tts_stream and keeps the legacy `token` path.
       let ttsStreamer = null;
+      const mobileVoice = startMobileVoiceStream(ws, msg, loadConfig(), log);
       // Once-per-turn guard for the spoken delegation ack (see onEvent).
       let voiceDelegationAckSpoken = false;
       // A device plays exactly one reply at a time. If a previous turn's
@@ -1382,6 +1393,7 @@ export function onConnection(ws, req) {
           message: 'The uploaded file is no longer available, so this message was not executed. Please attach it again.',
         });
         log.warn('chat', 'attachment replay rehydrate failed', { userId: effectiveUserId, err: e?.message || String(e) });
+        mobileVoice?.abort();
         return;
       }
 
@@ -1451,6 +1463,8 @@ export function onConnection(ws, req) {
           // snapshots capture the pre-read revision, so clients can prove that
           // an older response must not erase this already-rendered event.
           e = stampChatEvent(effectiveUserId, e);
+          notifyMobileEvent(effectiveUserId, e);
+          mobileVoice?.onEvent(e);
           // Voice-device fan-out: the firmware only TTS's `token` events
           // (oe_ws.c emits OE_WS_EVT_CHAT_TOKEN → speak). Plain `error`
           // events arrive but are silently dropped. Keep voice errors short
@@ -1554,6 +1568,11 @@ export function onConnection(ws, req) {
         },
       });
       if (silentAckTimer) clearTimeout(silentAckTimer);
+      if (mobileVoice && !mobileVoice.textFinished && ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: 'error', attempt_id: browserAttemptId, message_id: browserMessageId,
+          agent: msg.agent || 'system', code: 'stopped', message: 'This voice turn ended before the reply completed.' }));
+      }
+      if (mobileVoice && !mobileVoice.finished) mobileVoice.abort();
       // Release this turn's abort-key claim now that it's over, so a later
       // socket close can't abort a NEWER turn started under the same
       // user+agent key after this one finished (the reason the claim was
@@ -1634,9 +1653,11 @@ export function onConnection(ws, req) {
           if (!streamer) ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
         }
       } else {
+        stopMobileVoiceStream(ws, msg?.attempt_id);
         ws.send(JSON.stringify({
           type: 'error',
           message: 'Server error processing message',
+          ...(typeof msg?.attempt_id === 'string' ? { attempt_id: msg.attempt_id, message_id: msg.message_id } : {}),
           projectId: ws._projectId, chatId: ws._chatId,
           agent: typeof msg?.agent === 'string' ? msg.agent : 'system',
           ...(messageDocumentRequest ? { documentRequest: messageDocumentRequest, documentTurn: true } : {}),
@@ -1650,6 +1671,7 @@ export function onConnection(ws, req) {
   ws.on('message', onWsMessage);
 
   ws.on('close', (code, reason) => {
+    ws._mobileVoice?.abort();
     if (ws._voiceConfigPushTimer) {
       clearTimeout(ws._voiceConfigPushTimer);
       ws._voiceConfigPushTimer = null;

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { requireAuth, readBody, isUserTimeBlocked, getAgentsForUser } from './_helpers.mjs';
-import { createProjectSpace, listProjectSpaces, getProjectSpace, updateProjectSpace, changeProjectFile, projectFilePath, ProjectError, saveProjectItem, removeProjectItem } from '../lib/project-spaces.mjs';
+import { createProjectSpace, getProjectSpace, updateProjectSpace, changeProjectFile, projectFilePath, ProjectError, saveProjectItem, removeProjectItem } from '../lib/project-spaces.mjs';
 import { projectContext } from '../lib/project-context.mjs';
 import { saveProjectCheckpoint } from '../sessions.mjs';
 import { listProjectProgress, readProjectCheckpoint } from '../lib/project-progress.mjs';
@@ -8,6 +8,8 @@ import { checkProjectConversation, readProjectMessage, listProjectConversations,
 import { markProjectRead } from '../lib/project-feed.mjs';
 import { getSavedChat } from '../lib/saved-chats.mjs';
 import { deleteProjectSpace } from '../lib/project-spaces.mjs';
+import { listProjectsWithGoals, listProjectGoals, startProjectGoal, pauseProjectGoal, completeProjectGoal, removeProjectGoal } from '../lib/project-goals.mjs';
+import { migrateStandaloneGoals } from '../lib/general-goals.mjs';
 
 const reply = (res, status, value) => {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -25,11 +27,22 @@ export async function handle(req, res) {
     const agents = getAgentsForUser(userId);
     if (parts.length > 2) throw new ProjectError(404, 'Not found');
     if (id === 'attention' && !action && req.method === 'GET') reply(res, 200, projectAttention(userId, agents));
-    else if (!id && req.method === 'GET') reply(res, 200, listProjectSpaces(userId));
+    else if (!id && req.method === 'GET') {
+      // Keep existing projects accessible even if damaged legacy data needs
+      // repair; Prepared work reports the conversion problem with the old goals.
+      try { await migrateStandaloneGoals(userId); }
+      catch (error) { console.warn('[project-goals] General goal conversion deferred:', error.message); }
+      reply(res, 200, listProjectsWithGoals(userId));
+    }
     else if (!id && req.method === 'POST') reply(res, 201, await createProjectSpace(userId, JSON.parse(await readBody(req))));
     else if (id) {
       const space = getProjectSpace(userId, id);
       if (!action && req.method === 'GET') reply(res, 200, space);
+      else if (action === 'goals' && req.method === 'GET') reply(res, 200, await listProjectGoals(userId, id, agents));
+      else if (action === 'start-work' && req.method === 'POST') reply(res, 202, await startProjectGoal(userId, id, JSON.parse(await readBody(req)), agents));
+      else if (action === 'pause-work' && req.method === 'POST') reply(res, 200, await pauseProjectGoal(userId, id, JSON.parse(await readBody(req))));
+      else if (action === 'complete-goal' && req.method === 'POST') reply(res, 200, await completeProjectGoal(userId, id, JSON.parse(await readBody(req)), agents));
+      else if (action === 'goals' && req.method === 'DELETE') reply(res, 200, await removeProjectGoal(userId, id, JSON.parse(await readBody(req)), agents));
       else if (!action && req.method === 'DELETE') reply(res, 200, await deleteProjectSpace(userId, id, JSON.parse(await readBody(req))));
       else if (!action && req.method === 'PATCH') {
         const input = JSON.parse(await readBody(req));

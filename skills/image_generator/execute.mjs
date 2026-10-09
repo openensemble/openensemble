@@ -27,7 +27,9 @@ const FIREWORKS_MODELS = new Set([
   'SSD-1B',
   'japanese-stable-diffusion-xl',
 ]);
-const GROK_MODELS = new Set(['grok-imagine-image', 'grok-imagine-image-quality']);
+// Model selection still requires an exact server-owned assignment or allowlist.
+// Accept new versions of the same image family without shipping a new slug list.
+const isGrokImageModel = model => typeof model === 'string' && /^grok-imagine-image(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?$/i.test(model);
 const ASPECT_RATIOS = new Set(['1:1', '21:9', '16:9', '3:2', '5:4', '4:5', '2:3', '9:16', '9:21', '4:3', '3:4']);
 const MODEL_TIERS = new Map([
   ['flux-1-schnell-fp8', 'fast'],
@@ -41,7 +43,11 @@ const MODEL_TIERS = new Map([
   ['japanese-stable-diffusion-xl', 'quality'],
   ['grok-imagine-image', 'fast'],
   ['grok-imagine-image-quality', 'quality'],
+  ['grok-imagine-image-2.0', 'quality'],
 ]);
+function imageModelTier(model) {
+  return MODEL_TIERS.get(model) ?? (isGrokImageModel(model) ? 'quality' : null);
+}
 const PUBLIC_ARGS = new Set(['prompt', 'quality', 'aspect_ratio', 'input_image_id']);
 
 const REQUEST_TIMEOUT_MS = 120_000;
@@ -147,7 +153,7 @@ async function* generateImage(args, userId, ctx) {
   }
 
   const base64 = image.bytes.toString('base64');
-  const selectedQuality = MODEL_TIERS.get(plan.model) ?? 'configured';
+  const selectedQuality = imageModelTier(plan.model) ?? 'configured';
   yield { type: 'image', base64, mimeType: image.mimeType, prompt, filename, savedPath };
   yield {
     type: 'result',
@@ -210,7 +216,7 @@ function selectBackend(userId, requestedQuality = null) {
   const primaryProvider = configuredProvider && configuredProvider === configuredModelProvider
     ? configuredProvider
     : null;
-  const configuredTier = MODEL_TIERS.get(preferred?.model) ?? null;
+  const configuredTier = imageModelTier(preferred?.model) ?? null;
   const quality = requestedQuality ?? configuredTier ?? 'fast';
   const fallbackProvider = normalizeProvider(cfg.providerFailover?.fallbackProvider);
   const fallbackModel = normalizeImageModel(cfg.providerFailover?.fallbackModel);
@@ -229,7 +235,7 @@ function selectBackend(userId, requestedQuality = null) {
     if (!keys[provider]) continue;
     const models = [];
     const add = model => {
-      if (providerForModel(model) === provider && MODEL_TIERS.get(model) === quality && !models.includes(model)) {
+      if (providerForModel(model) === provider && imageModelTier(model) === quality && !models.includes(model)) {
         models.push(model);
       }
     };
@@ -274,7 +280,7 @@ function normalizeProvider(provider) {
 
 function providerForModel(model) {
   if (FIREWORKS_MODELS.has(model)) return 'fireworks';
-  if (GROK_MODELS.has(model)) return 'grok';
+  if (isGrokImageModel(model)) return 'grok';
   return null;
 }
 
@@ -287,7 +293,7 @@ function readJson(file) {
   catch { return null; }
 }
 
-function loadOwnedInputImage(userId, rawId) {
+export function loadOwnedInputImage(userId, rawId) {
   const id = String(rawId || '').trim();
   if (!id.startsWith('images:') || id.length > 300) {
     throw new Error('Image edits require an owner-scoped attachment ID in the form images:filename.');
@@ -371,7 +377,7 @@ async function fireworksGenerate(model, prompt, aspectRatio, inputImage = null) 
       signal: requestSignal(),
       body: JSON.stringify({ prompt, num_inference_steps: 30, guidance_scale: 7, width: 1024, height: 1024 }),
     });
-    if (!response.ok) throw new Error(`Fireworks error ${response.status}: ${await safeErrorText(response)}`);
+    if (!response.ok) throw new Error(`Fireworks error ${response.status}: ${[404, 410].includes(response.status) ? 'Image generation is deprecated and this model is unavailable. Choose another image provider in Settings.' : await safeErrorText(response)}`);
     return inspectImage(await readResponseBytes(response, MAX_IMAGE_BYTES, 'Fireworks image'));
   }
 
@@ -383,7 +389,7 @@ async function fireworksGenerate(model, prompt, aspectRatio, inputImage = null) 
       signal: requestSignal(),
       body: JSON.stringify({ prompt, aspect_ratio: aspectRatio }),
     });
-    if (!response.ok) throw new Error(`Fireworks error ${response.status}: ${await safeErrorText(response)}`);
+    if (!response.ok) throw new Error(`Fireworks error ${response.status}: ${[404, 410].includes(response.status) ? 'Image generation is deprecated and this model is unavailable. Choose another image provider in Settings.' : await safeErrorText(response)}`);
     const data = await readResponseJson(response, MAX_JSON_BYTES, 'Fireworks response');
     const base64 = Array.isArray(data.base64) ? data.base64[0] : data.base64;
     if (!base64) throw new Error('Fireworks returned no image data.');
@@ -403,7 +409,7 @@ async function fireworksGenerate(model, prompt, aspectRatio, inputImage = null) 
       ...(inputImage ? { input_image: inputImage } : {}),
     }),
   });
-  if (!response.ok) throw new Error(`Fireworks error ${response.status}: ${await safeErrorText(response)}`);
+  if (!response.ok) throw new Error(`Fireworks error ${response.status}: ${[404, 410].includes(response.status) ? 'Image generation is deprecated and this model is unavailable. Choose another image provider in Settings.' : await safeErrorText(response)}`);
   const { request_id: requestId } = await readResponseJson(response, 256 * 1024, 'Fireworks submit response');
   if (!requestId) throw new Error('Fireworks did not return a request ID.');
 
@@ -437,7 +443,7 @@ async function fireworksGenerate(model, prompt, aspectRatio, inputImage = null) 
 }
 
 async function grokGenerate(model, prompt, aspectRatio) {
-  if (!GROK_MODELS.has(model)) throw new Error('Configured Grok image model is not allowed.');
+  if (!isGrokImageModel(model)) throw new Error('Configured Grok image model is not allowed.');
   const key = getGrokKey();
   if (!key) throw new Error('Grok API key not configured. Add it in Settings → Providers.');
   const response = await fetch(grokUrl(), {
@@ -445,7 +451,9 @@ async function grokGenerate(model, prompt, aspectRatio) {
     redirect: 'error',
     headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
     signal: requestSignal(),
-    body: JSON.stringify({ model, prompt, n: 1, response_format: 'b64_json', aspect_ratio: aspectRatio }),
+    body: JSON.stringify({ model, prompt, n: 1, response_format: 'b64_json', aspect_ratio: aspectRatio,
+      ...(model === 'grok-imagine-image-2.0' ? { quality: 'medium' } : {}),
+    }),
   });
   if (!response.ok) throw new Error(`Grok error ${response.status}: ${await safeErrorText(response)}`);
   const data = await readResponseJson(response, MAX_JSON_BYTES, 'Grok response');

@@ -14,6 +14,8 @@ import {
 import { getSessionMeta } from '../_helpers/auth-sessions.mjs';
 import { getSlotAssignment } from '../../lib/voice-devices.mjs';
 import { getVoiceRef } from '../../lib/voice-refs.mjs';
+import { readVoiceConfig, findUsersSharingTo } from '../../lib/voice-config.mjs';
+import { mobileSpeechText, accountSpeechVoice } from '../../lib/mobile-voice.mjs';
 import {
   takeTestMp3,
   takeAmbientStream, registerAmbientResponse, unregisterAmbientResponse,
@@ -255,7 +257,8 @@ export async function tryHandleSpeechRoutes(req, res) {
   }
 
   // TTS endpoint — generates audio from text using configured TTS provider
-  if (req.url === '/api/tts' && req.method === 'POST') {
+  if ((req.url === '/api/tts' || req.url === '/api/mobile/voice') && req.method === 'POST') {
+    const mobileVoice = req.url === '/api/mobile/voice';
     const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
     // Three providers supported (f5-tts was removed 2026-05-15 — kept as
@@ -278,14 +281,16 @@ export async function tryHandleSpeechRoutes(req, res) {
       return true;
     }
     try {
-      const { text, lang, wake_slot, voice: explicitVoice } = JSON.parse(await readBody(req));
+      const { text: rawText, lang, wake_slot, voice: explicitVoice } = JSON.parse(await readBody(req));
+      const text = mobileVoice ? mobileSpeechText(rawText) : rawText;
+      if (mobileVoice && !text) { res.writeHead(204); res.end(); return true; }
       if (!text) throw new Error('text is required');
       // Test-audio short-circuit: when the device echoes back a
       // `__test_audio_XXX__` marker (planted by POST /api/devices/<id>/play-mp3),
       // we return the cached MP3 directly without going through any TTS
       // provider. The cache entry is one-shot (deleted on first read).
       const trimmedText = text.trim();
-      if (/^__test_audio_[a-f0-9]+__$/.test(trimmedText)) {
+      if (!mobileVoice && /^__test_audio_[a-f0-9]+__$/.test(trimmedText)) {
         const cached = takeTestMp3(trimmedText);
         if (cached) {
           console.log(`[tts] test-audio hit marker=${trimmedText} bytes=${cached.length}`);
@@ -320,7 +325,7 @@ export async function tryHandleSpeechRoutes(req, res) {
       // `-stream_loop -1` so the device gets zero silence at loop seams.
       // The response holds open until either the device closes the socket
       // (wake fire / stop) OR a server-side dropAmbientForDevice ends it.
-      if (/^__ambient_[a-f0-9]+__$/.test(trimmedText)) {
+      if (!mobileVoice && /^__ambient_[a-f0-9]+__$/.test(trimmedText)) {
         const meta = takeAmbientStream(trimmedText);
         if (meta) {
           // Two flavours of source:
@@ -450,14 +455,20 @@ export async function tryHandleSpeechRoutes(req, res) {
         provider === 'elevenlabs' ? '21m00Tcm4TlvDq8ikWAM' : // Rachel — EL stock voice id
         'alloy';
       let voice = cfg.ttsVoice || defaultVoice;
-      if (Number.isInteger(wake_slot)) {
+      let voiceOwnerId = authId;
+      if (!mobileVoice && Number.isInteger(wake_slot)) {
         const meta = getSessionMeta(getAuthToken(req));
         if (meta?.deviceId) {
           const a = getSlotAssignment(authId, meta.deviceId, wake_slot);
           if (a?.ttsVoice) voice = a.ttsVoice;
         }
       }
-      if (typeof explicitVoice === 'string' && explicitVoice) voice = explicitVoice;
+      if (mobileVoice) {
+        const selected = accountSpeechVoice(authId, readVoiceConfig(authId).slot_assignments, voice, findUsersSharingTo(authId));
+        voice = selected.voice;
+        voiceOwnerId = selected.ownerUserId;
+      }
+      else if (typeof explicitVoice === 'string' && explicitVoice) voice = explicitVoice;
       if (provider === 'elevenlabs') {
         // ElevenLabs returns MP3 directly — no conversion step. voice is a
         // voice_id (UUID-ish string). Default model 'eleven_turbo_v2_5' is
@@ -524,7 +535,7 @@ export async function tryHandleSpeechRoutes(req, res) {
         // transcript needed (unlike F5): Pocket TTS is fully zero-shot.
         const pocketBody = { text };
         const isRef = typeof voice === 'string' && voice.startsWith('ref_');
-        const pref = isRef ? getVoiceRef(authId, voice) : null;
+        const pref = isRef ? getVoiceRef(voiceOwnerId, voice) : null;
         const oeDefaultState = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
         if (pref) pocketBody.ref_path = pref.wavPath;
         else if (voice && !isRef && voice !== 'default-en' && voice !== 'default') pocketBody.voice = voice; // explicit preset

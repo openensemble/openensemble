@@ -146,9 +146,17 @@ export async function handleTerminalTicket(req, res) {
   if (!nodeId) { res.writeHead(400); res.end(JSON.stringify({ error: 'nodeId required' })); return true; }
   if (getUser(userId)?.role === 'child') { res.writeHead(403); res.end(JSON.stringify({ error: 'Not permitted' })); return true; }
   if (!getNode(nodeId, userId)) { res.writeHead(404); res.end(JSON.stringify({ error: 'Node not found' })); return true; }
-  const { token, expiresIn } = createTicket(userId, 'terminal-page', { nodeId });
+  // Native clients connect directly to the same PTY bridge. Browser callers
+  // retain the page-ticket default; neither flow puts a session token in URLs.
+  if (body.transport !== undefined && !['page', 'websocket'].includes(body.transport)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid terminal transport' }));
+    return true;
+  }
+  const scope = body.transport === 'websocket' ? 'terminal-ws' : 'terminal-page';
+  const { token, expiresIn } = createTicket(userId, scope, { nodeId });
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ticket: token, expiresIn }));
+  res.end(JSON.stringify({ ticket: token, expiresIn, scope }));
   return true;
 }
 

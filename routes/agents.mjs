@@ -23,7 +23,7 @@ import {
   validatePrimarySkillCategory,
 } from '../agents.mjs';
 import {
-  onRoleEnabled, getRoleAssignments, getDurableRoleAssignment,
+  getRoleAssignments, getDurableRoleAssignment,
   setRoleAssignment, clearRoleAssignmentsForAgent,
   getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools,
   isSkillRuntimeEnabledForUser,
@@ -32,7 +32,6 @@ import { isReasoningEffortValue, normalizeReasoningEffort } from '../lib/reasoni
 import {
   clearSkillOverride,
   getSkillExecutionOverride,
-  setSkillOverride,
   setSkillExecutionOverride,
 } from '../lib/skill-overrides.mjs';
 import { isExecutionTextModel } from '../lib/skill-execution.mjs';
@@ -1026,72 +1025,11 @@ export async function handle(req, res) {
         res.writeHead(400); res.end(JSON.stringify({ error: 'userId must be a non-empty string' })); return true;
       }
       const targetId = requestedTargetId || authId;
-      const authRole = getUserRole(authId);
-
-      // Users can mutate only themselves. Admins may manage only ordinary
-      // accounts they created; the owner remains the installation-wide
-      // authority. This mirrors /api/users/:id instead of treating every
-      // privileged account as globally omnipotent.
-      const snap = loadUsers();
-      const snapIdx = snap.findIndex(u => u.id === targetId);
-      if (snapIdx === -1) { res.writeHead(404); res.end(JSON.stringify({ error: 'User not found' })); return true; }
-      const target = snap[snapIdx];
-      if (targetId !== authId) {
-        const adminCanManage = authRole === 'admin'
-          && (target.role === 'user' || target.role === 'child')
-          && target.parentId === authId;
-        if (authRole !== 'owner' && !adminCanManage) {
-          res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true;
-        }
-      }
-
-      const manifest = getRoleManifest(skillId, targetId);
-      if (!manifest || manifest.hidden) {
-        res.writeHead(404); res.end(JSON.stringify({ error: 'Tool not found' })); return true;
-      }
-      if (manifest.always_on && !enabled) {
-        res.writeHead(400); res.end(JSON.stringify({ error: 'This tool is always on' })); return true;
-      }
-      if (target.skillsLocked && targetId === authId && !isPrivileged(authId)) {
-        res.writeHead(403); res.end(JSON.stringify({ error: 'Your tools are managed by an administrator' })); return true;
-      }
-      if (Array.isArray(target.allowedSkills)
-          && !target.allowedSkills.includes(skillId)
-          && target.role !== 'owner' && target.role !== 'admin') {
-        res.writeHead(403); res.end(JSON.stringify({ error: 'That tool is not permitted for your account' })); return true;
-      }
-
-      const wasEnabled = isSkillRuntimeEnabledForUser(skillId, targetId);
-      // The disabled override is authoritative for default/bundled sources,
-      // while profile.skills is the explicit activation source. Keep both in
-      // sync so toggling works for every non-always-on skill and can undo a
-      // prior advanced override without erasing hidden-tool/execution choices.
-      const currentSeed = Array.isArray(target.skills)
-        ? target.skills
-        : getUserEnabledSkills(targetId);
-      // Enabling commits the profile source before lifting the deny override;
-      // disabling commits the deny first. A second-write failure therefore
-      // always fails closed and a retry converges the two stores.
-      if (!enabled) {
-        const overrideResult = await setSkillOverride(targetId, skillId, { disabled: true });
-        if (!overrideResult.ok) throw new Error(overrideResult.error || 'Could not update tool override');
-      }
-      const updatedSkills = await modifyUser(targetId, u => {
-        const current = Array.isArray(u.skills) ? u.skills : currentSeed;
-        u.skills = enabled
-          ? [...new Set([...current, skillId])]
-          : current.filter(s => s !== skillId);
-      }).then(u => u?.skills ?? null);
-      if (enabled) {
-        const overrideResult = await setSkillOverride(targetId, skillId, { disabled: false });
-        if (!overrideResult.ok) throw new Error(overrideResult.error || 'Could not update tool override');
-      }
-      const effectiveEnabled = isSkillRuntimeEnabledForUser(skillId, targetId);
-      broadcastAgentList();
-      if (!wasEnabled && effectiveEnabled) onRoleEnabled(skillId, targetId).catch(() => {});
+      const { setUserSkillEnabled } = await import('../lib/skill-enablement.mjs');
+      const result = await setUserSkillEnabled(authId, targetId, skillId, enabled);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ skills: updatedSkills ?? [], enabled: effectiveEnabled }));
-    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+      res.end(JSON.stringify(result));
+    } catch (e) { res.writeHead(e.statusCode || 400); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }
 

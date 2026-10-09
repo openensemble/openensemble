@@ -1902,6 +1902,19 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   const ownerAgent = agents.find(a => a.id === ownerKey);
   if (!ownerAgent) { yield { type: 'result', text: `Couldn't resolve your own agent record (${ownerKey}) to staff a worker.` }; return; }
 
+  // Ask in the foreground before a worker hits a disabled dependency in a
+  // detached session where the user cannot approve its activation.
+  const { findDisabledSkillRequirements, requestSkillActivation } = await import('../../lib/skill-activation.mjs');
+  const disabled = await findDisabledSkillRequirements({ userId, agentId: callerAgentId, reason: task });
+  if (disabled.length) {
+    const activation = await requestSkillActivation({
+      userId, agentId: callerAgentId, skillIds: disabled, task: trustedUserText,
+      background: router?.agent?.ephemeral === true,
+    });
+    yield { type: 'result', text: `${activation.text} No worker was started.` };
+    return;
+  }
+
   const capacityMessage = count => `You already have ${count} workers running (max ${MAX_WORKERS_PER_AGENT}). Wait for one to finish or stop one with stop_worker before hiring another.`;
 
   const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
@@ -1935,7 +1948,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     && internalOptions.executionTask.trim()
     ? internalOptions.executionTask.trim()
     : task;
-  const workerTask = `${trustedExecutionTask}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, return the complete user-facing deliverable requested. Never merely announce that the result is ready or offer to provide it later. Omit internal process mechanics unless the user explicitly requested them, and call out anything that still needs a human.]`;
+  const workerTask = `${trustedExecutionTask}\n\n[You are a background worker running detached from the chat. Work autonomously with the user's already enabled tools. If a required skill is disabled, report its name and the need for user approval to your owner; do not enable it yourself or bypass the restriction. The user is not watching this session, so return blockers rather than waiting for a reply here. When finished, return the complete user-facing deliverable requested. Never merely announce that the result is ready or offer to provide it later. Omit internal process mechanics unless the user explicitly requested them, and call out anything that still needs a human.]`;
   const chipOwnerId = `${userId}_${ownerKey}`;   // owner's direct-chat session: chip + completion report land here
   let sourceTurn = null;
   try {

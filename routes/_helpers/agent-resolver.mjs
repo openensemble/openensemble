@@ -28,6 +28,7 @@ import {
   getCachedMcpToolDefsForAgents,
 } from '../../lib/mcp-tools.mjs';
 import { modelCapabilityPrompt } from '../../lib/model-capabilities.mjs';
+import { readStoredModelMetadata } from '../../lib/model-metadata-store.mjs';
 import { applyRequestToolsRosterPolicy } from '../../lib/request-tools-schema.mjs';
 
 const TOOL_SETS_COMPAT = {
@@ -470,7 +471,8 @@ export function getAgentsForUser(userId) {
     // connection refused. Always use the server's LAN IP when sharing URLs.
     const serverUrlGuidance = `## Server URLs\n\nThis OpenEnsemble server's LAN address is \`${serverIp}\`. When you share any URL that points at this server (dev servers, preview links, running processes, etc.), always use \`http://${serverIp}:<port>\` — NEVER \`http://localhost:<port>\` or \`http://127.0.0.1:<port>\`. The user's browser runs on a different machine than this server, so localhost resolves to their own computer and fails with "connection refused".`;
     const selfReferenceGuidance = `## Speaking about yourself\n\nSpeak in the first person — "I", "me", "my". Do not refer to yourself in the third person by your own name (e.g. don't say "${agentName} sees that..." — say "I see that..."). You may refer to OTHER agents by their name when delegating or quoting them (e.g. "I asked the email agent and they found...").`;
-    const modelCapabilityGuidance = modelCapabilityPrompt(withOverrides.provider ?? 'ollama', withOverrides.model ?? '');
+    const modelMetadata = readStoredModelMetadata(userId, withOverrides.provider ?? 'ollama', withOverrides.model ?? '');
+    const modelCapabilityGuidance = modelCapabilityPrompt(withOverrides.provider ?? 'ollama', withOverrides.model ?? '', modelMetadata);
 
     // Escalation guidance for specialists. Coordinators already have a full
     // ask_agent roster and don't need this nudge; specialists need to know
@@ -544,6 +546,8 @@ export function getAgentsForUser(userId) {
       // Other providers concatenate stable+context+volatile into
       // systemPrompt and ignore the tiers field.
       _promptTiers,
+      _modelCapabilityGuidance: modelCapabilityGuidance,
+      _modelCapabilities: modelMetadata,
     };
     // Child containment and single-mode memory isolation: a singleton builds
     // its own episodic history while parked agents' histories remain dormant.

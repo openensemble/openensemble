@@ -1411,3 +1411,14 @@ This pattern compounds: over weeks the skill's lookup tables become a personaliz
 3. **Missing `export default`** — the executor won't load. Always include `export default executeSkillTool`.
 4. **Returning non-string** — always return a string (or null). Objects will be coerced but may look wrong.
 5. **Unhandled promise rejections** — wrap external API calls in try/catch and return the error message as a string so the agent can report it.
+
+
+### Native iOS drawer screens
+
+Custom skills run on OE for both web and native clients. For a native iOS screen,
+add an optional declarative `nativeUI` version 1 object through `skill_update_drawer`.
+Read [NATIVE_DRAWERS.md](NATIVE_DRAWERS.md) for the complete contract and example.
+The app renders native lists, forms, actions, and results without executing HTML
+or JavaScript. Keep the browser drawer for web users; do not edit `plugins/`
+directly. Preserve nativeUI when updating a drawer, or explicitly set it to null
+to remove it. New screens within the supported controls do not require an app build.

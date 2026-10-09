@@ -82,6 +82,11 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'body.slot_assignments must be an object (send {} to clear)' }));
       return true;
     }
+    if (body.expectedVersion !== undefined && body.expectedVersion !== readVoiceConfig(userId).version) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Voice settings changed. Reload before saving.' }));
+      return true;
+    }
     const assignments = body.slot_assignments;
     // Impersonation guard: a non-admin may only bind a slot to their OWN
     // account. Pinning ownerUserId to the caller stops them pointing a slot at

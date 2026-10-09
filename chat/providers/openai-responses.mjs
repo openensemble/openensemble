@@ -32,6 +32,7 @@ import { applyRedactions } from '../../lib/credentials.mjs';
 import { nativeWebSearch, supportsImageGeneration } from '../../lib/model-capabilities.mjs';
 import { mapOpenAIResponsesReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 import { getUserFilesDir } from '../../lib/paths.mjs';
+import { fetchXaiCLI, confirmXaiCLIResponse } from '../../lib/xai-client-compat.mjs';
 import { getTurn, getTurnLabProviderRequestCap } from '../../lib/turn-trace-context.mjs';
 import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
 import { getTurnContext } from '../../lib/turn-abort-context.mjs';
@@ -139,15 +140,15 @@ export function toResponsesTools(tools, { defaultStrict } = {}) {
 }
 
 /**
- * Replace OE's authorized generate_image function with the Codex-hosted tool.
+ * Replace OE's authorized generate_image function with the provider-hosted tool.
  * The internal marker selects a backend; it is deliberately insufficient on
  * its own. The current turn must still hold generate_image, preserving account
  * allowedSkills, user tool plans, intent routing, and request_tools recovery.
  */
 export function applyProviderHostedImageTool(agent, responsesTools, nativeImagesThisTurn, cap = 3) {
   const holdsAuthorizedCapability = agent?._providerHostedImageBackend === true
-    && agent?.provider === 'openai-oauth'
-    && supportsImageGeneration('openai-oauth', agent?.model)
+    && ['openai-oauth', 'grok', 'xai', 'xai-oauth'].includes(agent?.provider)
+    && supportsImageGeneration(agent?.provider, agent?.model, agent?._modelCapabilities)
     && agent?.tools?.some(tool => (tool?.function?.name ?? tool?.name) === 'generate_image');
   if (!holdsAuthorizedCapability) return responsesTools;
 
@@ -269,14 +270,15 @@ function toolResultWithAttachmentEvidence(result, toolName, args, agent, generat
   return `${applyRedactions(result)}\n\n[server attachment evidence] ${evidence}`;
 }
 
-async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null } = {}) {
+async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null, xaiClient = false, userId = '' } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
+      if (xaiClient) return await fetchXaiCLI(url, init, { onAttempt, userId });
       onAttempt?.();
       return await fetch(url, init);
     } catch (e) {
-      if (e?.name === 'AbortError') throw e;
+      if (e?.name === 'AbortError' || e?.providerUpdateNoReplay) throw e;
       lastErr = e;
       if (!isRetriableNetworkError(e) || i === attempts - 1) throw e;
       const causeTag = e.cause?.code || e.cause?.message || e.message;
@@ -317,7 +319,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     : isXaiOauth
       ? `${GROK_CLI_PROXY_BASE.replace(/\/$/, '')}/responses`
       : isPerplexity
-        ? `${OPENAI_COMPAT_PROVIDERS.perplexity.baseUrl.replace(/\/$/, '')}/v1/responses`
+        ? `${OPENAI_COMPAT_PROVIDERS.perplexity.baseUrl.replace(/\/$/, '')}${OPENAI_COMPAT_PROVIDERS.perplexity.responsesEndpoint || '/v1/agent'}`
         : `${OPENAI_COMPAT_PROVIDERS.xai.baseUrl.replace(/\/$/, '')}/responses`;
 
   let assistantContent = '';
@@ -493,7 +495,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // that breaks the streamed answer with a tool round and times out on slow or
     // dynamic pages — exactly the failure we kept hitting. Routing everything
     // through the native tool keeps the answer streaming and avoids the OE fetch.
-    const nativeSearch = nativeWebSearch(wsProvider, agent.model);
+    const nativeSearch = nativeWebSearch(wsProvider, agent.model, agent._modelCapabilities);
     // Coordinated workstream children deliberately KEEP native search: they are
     // the highest-volume searchers (news/price fan-outs), and forcing them onto
     // the Brave function tool ran up real per-call API charges on models whose
@@ -508,8 +510,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     if (useNativeSearch) {
       responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search' && t.name !== 'fetch_url');
       responsesTools.push(nativeSearch.tool);
+      if (isPerplexity && agent.tools?.some(t => (t.function?.name ?? t.name) === 'fetch_url')) {
+        responsesTools.push({ type: 'fetch_url' });
+      }
     }
-    if (isCodex && !labCodexRelay) {
+    if ((isCodex || isXaiOauth || isXaiKey) && !labCodexRelay) {
       responsesTools = applyProviderHostedImageTool(
         agent, responsesTools, nativeImagesThisTurn, NATIVE_IMAGE_GEN_CAP,
       );
@@ -580,6 +585,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         // automatically replay a request that offered image_generation.
         attempts: process.env.OPENENSEMBLE_LAB === '1' || paidHostedImageOffered ? 1 : 2,
         onAttempt: noteProviderAttempt,
+        xaiClient: isXaiOauth,
+        userId,
       });
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
@@ -690,6 +697,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           }, {
             attempts: process.env.OPENENSEMBLE_LAB === '1' || paidHostedImageOffered ? 1 : 2,
             onAttempt: noteProviderAttempt,
+            xaiClient: true,
+            userId,
           });
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
@@ -827,6 +836,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     let loopSseDoneCount = 0;
 
     const seenEventTypes = new Set();
+    try {
     for await (const ev of readAnthropicSSE(res.body, {
       // A missing [DONE] is valid for SuperGrok only at a genuinely clean EOF.
       // Strict parsing keeps a malformed or truncated trailing record from
@@ -1090,6 +1100,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       };
       return;
     }
+    confirmXaiCLIResponse(res, !finalRound || toolCalls.size === 0);
+    } finally { confirmXaiCLIResponse(res, false); }
 
     if (toolCalls.size > 0) {
       if (finalRound) {

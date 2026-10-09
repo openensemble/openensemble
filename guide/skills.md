@@ -41,6 +41,10 @@ Roles set sensible defaults — a Coder gets `coder`, `web`, `tasks`; a Research
 
 To change the *default* set for a role across all your agents using that role, edit the role under **Settings → Skills → Roles**.
 
+If a task needs a disabled skill, your assistant names it and asks whether to enable it. Reply **yes** or choose **Enable and continue**. OE enables that skill for your account and continues the original request. Reply **no** or choose **Cancel** to leave it disabled. Approvals belong to that conversation and expire after ten minutes.
+
+Administrator-managed or restricted skills still require your administrator. Enabling a skill preserves hidden-tool and model settings; a service that requires a connected account or API key may still need that setup. Background workers report missing skills to the assistant so approval can happen in your chat.
+
 ## Per-skill setup
 
 Open **Skills** (the grid icon in the sidebar, or **Menu → Skills** on mobile) to see Finance, Tutor, and your custom skill drawers as app icons. Search by name, then select an icon to open that skill's drawer. **All skills** returns to the grid and keeps your search and scroll position. Custom skills with drawers appear here automatically; disabled drawers stay hidden.

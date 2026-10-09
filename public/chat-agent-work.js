@@ -98,7 +98,7 @@ async function refreshChatAgentWork() {
     updateChatAgents();
     chatAgentWorkNotice(data.nextOffset != null
       ? `Showing ${data.tasks.length} of ${data.total} tasks in this conversation.`
-      : 'Completed work stays with this conversation. Older project history is in Progress.', data.nextOffset != null);
+      : 'Completed work stays with this conversation. Older project history is in Checkpoints.', data.nextOffset != null);
     const open = [...document.querySelectorAll('.chat-agent-work[open]')];
     await Promise.allSettled(open.map(node => loadChatAgentWorkDetail(node, true)));
   } catch (error) {

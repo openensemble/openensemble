@@ -130,7 +130,7 @@ function isDesktopToolName(name) {
 // static import edges (and any circular-import risk) to a file already many
 // modules deep; Node caches the module after the first load so the repeat
 // cost per turn is a map lookup, not a re-import.
-const APPROVAL_KIND_ORDER = ['email_purge', 'expense_delete', 'trust_promotion', 'watcher_op'];
+const APPROVAL_KIND_ORDER = ['email_purge', 'expense_delete', 'trust_promotion', 'watcher_op', 'skill_activation'];
 
 /**
  * @param {string} userId
@@ -178,6 +178,15 @@ export async function snapshotPendingApprovals(userId, agentId = null) {
       };
     }
   } catch (e) { console.warn('[chat-dispatch] approval snapshot (tasks) failed:', e.message); }
+  try {
+    const { getPendingSkillActivation, SKILL_ACTIVATION_PHRASE } = await import('./lib/skill-activation.mjs');
+    const p = getPendingSkillActivation(userId, agentId);
+    if (p) out.skill_activation = {
+      phrase: SKILL_ACTIVATION_PHRASE,
+      description: `enable ${p.names.join(', ')} and continue your request`,
+      expiresAt: p.expiresAt ?? null, opId: p.opId ?? null,
+    };
+  } catch (e) { console.warn('[chat-dispatch] approval snapshot (skills) failed:', e.message); }
   return out;
 }
 
@@ -1439,9 +1448,10 @@ export async function handleChatMessage({
       // is playing rather than the originating mic.
       await handleChatMessage({
         userId, agentId, text: r.followupPrompt,
-        attachment: null, source, deviceId: r.targetDeviceId, wakeSlot,
+        attachment: null, source, deviceId: r.targetDeviceId ?? deviceId, wakeSlot,
         onEvent, onBroadcast, onNotify,
         _isRoutineFollowup: true,
+        ...(r.skillActivationContinue ? { _hiddenUser: true, toolPlan, conversationMode } : {}),
       });
     }
     return;
