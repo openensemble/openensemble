@@ -17,6 +17,9 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-10-09
 
+**Cleaner image replies**
+Generated images no longer add a duplicate `[Image: …] / Saved to: …` text reply. Older replies also hide matching duplicate receipts when the image is displayed, while keeping captions, tool history, and saved files intact.
+
 **Project updates on the toolbar**
 Unread project updates now appear as a count on **Projects and goals**. Open the project view and choose **Updates** to review them. The floating notice near the chat controls has been removed. Project prompts also preserve the requested helper count when the goal title repeats the prompt, and older goal controls now enforce the same pause, completion, and removal rules as project controls.
 

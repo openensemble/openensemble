@@ -1338,16 +1338,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (finalAnswerText !== textContent) yield { type: 'replace', text: finalAnswerText };
       textContent = finalAnswerText;
     }
-    if (generatedImages.length) {
-      const imageText = generatedImages
-        .map(img => `[Image: ${img.filename}]${img.savedPath ? `\nSaved to: ${img.savedPath}` : ''}`)
-        .join('\n\n');
-      textContent = [textContent.trim(), imageText].filter(Boolean).join('\n\n');
-    }
+    // Images already travel as structured image events and persist as image
+    // rows. Their storage receipts must not become a second assistant reply.
     const finalText = stripReasoningPreamble(
       getStripThinkingTags() ? stripThinking(textContent) : textContent,
     );
-    if (finalRound && !finalText.trim()) {
+    if (finalRound && !finalText.trim() && !generatedImages.length) {
       if (textContent.trim()) yield { type: 'replace', text: '' };
       yield usageTelemetry();
       yield {

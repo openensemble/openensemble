@@ -52,6 +52,12 @@ function renderSessionInner(keepScroll) {
     insertBefore(btn);
   }
   const visibleMessages = ordered.slice(start);
+  const imagesByTurn = new Map();
+  for (const message of visibleMessages) {
+    if (message.role !== 'assistant' || !message.image || !message.turnId) continue;
+    if (!imagesByTurn.has(message.turnId)) imagesByTurn.set(message.turnId, []);
+    imagesByTurn.get(message.turnId).push(message.image);
+  }
   const documentAssistantByUser = new Map();
   const hiddenDocumentAssistants = new Set();
   const pairedDocumentAssistants = new Set();
@@ -151,7 +157,9 @@ function renderSessionInner(keepScroll) {
       if (Array.isArray(m._nodeExecTaskReports)) {
         for (const report of m._nodeExecTaskReports) appendNodeExecTaskReport(report, m, false);
       }
-      const bubble = appendAssistantBubble(m.content, m.ts, false);
+      const content = assistantTextWithoutImageReceipts(m.content, imagesByTurn.get(m.turnId));
+      if (typeof content === 'string' && !content.trim()) return;
+      const bubble = appendAssistantBubble(content, m.ts, false);
       if (typeof appendAnswerMemories === 'function') appendAnswerMemories(bubble, m.memoryRefs);
     }
   });
@@ -161,6 +169,22 @@ function renderSessionInner(keepScroll) {
   // than jumping mid-history to today's last task-header. scrollToBottom(true)
   // also flips _autoScroll back on so live streaming keeps following.
   scrollToBottom(true);
+}
+
+function assistantTextWithoutImageReceipts(content, images) {
+  if (typeof content !== 'string' || !images?.length) return content;
+  // Older Responses turns appended these receipts after the actual answer.
+  // Hide only exact trailing receipts backed by a visible image in this turn;
+  // keep the durable history and any ordinary prose or file references intact.
+  const receipts = images.filter(image => image.filename).map(image =>
+    `[Image: ${image.filename}]${image.savedPath ? `\nSaved to: ${image.savedPath}` : ''}`);
+  let text = content;
+  while (true) {
+    const trimmed = text.trimEnd();
+    const receipt = receipts.find(value => trimmed === value || trimmed.endsWith(`\n\n${value}`));
+    if (!receipt) return text;
+    text = trimmed.slice(0, -receipt.length).trimEnd();
+  }
 }
 
 function orderSessionForRender(messages) {
