@@ -118,8 +118,10 @@ function renderSessionInner(keepScroll) {
       renderStandaloneDocumentArtifact(m, false);
     }
     else if (m.role === 'assistant' && m.image) {
-      if (m.image.base64) appendImageBubble(m.image, m.ts, false);
-      else appendReportImageBubble(m.image, m.ts, false); // saved-file row (no inline base64)
+      const bubble = m.image.base64
+        ? appendImageBubble(m.image, m.ts, false)
+        : appendReportImageBubble(m.image, m.ts, false);
+      if (bubble && m.turnId) bubble.dataset.imageTurnId = m.turnId;
     }
     else if (m.role === 'assistant' && m.video)    appendVideoBubble(m.video, m.ts, false);
     else if (m.role === 'status' && m.status)     appendStatusBubble(m.status, m.ts, false);
@@ -153,7 +155,10 @@ function renderSessionInner(keepScroll) {
     }
     else if (m.role === 'assistant' && !m.hidden) {
       if (pairedDocumentAssistants.has(m) || hiddenDocumentAssistants.has(m)) return;
-      if (Array.isArray(m.toolEvents) && m.toolEvents.length) appendToolRun(m.toolEvents, m.ts, false, { persisted: true, toolResults: m.toolResults });
+      if (Array.isArray(m.toolEvents) && m.toolEvents.length) {
+        const run = appendToolRun(m.toolEvents, m.ts, false, { persisted: true, toolResults: m.toolResults });
+        placeToolRunBeforeImages(run, m.turnId);
+      }
       if (Array.isArray(m._nodeExecTaskReports)) {
         for (const report of m._nodeExecTaskReports) appendNodeExecTaskReport(report, m, false);
       }

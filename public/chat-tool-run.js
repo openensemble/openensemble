@@ -22,9 +22,20 @@ function ensureToolRun() {
     el.classList.toggle('open', open);
   });
   insertBefore(el);
+  placeToolRunBeforeImages(el, agentStreams[activeAgent]?.turnId);
   liveToolRun = { el, events: [], startedAt: Date.now() };
   toolPillsEl = el;
   return liveToolRun;
+}
+
+function placeToolRunBeforeImages(run, turnId) {
+  if (!run || !turnId) return;
+  const image = $('messages').querySelector(`.msg[data-image-turn-id="${CSS.escape(turnId)}"]`);
+  // Saved images are separate rows preceding the final answer's tool record.
+  // Keep the activity above its own images on replay and stream restoration.
+  if (image && (image.compareDocumentPosition(run) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+    image.before(run);
+  }
 }
 
 // Snapshot/restore of the in-flight tool run across agent switches
@@ -394,6 +405,9 @@ function openToolModal(name, text) {
 function sessionMessageKey(m) {
   if (!m || typeof m !== 'object') return null;
   if (m.role === 'user' && m.messageId) return `user:${m.messageId}`;
+  if (m.role === 'assistant' && m.turnId && m.image) {
+    return `assistant_image:${m.turnId}:${m.image.savedPath || m.image.filename || m.content || ''}`;
+  }
   if (m.role === 'assistant' && m.turnId) return `assistant:${m.turnId}`;
   if (m.role === 'turn_error' && (m.attemptId || m.turnId)) return `turn_error:${m.attemptId || m.turnId}`;
   if (m.role === 'turn_terminal' && (m.attemptId || m.turnId)) return `turn_terminal:${m.attemptId || m.turnId}`;

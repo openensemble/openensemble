@@ -1073,9 +1073,10 @@ function handleServerMessage(msg) {
       const target = clientSessionAgentId(msg.agent);
       if (target !== activeAgent) break;
       setTyping(false);
-      appendImageBubble({ base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, Date.now());
+      const bubble = appendImageBubble({ base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, Date.now());
+      if (bubble && msg.turn_id) bubble.dataset.imageTurnId = msg.turn_id;
       if (!sessions[target]) sessions[target] = [];
-      sessions[target].push({ role: 'assistant', image: { base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, content: `[Image: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
+      sessions[target].push({ role: 'assistant', image: { base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, content: `[Image: ${msg.filename}]`, ts: Date.now(), ...(msg.turn_id ? { turnId: msg.turn_id } : {}), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
       break;
     }
     case 'video': {
