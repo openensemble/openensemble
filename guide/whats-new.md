@@ -9,7 +9,7 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 ## 2026-10-09
 
 **Project updates on the toolbar**
-Unread project updates now appear as a count on **Projects and goals**, including its mobile Tools tile. Open the project view and choose **Updates** to review them. The floating notice near the chat controls has been removed. Project prompts also preserve the requested helper count when the goal title repeats the prompt, and older goal controls now enforce the same pause, completion, and removal rules as project controls.
+Unread project updates now appear as a count on **Projects and goals**. Open the project view and choose **Updates** to review them. The floating notice near the chat controls has been removed. Project prompts also preserve the requested helper count when the goal title repeats the prompt, and older goal controls now enforce the same pause, completion, and removal rules as project controls.
 
 **Direct requests to named models**
 Requests such as "Have Grok create a cat sitting in a tree" and "Use Gemini to summarize this document" now expose the model catalog and launch one worker on the named target. The launcher recognizes these requests without requiring the word "agent" or "background", preserves the selected provider, and rejects substitutions. See [Providers](providers.md#subscription-logins-chatgpt--supergrok).
