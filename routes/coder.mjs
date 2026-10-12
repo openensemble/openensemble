@@ -39,7 +39,7 @@ import {
 // Segments the zip archive should skip so downloaded projects carry only
 // source + small artifacts — no node_modules, virtualenvs, or build output
 // bloating the archive.
-const ARCHIVE_SKIP = [
+export const ARCHIVE_SKIP = [
   'node_modules', '.git', '.venv', 'venv', '__pycache__', '.next',
   'dist', 'build', '.cache', '.turbo', '.parcel-cache', '.pytest_cache',
   '.run',

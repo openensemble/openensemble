@@ -7,6 +7,11 @@ let _docFilter       = 'all'; // 'all' | 'photos' | 'videos' | 'audio' | 'code'
 let _docAllDocs      = [];
 let _docShareModalId  = null;
 let _docShareModalSel = new Set();
+let _docSelected     = new Set();
+let _docBatchBusy    = false;
+let _docBatchStatus  = '';
+let _docListSeq      = 0;
+let _docSelectionUser = null;
 
 // Called by drawers.js when drawerNotes opens
 async function openNotesDrawer() {
@@ -49,18 +54,31 @@ async function _loadNotesTab() {
 // ── Document list ─────────────────────────────────────────────────────────────
 
 async function loadDocList() {
+  const seq = ++_docListSeq;
+  const userId = getCurrentUserId?.() ?? null;
+  if (_docSelectionUser !== userId) {
+    _docSelected.clear();
+    _docAllDocs = [];
+    _docSelectionUser = userId;
+  }
   const list = $('docList');
-  list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>';
+  if (!_docAllDocs.length) list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>';
   try {
+    const getList = async url => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('Server error ' + response.status);
+      return response.json();
+    };
     const [uploadedDocs, aiImages, aiVideos, audioFiles, researchDocs, shares, codeResp] = await Promise.all([
-      fetch('/api/shared-docs').then(r => r.json()).catch(() => []),
-      fetch('/api/desktop/images').then(r => r.json()).catch(() => []),
-      fetch('/api/desktop/videos').then(r => r.json()).catch(() => []),
-      fetch('/api/desktop/audio').then(r => r.json()).catch(() => []),
-      fetch('/api/research').then(r => r.json()).catch(() => []),
-      fetch('/api/sharing').then(r => r.json()).catch(() => []),
-      fetch('/api/coder/projects').then(r => r.json()).catch(() => ({ projects: [] })),
+      getList('/api/shared-docs'),
+      getList('/api/desktop/images'),
+      getList('/api/desktop/videos'),
+      getList('/api/desktop/audio'),
+      getList('/api/research'),
+      getList('/api/sharing'),
+      getList('/api/coder/projects'),
     ]);
+    if (seq !== _docListSeq || userId !== (getCurrentUserId?.() ?? null)) return;
     const codeProjects = Array.isArray(codeResp?.projects) ? codeResp.projects : [];
 
     // Track uploaded doc filenames to avoid duplicates
@@ -82,15 +100,16 @@ async function loadDocList() {
         ext: '.' + (img.filename.split('.').pop() || 'jpg'),
         mimeType: 'image/' + (img.filename.split('.').pop() || 'jpeg').replace('jpg', 'jpeg'),
         size: img.size,
-        uploadedBy: null,
-        uploadedByName: img.agentName ? `${img.agentEmoji ?? ''} ${img.agentName}`.trim() : 'AI Generated',
+        uploadedBy: img.sharedBy ?? null,
+        uploadedByName: img.sharedBy ? (share?.ownerName ?? 'Another user') : img.agentName ? `${img.agentEmoji ?? ''} ${img.agentName}`.trim() : 'AI Generated',
         sharedWith: share?.sharedWith ?? [],
         createdAt: img.createdAt,
-        isOwn: true,
+        isOwn: !img.sharedBy || img.sharedBy === userId,
         _source: 'ai-image',
         _agentId: img.agentId,
+        _sharedOwnerId: img.sharedBy,
       };
-    }).filter(d => !seen.has(d.id));
+    }).filter(d => !seen.has(d.id) && !uploadedDocs.some(u => u.filename === d.filename && u.uploadedBy === d._sharedOwnerId));
 
     // Normalize AI-generated videos
     const vidDocs = aiVideos.map(vid => {
@@ -102,14 +121,15 @@ async function loadDocList() {
         ext: '.' + (vid.filename.split('.').pop() || 'mp4'),
         mimeType: 'video/' + (vid.filename.split('.').pop() || 'mp4'),
         size: vid.size,
-        uploadedBy: null,
-        uploadedByName: 'AI Generated',
+        uploadedBy: vid.sharedBy ?? null,
+        uploadedByName: vid.sharedBy ? (share?.ownerName ?? 'Another user') : 'AI Generated',
         sharedWith: share?.sharedWith ?? [],
         createdAt: vid.createdAt,
-        isOwn: true,
+        isOwn: !vid.sharedBy || vid.sharedBy === userId,
         _source: 'ai-video',
+        _sharedOwnerId: vid.sharedBy,
       };
-    }).filter(d => !seen.has(d.id));
+    }).filter(d => !seen.has(d.id) && !uploadedDocs.some(u => u.filename === d.filename && u.uploadedBy === d._sharedOwnerId));
 
     // Normalize audio files (chat-uploaded or otherwise) into the same shape
     const audDocs = audioFiles.map(aud => {
@@ -159,7 +179,7 @@ async function loadDocList() {
     // Items shared with me from other users (AI images/videos/research)
     const myId = getCurrentUserId?.() ?? null;
     const sharedWithMe = shares
-      .filter(s => !s.isOwn && s.sharedWith?.includes?.(myId))
+      .filter(s => !s.isOwn && (s.sharedWith?.includes?.(myId) || s.sharedWith?.includes?.('*')))
       .map(s => {
         const isImg = s.fileType === 'image';
         const isVid = s.fileType === 'video';
@@ -206,10 +226,15 @@ async function loadDocList() {
     }));
 
     _docAllDocs = [...uploadedDocs, ...imgDocs, ...vidDocs, ...audDocs, ...resDocs, ...codeDocs, ...sharedWithMe];
+    const available = new Set(_docAllDocs.map(_docSelectionKey));
+    for (const key of _docSelected) if (!available.has(key)) _docSelected.delete(key);
     applyDocFilter(_docFilter);
   } catch {
-    list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Failed to load documents</div>';
+    if (seq !== _docListSeq) return;
+    if (_docAllDocs.length) showToast('Could not refresh documents. Try again.');
+    else list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Failed to load documents</div>';
   }
+  _syncDocSelection();
 }
 
 function switchDocFilter(filter) {
@@ -230,14 +255,176 @@ function switchDocFilter(filter) {
   applyDocFilter(filter);
 }
 
-function applyDocFilter(filter) {
+function _filteredDocs(filter = _docFilter) {
   let docs = _docAllDocs;
   if (filter === 'photos')      docs = docs.filter(d => d.mimeType.startsWith('image/'));
   else if (filter === 'videos') docs = docs.filter(d => d.mimeType.startsWith('video/'));
   else if (filter === 'audio')  docs = docs.filter(d => d.mimeType.startsWith('audio/'));
   else if (filter === 'code')   docs = docs.filter(d => d._source === 'code');
   else docs = docs.filter(d => d._source !== 'code' && !d.mimeType.startsWith('image/') && !d.mimeType.startsWith('video/') && !d.mimeType.startsWith('audio/'));
-  renderDocList(docs, filter);
+  return docs;
+}
+
+function applyDocFilter(filter) {
+  renderDocList(_filteredDocs(filter), filter);
+  _syncDocSelection();
+}
+
+// Keys include source and owner: a shared file must never select a same-named
+// file belonging to this profile (or a different kind of document).
+function _docSelectionKey(doc) {
+  return JSON.stringify([doc._source || 'document', doc._sharedOwnerId || doc.uploadedBy || '', doc.id]);
+}
+
+function _selectedDocs() {
+  return _docAllDocs.filter(doc => _docSelected.has(_docSelectionKey(doc)));
+}
+
+function resetDocAccountState() {
+  ++_docListSeq;
+  _docSelected.clear();
+  _docAllDocs = [];
+  _docUsers = [];
+  _docBatchBusy = false;
+  _docBatchStatus = '';
+  _docSelectionUser = null;
+  if ($('docList')) $('docList').innerHTML = '';
+  if (_docViewId) closeDocViewer();
+  _syncDocSelection();
+}
+
+function toggleDocSelection(key, checked) {
+  if (_docBatchBusy) return;
+  if (!_docAllDocs.some(doc => _docSelectionKey(doc) === key)) return;
+  if (checked) _docSelected.add(key); else _docSelected.delete(key);
+  _docBatchStatus = '';
+  _syncDocSelection();
+}
+
+function selectAllDocs(checked) {
+  if (_docBatchBusy) return;
+  for (const doc of _filteredDocs()) {
+    const key = _docSelectionKey(doc);
+    if (checked) _docSelected.add(key); else _docSelected.delete(key);
+  }
+  _docBatchStatus = '';
+  _syncDocSelection();
+}
+
+function clearDocSelection() {
+  if (_docBatchBusy) return;
+  _docSelected.clear();
+  _docBatchStatus = '';
+  _syncDocSelection();
+}
+
+function _syncDocSelection() {
+  const bar = $('docSelectionBar');
+  if (!bar) return;
+  const selected = _selectedDocs();
+  const visible = _filteredDocs();
+  const visibleCount = visible.filter(doc => _docSelected.has(_docSelectionKey(doc))).length;
+  const all = $('docSelectAll');
+  all.checked = visible.length > 0 && visibleCount === visible.length;
+  all.indeterminate = visibleCount > 0 && visibleCount < visible.length;
+  all.disabled = _docBatchBusy || !visible.length;
+  $('docSelectionCount').textContent = `${selected.length} selected${selected.length > visibleCount ? ' across tabs' : ''}`;
+  const hasShared = selected.some(doc => !doc.isOwn);
+  $('docDownloadSelected').disabled = _docBatchBusy || !selected.length;
+  $('docDeleteSelected').disabled = _docBatchBusy || !selected.length || hasShared;
+  $('docClearSelection').disabled = _docBatchBusy || !selected.length;
+  $('docSelectionHint').textContent = _docBatchStatus || (hasShared ? 'Shared files can be downloaded. Deselect them to delete your own files.' : '');
+  bar.setAttribute('aria-busy', String(_docBatchBusy));
+  for (const input of $('docList').querySelectorAll('[data-doc-select]')) {
+    input.checked = _docSelected.has(input.dataset.docSelect);
+    input.disabled = _docBatchBusy;
+    input.closest('.doc-card')?.classList.toggle('doc-card-selected', input.checked);
+  }
+  for (const button of $('docList').querySelectorAll('button[data-action^="delete"]')) button.disabled = _docBatchBusy;
+}
+
+async function downloadSelectedDocs() {
+  if (_docBatchBusy) return;
+  const userId = getCurrentUserId?.() ?? null;
+  const docs = _selectedDocs();
+  if (!docs.length) return;
+  _docBatchBusy = true;
+  _docBatchStatus = `Preparing ${docs.length} selected items…`;
+  _syncDocSelection();
+  try {
+    const response = await fetch('/api/document-batches', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: docs.map(doc => ({
+        source: doc._source || 'document', id: doc.id, filename: doc.filename,
+        ownerId: doc._sharedOwnerId || undefined,
+      })) }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Server error ' + response.status);
+    if (userId !== (getCurrentUserId?.() ?? null)) return;
+    const token = getMediaTokenSync();
+    _startBrowserDownload(`/api/document-batches/${encodeURIComponent(result.id)}/download${token ? '?token=' + encodeURIComponent(token) : ''}`, result.filename);
+    _docBatchStatus = `ZIP download started for ${docs.length} selected items.`;
+  } catch (error) {
+    if (userId === (getCurrentUserId?.() ?? null)) _docBatchStatus = 'Download failed: ' + error.message;
+  } finally {
+    if (userId === (getCurrentUserId?.() ?? null)) {
+      _docBatchBusy = false;
+      _syncDocSelection();
+    }
+  }
+}
+
+function _docDeleteUrl(doc) {
+  if (!doc.isOwn) throw new Error('Only your own files can be deleted.');
+  const filename = encodeURIComponent(doc.filename);
+  if (doc._source === 'ai-image') return `/api/desktop/images/${filename}`;
+  if (doc._source === 'ai-video') return `/api/desktop/videos/${filename}`;
+  if (doc._source === 'audio') return `/api/desktop/audio/${filename}`;
+  if (doc._source === 'code') return `/api/coder/projects/${filename}`;
+  if (doc._source === 'research') return `/api/research/${encodeURIComponent(doc.id)}`;
+  return `/api/shared-docs/${encodeURIComponent(doc.id)}`;
+}
+
+async function deleteSelectedDocs() {
+  if (_docBatchBusy) return;
+  const userId = getCurrentUserId?.() ?? null;
+  const docs = _selectedDocs();
+  if (!docs.length || docs.some(doc => !doc.isOwn)) return;
+  const names = docs.slice(0, 8).map(doc => doc.filename).join('\n');
+  if (!confirm(`Delete ${docs.length} selected item${docs.length === 1 ? '' : 's'}?\n\n${names}${docs.length > 8 ? '\n…' : ''}\n\nThis permanently removes the files, including any selected code projects and document history. This cannot be undone.`)) return;
+  _docBatchBusy = true;
+  const failed = [];
+  let deleted = 0;
+  try {
+    for (const doc of docs) {
+      if (userId !== (getCurrentUserId?.() ?? null)) return;
+      _docBatchStatus = `Deleting ${deleted + failed.length + 1} of ${docs.length}…`;
+      _syncDocSelection();
+      try {
+        const response = await fetch(_docDeleteUrl(doc), { method: 'DELETE' });
+        if (userId !== (getCurrentUserId?.() ?? null)) return;
+        if (!response.ok) {
+          let message = 'Server error ' + response.status;
+          try { message = (await response.json()).error || message; } catch {}
+          throw new Error(message);
+        }
+        const key = _docSelectionKey(doc);
+        _docSelected.delete(key);
+        _docAllDocs = _docAllDocs.filter(item => _docSelectionKey(item) !== key);
+        deleted++;
+      } catch (error) { failed.push(`${doc.filename}: ${error.message}`); }
+    }
+    applyDocFilter(_docFilter);
+    await loadDocList();
+    if (userId !== (getCurrentUserId?.() ?? null)) return;
+    _docBatchStatus = `Deleted ${deleted} of ${docs.length} selected items.${failed.length ? ` ${failed.length} failed; remaining files stay selected. ${failed.slice(0, 3).join('; ')}` : ''}`;
+  } finally {
+    if (userId === (getCurrentUserId?.() ?? null)) {
+      _docBatchBusy = false;
+      _syncDocSelection();
+    }
+  }
 }
 
 function _docIcon(mimeType, filename) {
@@ -370,11 +557,11 @@ function renderDocList(docs, filter) {
     if (doc._source === 'ai-image') {
       actions = `<button data-action="downloadAiFile" data-args='${JSON.stringify(['images', doc.filename]).replace(/'/g, "&#39;")}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
         ${shareBtn}
-        <button data-action="deleteAiImage" data-args='${argsAi}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+        ${doc.isOwn ? `<button data-action="deleteAiImage" data-args='${argsAi}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>` : ''}`;
     } else if (doc._source === 'ai-video') {
       actions = `<button data-action="downloadAiFile" data-args='${JSON.stringify(['videos', doc.filename]).replace(/'/g, "&#39;")}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
         ${shareBtn}
-        <button data-action="deleteAiVideo" data-args='${argsAi}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+        ${doc.isOwn ? `<button data-action="deleteAiVideo" data-args='${argsAi}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>` : ''}`;
     } else if (doc._source === 'research') {
       actions = `${doc.isOwn ? `<button data-action="openDocAskModal" data-args='${argsAsk}' title="Ask Agent" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🤖</button>` : ''}
         ${shareBtn}
@@ -393,7 +580,10 @@ function renderDocList(docs, filter) {
         ${doc.isOwn ? `<button data-action="deleteDoc" data-args='${argsIdName}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>` : ''}`;
     }
 
-    return `<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg3);display:flex;flex-direction:column">
+    const selectionKey = escHtml(_docSelectionKey(doc));
+    const selectionArgs = escHtml(JSON.stringify([_docSelectionKey(doc), '$checked']));
+    return `<div class="doc-card" style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg3);display:flex;flex-direction:column;min-width:0">
+      <label class="doc-card-select"><input type="checkbox" data-doc-select="${selectionKey}" data-change-action="toggleDocSelection" data-change-args="${selectionArgs}" aria-label="Select ${escHtml(doc.filename)}"> Select</label>
       ${thumbHtml}
       <div style="padding:7px 9px;flex:1;display:flex;flex-direction:column;gap:4px">
         <div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3" title="${escHtml(doc.filename)}">${escHtml(doc.filename)}</div>
@@ -578,6 +768,7 @@ async function downloadResearchDoc(id, filename) {
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 async function deleteDoc(id, filename) {
+  if (_docBatchBusy) return;
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
     const r = await fetch(`/api/shared-docs/${id}`, { method: 'DELETE' }).then(r => r.json());
@@ -1661,6 +1852,7 @@ function downloadAiFile(type, filename) {
 }
 
 async function deleteAiImage(filename) {
+  if (_docBatchBusy) return;
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
     const r = await fetch(`/api/desktop/images/${encodeURIComponent(filename)}`, { method: 'DELETE' }).then(r => r.json());
@@ -1671,6 +1863,7 @@ async function deleteAiImage(filename) {
 }
 
 async function deleteAiVideo(filename) {
+  if (_docBatchBusy) return;
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
     const r = await fetch(`/api/desktop/videos/${encodeURIComponent(filename)}`, { method: 'DELETE' }).then(r => r.json());
@@ -1693,6 +1886,7 @@ async function downloadAudioFile(filename) {
 }
 
 async function deleteAudioFile(filename) {
+  if (_docBatchBusy) return;
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
     const r = await fetch(`/api/desktop/audio/${encodeURIComponent(filename)}`, { method: 'DELETE' }).then(r => r.json());
@@ -1735,6 +1929,7 @@ async function downloadCodeProject(name) {
 }
 
 async function deleteCodeProjectFromDocs(name) {
+  if (_docBatchBusy) return;
   if (!confirm(`Delete project "${name}"? This removes all its files and cannot be undone.`)) return;
   try {
     const r = await fetch(`/api/coder/projects/${encodeURIComponent(name)}`, { method: 'DELETE' });
@@ -1749,6 +1944,7 @@ async function deleteCodeProjectFromDocs(name) {
 }
 
 async function deleteResearchDoc(id, filename) {
+  if (_docBatchBusy) return;
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
     const r = await fetch(`/api/research/${id}`, { method: 'DELETE' }).then(r => r.json());

@@ -244,6 +244,17 @@ function findDoc(docId, userId) {
   return null;
 }
 
+// Reuse the same authorization as individual downloads for ZIP selections.
+export function resolveDocumentDownload(docId, userId) {
+  const doc = findDoc(docId, userId);
+  if (!doc) return null;
+  const filePath = resolveFilePath(doc, userId);
+  if (!filePath) return null;
+  return { path: filePath, filename: doc.filename, roots: [
+    getUserDocsDir(doc.uploadedBy || userId), getUserDocsDir(userId), LEGACY_DOCS_DIR,
+  ] };
+}
+
 export async function handle(req, res) {
   const url      = new URL(req.url, 'http://x');
   const pathname = url.pathname;
@@ -670,7 +681,7 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res); if (!userId) return true;
     const doc = findDoc(delMatch[1], userId);
     if (!doc) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
-    if (doc.uploadedBy !== userId && !isPrivileged(userId)) {
+    if (doc.uploadedBy !== userId) {
       res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not authorized' })); return true;
     }
     // Remove from owner's index

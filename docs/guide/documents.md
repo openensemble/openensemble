@@ -20,7 +20,26 @@ The **Docs** drawer (sidebar folder icon) is the unified view of every file in y
 - **Code projects** — sandboxed projects the coder has worked in. Downloadable as zip.
 - **Notes** — a separate tab for free-form personal notes.
 
-Tabs at the top of the drawer filter by kind (All / Photos / Videos / Audio / Code).
+Tabs at the top of the drawer filter by kind (Documents / Images / Videos / Audio / Code).
+
+## Select multiple files
+
+Use the **Select** checkbox on each file, or **Select all in this tab**.
+Your selection stays selected when you switch tabs, so you can include images,
+videos, documents, audio, and code projects together. **Clear** removes the
+whole selection.
+
+- **Download selected** prepares one ZIP and saves it through your browser.
+  It includes shared files you can access. Duplicate filenames are numbered;
+  code projects appear as folders without dependencies or build output.
+  Each ZIP supports up to 250 selected items, 10,000 files, and 5 GB.
+- **Delete selected** asks for confirmation once, then removes your selected
+  files permanently. Shared files belong to their original owner: deselect
+  them before deleting. Admin status does not grant permission to delete
+  another user's documents. Any failed deletions are reported and remaining
+  files stay selected so you can retry.
+
+Single-file previews, downloads, sharing, and agent actions remain on each card.
 
 ## Attach, keep, and reference files
 
@@ -94,5 +113,8 @@ Backups (see **Backup, restore, auto-update**) include all of these.
 
 ## Deleting
 
-Hover any item → trash icon. AI outputs and uploads are deleted from disk; research docs are removed from the index. Code projects can be deleted from the coder agent or via the Docs drawer.
+Use the trash icon on a file you own, or select several files and choose
+**Delete selected**. Deletion removes the files and their saved version history;
+deleted code projects lose all their files. Files shared with you can be
+downloaded but only their owner can delete them.
 {% endraw %}

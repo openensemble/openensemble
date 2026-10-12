@@ -58,6 +58,7 @@ import { handle as handleDesktop }  from './routes/desktop.mjs';
 import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleMobile }   from './routes/mobile.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
+import { handle as handleDocumentBatches } from './routes/document-batches.mjs';
 import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs';
 import { handle as handleProjectSpaces } from './routes/project-spaces.mjs';
 import { handle as handleSavedChats } from './routes/saved-chats.mjs';
@@ -354,6 +355,7 @@ const routeHandlers = [
   handleUsers,
   handleAdmin,
   handleSharedDocs,
+  handleDocumentBatches,
   handleSharing,
   handleExpenses,
   handleMemory,

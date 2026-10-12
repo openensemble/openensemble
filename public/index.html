@@ -576,6 +576,16 @@
           <button id="docFilter-audio"  data-action="switchDocFilter" data-args="[&quot;audio&quot;]"  style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Audio</button>
           <button id="docFilter-code"   data-action="switchDocFilter" data-args="[&quot;code&quot;]"   style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Code</button>
         </div>
+        <div id="docSelectionBar" class="doc-selection-bar" role="group" aria-label="File selection">
+          <label class="doc-select-all"><input id="docSelectAll" type="checkbox" data-change-action="selectAllDocs" data-change-args='["$checked"]'> Select all in this tab</label>
+          <span id="docSelectionCount" role="status" aria-live="polite">0 selected</span>
+          <div class="doc-selection-actions">
+            <button id="docDownloadSelected" data-action="downloadSelectedDocs" disabled>Download selected</button>
+            <button id="docDeleteSelected" data-action="deleteSelectedDocs" disabled>Delete selected</button>
+            <button id="docClearSelection" data-action="clearDocSelection" disabled>Clear</button>
+          </div>
+          <div id="docSelectionHint" class="doc-selection-hint" role="status" aria-live="polite"></div>
+        </div>
         <!-- Document list -->
         <div id="docList"></div>
       </div>

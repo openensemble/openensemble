@@ -296,6 +296,7 @@ function setCurrentUser(user) {
   if (_currentUser?.id !== user?.id && typeof resetRoutineAccountState === 'function') resetRoutineAccountState();
   if (_currentUser?.id !== user?.id && typeof resetChatAgents === 'function') resetChatAgents();
   if (_currentUser?.id !== user?.id && typeof resetProjectWork === 'function') resetProjectWork();
+  if (_currentUser?.id !== user?.id && typeof resetDocAccountState === 'function') resetDocAccountState();
   _currentUser = user;
   if (user && typeof refreshProjectSpaceBanner === 'function') refreshProjectSpaceBanner();
   if (user) {

@@ -6,6 +6,13 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-12
+
+**Select and manage multiple files in Docs**
+Select images, videos, documents, audio, and code projects across tabs, then download them in one ZIP or delete your own selected files with one confirmation. Shared files remain downloadable but cannot be deleted by another account, including an admin. Failed deletions are reported and remain selected for retry. See [Documents & sharing](documents.md#select-multiple-files).
+
+---
+
 ## 2026-10-09
 
 **Cleaner image replies**
