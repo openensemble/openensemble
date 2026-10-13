@@ -5,9 +5,9 @@ const projectGoalEditors = new Map();
 const projectGoalRunDrafts = new Map();
 const projectGoalFields = ['title', 'prompt', 'completionCriteria', 'nextStep', 'blocker', 'dueAt'];
 const projectGoalValues = goal => Object.fromEntries(projectGoalFields.map(field => [field, goal[field] || (field === 'dueAt' ? null : '')]));
-const projectGoalLabels = { working: 'Working', waiting: 'Needs your input', review: 'Review results', failed: 'Needs attention', interrupted: 'Interrupted', unavailable: 'Conversation unavailable', paused: 'Paused', completed: 'Completed', idle: 'Ready', stopped: 'Stopped' };
+const projectGoalLabels = { working: 'Working', retrying: 'Reconnecting to AI', waiting: 'Needs your input', review: 'Review results', failed: 'Needs attention', interrupted: 'Interrupted', unavailable: 'Conversation unavailable', paused: 'Paused', completed: 'Completed', idle: 'Ready', stopped: 'Stopped' };
 const projectGoalArgs = (...args) => escHtml(JSON.stringify(args));
-function projectGoalKey() { return `${typeof _currentUser !== 'undefined' ? _currentUser?.id || '' : ''}:${selectedProjectSpace?.id || 'new'}`; }
+function projectGoalKey(id = selectedProjectSpace?.id || 'new') { return `${typeof _currentUser !== 'undefined' ? _currentUser?.id || '' : ''}:${id}`; }
 function projectGoalEditorDraft() {
   const key = projectGoalKey();
   if (!projectGoalEditors.has(key)) {
@@ -52,6 +52,8 @@ function editInitialProjectGoal(field, value) {
 }
 async function createProjectGoalSpace() {
   if (projectSpaceSaving) return false;
+  projectSpaceDraft.requestId ||= projectClientId();
+  rememberProjectDraft();
   const draft = structuredClone(projectSpaceDraft);
   const initial = draft.initialGoal || {};
   const prompt = (initial.prompt ?? initial.title ?? '').trim();
@@ -72,6 +74,12 @@ async function createProjectGoalSpace() {
   try {
     space = await projectApi('', projectJson('POST', draft));
     if (draftKey !== projectDraftKey('new')) return false;
+    // A reload can interrupt the second request after the project was saved.
+    // Keep its first goal recoverable until the goal save is acknowledged.
+    const goalKey = projectGoalKey(space.id);
+    const pendingGoal = { ...goalInput, id: null };
+    projectGoalEditors.set(goalKey, pendingGoal);
+    rememberProjectGoalEditor(goalKey);
     newProjectDrafts.delete(draftKey);
     try { sessionStorage.removeItem(draftKey); } catch {}
     projectFileQueues.set(projectFileKey(space.id), projectFileQueues.get(filesKey) || []);
@@ -84,6 +92,10 @@ async function createProjectGoalSpace() {
     }
     await workApi('/goals', 'POST', { projectId: space.id, ...goalInput });
     goalSaved = true;
+    if (projectGoalEditors.get(goalKey) === pendingGoal) {
+      projectGoalEditors.delete(goalKey);
+      rememberProjectGoalEditor(goalKey);
+    }
     if (generation !== projectSpaceLoad) return true;
     projectSpaceTab = 'overview'; renderProjectSpaceList(); renderProjectSpaceDetail();
     if (!await flushProjectFiles(space.id)) return false;
@@ -268,7 +280,7 @@ function startProjectGoalWork(id) {
   const goal = projectGoalData?.goals.find(row => row.id === id); if (!goal) return;
   if (projectSpaceSaving || projectFileBusyKey === projectFileKey() || pendingProjectFiles().length) { projectMessage('Finish uploading your project files before starting work. Use Retry upload for any files still waiting.', true); return; }
   if (projectSpaceDraft?.dirty) { projectMessage('Save your project context in Context & tasks before starting work.', true); return; }
-  const draft = goalRunDraft(goal); draft.requestId ||= crypto.randomUUID();
+  const draft = goalRunDraft(goal); draft.requestId ||= projectClientId();
   return projectGoalMutation(async () => {
     const result = await projectApi(`/${selectedProjectSpace.id}/start-work`, projectJson('POST', { goalId: id, revision: goal.revision, agentId: draft.agentId, instructions: draft.instructions, requestId: draft.requestId }));
     delete draft.requestId;

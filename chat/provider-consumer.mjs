@@ -490,6 +490,10 @@ export async function* consumeProvider(providerGen, {
       yield {
         type: 'error',
         message,
+        ...(e?.code || e?.cause?.code ? { code: String(e.code || e.cause.code) } : {}),
+        ...(Number.isInteger(e?.status ?? e?.statusCode) ? { status: e.status ?? e.statusCode } : {}),
+        ...(typeof e?.retryable === 'boolean' ? { retryable: e.retryable } : {}),
+        ...(e?.providerUpdateNoReplay === true ? { retryable: false } : {}),
         ...(toolIdentityAnomalies.length ? { retryable: false } : {}),
       };
     } else {

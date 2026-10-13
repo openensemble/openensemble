@@ -37,7 +37,7 @@ async function uploadProjectFiles(files) {
   if (chosen.some(file => file.size >= 500 * 1024 * 1024)) {
     projectMessage('Each file must be smaller than 500 MB.', true); return;
   }
-  for (const file of chosen) pending.push({ id: crypto.randomUUID(), file });
+  for (const file of chosen) pending.push({ id: projectClientId(), file });
   renderProjectFiles();
   if (selectedProjectSpace) await flushProjectFiles(selectedProjectSpace.id);
 }

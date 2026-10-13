@@ -210,18 +210,21 @@ export function getStripThinkingTags() {
 // Non-retryable 4xx (400/401/403/404/422) return immediately so per-provider
 // fallback handlers (native web_search, reasoning, max_completion_tokens,
 // stream_options) see them untouched.
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
+export const isRetryableProviderStatus = status => status === 408 || status === 429 || status >= 500 && status <= 599;
 
-function _retryDelay(ms, signal) {
+export function waitForProviderRetry(ms, signal) {
   return new Promise(resolve => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener?.('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    const finish = () => { clearTimeout(t); signal?.removeEventListener?.('abort', finish); resolve(); };
+    const t = setTimeout(finish, ms);
+    signal?.addEventListener?.('abort', finish, { once: true });
+    if (signal?.aborted) finish();
   });
 }
 
 export async function fetchWithRetry(url, opts = {}, { tries = 3, label = 'provider' } = {}) {
   let lastErr = null;
   for (let attempt = 1; attempt <= tries; attempt++) {
+    if (opts.signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     let res;
     try {
       res = await fetch(url, opts);
@@ -230,15 +233,15 @@ export async function fetchWithRetry(url, opts = {}, { tries = 3, label = 'provi
       lastErr = e;
       if (attempt === tries) throw e;
       console.warn(`[${label}] fetch failed (${e.message}) — retrying (${attempt}/${tries})`);
-      await _retryDelay(1000 * attempt, opts.signal);
+      await waitForProviderRetry(1000 * attempt, opts.signal);
       continue;
     }
-    if (res.ok || !RETRYABLE_STATUS.has(res.status) || attempt === tries) return res;
+    if (res.ok || !isRetryableProviderStatus(res.status) || attempt === tries) return res;
     const ra = parseFloat(res.headers.get('retry-after'));
     const delayMs = Math.min(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 1000 * 2 ** (attempt - 1), 8000);
-    try { await res.text(); } catch { /* drain to release the socket */ }
+    try { await res.body?.cancel(); } catch { /* release the failed response without waiting for its body */ }
     console.warn(`[${label}] ${res.status} — retrying in ${delayMs}ms (${attempt}/${tries})`);
-    await _retryDelay(delayMs, opts.signal);
+    await waitForProviderRetry(delayMs, opts.signal);
     if (opts.signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
   }
   throw lastErr ?? new Error(`${label}: retries exhausted`);

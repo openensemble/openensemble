@@ -66,8 +66,8 @@ import { streamOpenAICompat } from './providers/openai-compat.mjs';
 import { withProviderUpdateFeedback } from '../lib/provider-update-status.mjs';
 import { streamOpenAIResponses } from './providers/openai-responses.mjs';
 import { streamOllama } from './providers/ollama.mjs';
+import { consumeProviderWithRetry } from './provider-retry.mjs';
 import {
-  consumeProvider,
   mergeProviderUsage,
   compactToolIdentityAnomaly,
   toolIdentityDurabilityWarning,
@@ -910,10 +910,14 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
 
   const buildProviderGen = (agentObj, prompt, messages) => {
     const result = buildRawProviderGen(agentObj, prompt, messages);
-    return { ...result, providerGen: withProviderUpdateFeedback(result.providerGen, {
-      userId, provider: agentObj.provider, model: agentObj.model,
-    }) };
+    let initial = result.providerGen;
+    return { withSignalWordsGate: result.withSignalWordsGate, providerFactory: () => {
+      const providerGen = initial || buildRawProviderGen(agentObj, prompt, messages).providerGen;
+      initial = null;
+      return withProviderUpdateFeedback(providerGen, { userId, provider: agentObj.provider, model: agentObj.model });
+    } };
   };
+  const consumeChatProvider = (factory, options) => consumeProviderWithRetry(factory, { ...options, retry: Boolean(projectId), signal });
 
   const recomposeSystemPromptForCurrentTools = () => {
     if (agent._promptTiers && agent._composerInputs) {
@@ -1233,7 +1237,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   // ── Chat-provider dispatch ──────────────────────────────────────────────────
   // Each branch forwards events via consumeProvider, captures __content, then
   // persists + runs memory signals through persist().
-  let { providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, working);
+  let { providerFactory, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, working);
 
   const _llmStart = Date.now();
   // Stream the first draft live (previously buffered until end-of-turn). If a
@@ -1242,7 +1246,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   // recovery passes run — it no longer suppresses streaming.
   const canRecover = Boolean(_routerStore);
   let { assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
-    consumeProvider(providerGen, { suppressText: false }),
+    consumeChatProvider(providerFactory, { suppressText: false }),
     providerRouterStore,
   );
   let parallelPreflightFailure = null;
@@ -1263,14 +1267,14 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     ].join('\n');
     const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];
     yield { type: 'replace', text: '' };
-    ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
+    ({ providerFactory, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
     const _priorToolsUsed = toolsUsed;
     const _priorToolEvents = toolEvents;
     const _priorToolIdentityAnomalies = toolIdentityAnomalies;
     const _priorUsage = usage;
     const _priorModelCalls = modelCalls;
     {
-      const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
+      const _r = yield* bindToolRouterContext(consumeChatProvider(providerFactory, {
         suppressText: false,
         providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
       }), providerRouterStore);
@@ -1337,12 +1341,12 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
         // on voice. As a token it reaches both surfaces — the browser renders it,
         // the device speaks it — then the corrected reply streams live after it.
         yield { type: 'token', text: `\n\n${MISSING_TOOL_NOTICE}\n\n` };
-        ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
+        ({ providerFactory, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
         {
           const _priorUsage = usage;
           const _priorModelCalls = modelCalls;
           const _priorToolIdentityAnomalies = toolIdentityAnomalies;
-          const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
+          const _r = yield* bindToolRouterContext(consumeChatProvider(providerFactory, {
             suppressText: false,
             providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
           }), providerRouterStore);
@@ -1389,7 +1393,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
       // Token, not replace — voice devices only TTS token/done (see above), so
       // the notice + corrected reply both stream as tokens to reach voice + text.
       yield { type: 'token', text: `\n\n${IN_PROGRESS_NOTICE}\n\n` };
-      ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
+      ({ providerFactory, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
       // Preserve the first attempt's tool events/uses so persist() records them
       // (the destructure would otherwise replace them with the recovery run's).
       const _priorToolsUsed = toolsUsed;
@@ -1398,7 +1402,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
       const _priorUsage = usage;
       const _priorModelCalls = modelCalls;
       {
-        const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
+        const _r = yield* bindToolRouterContext(consumeChatProvider(providerFactory, {
           suppressText: false,
           providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
         }), providerRouterStore);

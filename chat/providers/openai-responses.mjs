@@ -27,7 +27,7 @@ import {
   compressToolDefs,
 } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
-import { buildImageUserMessage } from './_shared.mjs';
+import { buildImageUserMessage, isRetryableProviderStatus, waitForProviderRetry } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { nativeWebSearch, supportsImageGeneration } from '../../lib/model-capabilities.mjs';
 import { mapOpenAIResponsesReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
@@ -163,7 +163,7 @@ export function applyProviderHostedImageTool(agent, responsesTools, nativeImages
 }
 
 // Network-blip patterns we'll retry once before giving up. Anything else
-// (4xx, 5xx, auth, malformed body) propagates immediately — we don't want
+// (auth, malformed body) propagates immediately — we don't want
 // to mask real provider errors as transient network issues.
 const RETRIABLE_NETWORK_RE = /^fetch failed$|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR/i;
 function isRetriableNetworkError(e) {
@@ -273,17 +273,24 @@ function toolResultWithAttachmentEvidence(result, toolName, args, agent, generat
 async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null, xaiClient = false, userId = '' } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
+    if (init.signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     try {
-      if (xaiClient) return await fetchXaiCLI(url, init, { onAttempt, userId });
-      onAttempt?.();
-      return await fetch(url, init);
+      let response;
+      if (xaiClient) response = await fetchXaiCLI(url, init, { onAttempt, userId });
+      else { onAttempt?.(); response = await fetch(url, init); }
+      if (response.ok || !isRetryableProviderStatus(response.status) || i === attempts - 1) return response;
+      const retryAfter = parseFloat(response.headers.get('retry-after'));
+      const delayMs = Math.min(retryAfter > 0 ? retryAfter * 1000 : backoffMs * (i + 1), 8000);
+      try { await response.body?.cancel(); } catch { /* release the failed response */ }
+      console.warn(`[responses] ${response.status} — retrying request in ${delayMs}ms (${i + 1}/${attempts})`);
+      await waitForProviderRetry(delayMs, init.signal);
     } catch (e) {
-      if (e?.name === 'AbortError' || e?.providerUpdateNoReplay) throw e;
+      if (e?.name === 'AbortError' || init.signal?.aborted || e?.providerUpdateNoReplay || e?.retryable === false) throw e;
       lastErr = e;
       if (!isRetriableNetworkError(e) || i === attempts - 1) throw e;
       const causeTag = e.cause?.code || e.cause?.message || e.message;
       console.warn(`[openai-oauth] fetch attempt ${i + 1}/${attempts} failed (${causeTag}) — retrying in ${backoffMs}ms`);
-      await new Promise(r => setTimeout(r, backoffMs));
+      await waitForProviderRetry(backoffMs, init.signal);
     }
   }
   throw lastErr;
@@ -594,7 +601,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       const errTag = cause ? `${e.message} (${cause})` : e.message;
       console.error(`[${tag}] POST failed after retry: ${errTag}`);
       yield usageTelemetry();
-      yield { type: 'error', message: `${displayName}: ${errTag}` };
+      yield { type: 'error', message: `${displayName}: ${errTag}`,
+        ...(e?.retryable === false || e?.providerUpdateNoReplay === true || paidHostedImageOffered ? { retryable: false } : {}) };
       return;
     }
     if (!res.ok) {
@@ -1043,9 +1051,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // below, which would otherwise reject this round as a truncated stream.
     if (retryTransientStream) {
       retryTransientStream = false;
-      await new Promise(resolve => setTimeout(
-        resolve, TRANSIENT_STREAM_RETRY_BASE_MS * transientStreamRetries,
-      ));
+      await waitForProviderRetry(TRANSIENT_STREAM_RETRY_BASE_MS * transientStreamRetries, signal);
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
       continue;
     }

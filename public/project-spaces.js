@@ -11,13 +11,18 @@ let projectSpaceDeleting = null;
 const newProjectDrafts = new Map();
 const deletedProjectSpaceIds = new Set();
 
+function projectClientId() {
+  // randomUUID is unavailable on plain HTTP LAN addresses.
+  return crypto.randomUUID?.() || [...crypto.getRandomValues(new Uint8Array(16))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+}
 function projectDraftKey(id) {
   return `oe.projectDraft.${typeof _currentUser !== 'undefined' ? _currentUser?.id || '' : ''}.${id}`;
 }
 async function projectApi(suffix = '', options = {}) {
   const response = await fetch(`/api/project-spaces${suffix}`, options);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Project request failed');
+  if (!response.ok) throw Object.assign(new Error(data.error || 'Project request failed'), { status: response.status });
   return data;
 }
 function projectJson(method, body) {
@@ -199,7 +204,7 @@ function addProjectTask() {
   const text = $('projectNewTask').value.trim();
   if (!text) return;
   if (projectSpaceDraft.tasks.length >= 100) { projectMessage('You can keep up to 100 checklist items.', true); return; }
-  projectSpaceDraft.tasks.push({ id: crypto.randomUUID(), text, done: false });
+  projectSpaceDraft.tasks.push({ id: projectClientId(), text, done: false });
   projectSpaceDraft.dirty = true; rememberProjectDraft(); renderProjectChecklist(); $('projectNewTask').value = '';
 }
 function toggleProjectTask(id, done) {
