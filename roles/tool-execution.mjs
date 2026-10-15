@@ -496,6 +496,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
   // through the failure path at the bottom of this function.
   let _resultWasError = false;
   let _lastErrText = '';
+  let _lastFailureKind = null;
   let _lastResultText = ''; // personalization: last post-processed result text, read at the completion site below
   const _postProcessResult = async (value) => {
     // Tool-error tagging — runs for ALL agents (not just ephemeral). Tag the
@@ -504,11 +505,13 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
       if (value.isError === true) {
         _resultWasError = true;
         _lastErrText = value.text;
+        _lastFailureKind = value.failureKind || null;
       }
       const norm = normalizeToolResult(value.text);
       if (norm.isError) {
         _resultWasError = true;
         _lastErrText = norm.text;
+        _lastFailureKind = value.failureKind || null;
         value = { ...value, text: norm.text, isError: true };
       }
     }
@@ -538,9 +541,9 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
   };
   // Count a tool failure (threshold-gated tool_failure proposal). Shared by the
   // throw path (catch below) and the caught-and-returned-error path.
-  const _reportToolFailure = (message) => {
+  const _reportToolFailure = (message, failureKind = null) => {
     if (suppressLearning) return;
-    recordToolFailure(userId, name, message).then(async signal => {
+    recordToolFailure(userId, name, message, { failureKind }).then(async signal => {
       if (signal?.proposed) {
         try {
           const { proposeToolFailure } = await import('../lib/proposals.mjs');
@@ -941,7 +944,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
                     origin: captured.scheduledCtx?.originTaskId ? 'automation' : 'interactive',
                   });
                 } catch { /* never block auto-bg finalization */ }
-                if (completion.isError) _reportToolFailure(completion.text);
+                if (completion.isError) _reportToolFailure(completion.text, _lastFailureKind);
                 if (captured.adopted) {
                   // Chip + root-graph finalization belong to the delegate
                   // skill's sync-delegation handle (children-aware, already ran
@@ -1624,7 +1627,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
       // failure (not a default-arg success) so flaky-tool proposals still fire
       // and the recipe learner doesn't bank a failed call as a success recipe.
       log.warn('tool', 'tool returned error', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: _lastErrText.slice(0, 200) });
-      _reportToolFailure(_lastErrText);
+      _reportToolFailure(_lastErrText, _lastFailureKind);
     }
   } catch (e) {
     if (isAbortError(e, toolAbort.signal)) {
@@ -1647,13 +1650,14 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
     log.error('tool', 'tool threw', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: e.message });
     const errorText = `Tool error (${name}): ${e.message}`;
     settleReplayReservation({ text: errorText, isError: true, status: 'uncertain' });
-    yield { type: 'result', text: errorText, isError: true };
+    yield { type: 'result', text: errorText, isError: true,
+      ...(e.failureKind ? { failureKind: e.failureKind } : {}) };
 
     // Phase-3: count the failure. Fire-and-forget so the user's bubble lands
     // immediately. On threshold trip we emit a tool_failure proposal (the
     // owning-skill id is captured so the proposer can route the remedy through
     // refine vs a diagnostic). Shared with the caught-and-returned-error path.
-    _reportToolFailure(e.message);
+    _reportToolFailure(e.message, e.failureKind || null);
   } finally {
     settleReplayReservation({
       text: `Tool ${name} ended before returning a result.`,

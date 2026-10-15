@@ -162,6 +162,7 @@ export function recordWorkerProgress(taskId, note) {
 export function spawnWorker({
   workerAgent, task, executionTask = null, userId, chipOwnerId, ownerKey,
   workerName = 'Worker', emoji = '🤖',
+  label = null,
   originalTask: requestedOriginalTask = null,
   rootTaskId: requestedRootTaskId = null,
   sourceMessageId = null,
@@ -227,7 +228,7 @@ export function spawnWorker({
       ? workerAgent.reasoningEffort.trim().slice(0, 40)
       : null,
     executionTargetExplicit: workerAgent._executionTargetLocked === true,
-    startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
+    startedAt: Date.now(), summary, label: String(label || summary).slice(0, 160), ownerKey, isWorker: true, phase: 'queued',
     requestedWorkstreams: Number.isSafeInteger(workerAgent.requestedWorkstreams)
       ? workerAgent.requestedWorkstreams
       : null,

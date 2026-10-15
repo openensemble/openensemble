@@ -386,6 +386,7 @@ export async function bootRecoverInterruptedTasks() {
         verifierLeaseToken: null,
         rawContextDurable: workerRawContextDurable,
         completionStatus: recoveredStatus,
+        requiredNotice: completion?.requiredNotice || '',
       });
       deliveryDurable = deliveryDurable && published;
       if (Array.isArray(completion?.images) && completion.images.length) {

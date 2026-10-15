@@ -161,6 +161,7 @@ export function _journalMarkCompletion(taskId, completion) {
         // restart.
         result: String(completion.result || ''),
         error: String(completion.error || '').slice(0, 8_000),
+        ...(completion.requiredNotice ? { requiredNotice: String(completion.requiredNotice) } : {}),
         images: Array.isArray(completion.images) ? completion.images.slice(0, 8) : [],
         completedAt: Date.now(),
       },

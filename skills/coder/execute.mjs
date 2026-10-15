@@ -18,6 +18,7 @@ import { createHash, randomBytes } from 'crypto';
 import { getLanAddress } from '../../discovery.mjs';
 import { stableAgentRef } from '../../lib/agent-ref.mjs';
 import { withFileLock, withFileLockSync } from '../../lib/file-lock.mjs';
+import { withTaskResourceLock } from '../../lib/task-resource-lock.mjs';
 import { atomicWriteSync } from '../../routes/_helpers/io-lock.mjs';
 import { compileProjectGlob } from './project-glob.mjs';
 
@@ -425,13 +426,15 @@ function assertProjectIdentity(userId, name, expectedIdentity) {
  */
 export function withCoderProjectLock(userId, name, fn, opts = {}) {
   const signal = opts.signal ?? null;
-  return withFileLock(projectMutationLockPath(userId, name), async () => {
+  return withTaskResourceLock(projectMutationLockPath(userId, name), async () => {
     throwIfCancelled(signal);
     if (opts.expectedIdentity) {
       assertProjectIdentity(userId, name, opts.expectedIdentity);
     }
     return fn();
   }, {
+    userId,
+    resource: opts.resource || `project ${JSON.stringify(name)}`,
     timeoutMs: opts.timeoutMs ?? PROJECT_LOCK_TIMEOUT_MS,
     staleMs: opts.staleMs ?? PROJECT_LOCK_STALE_MS,
     signal,
@@ -455,10 +458,12 @@ export function withCoderServerLock(userId, name, fn, opts = {}) {
   });
 }
 
-function withProjectContextLock(userId, context, fn, signal = null) {
+function withProjectContextLock(userId, context, fn, signal = null, filePath = null) {
   return withCoderProjectLock(userId, context.project, fn, {
     expectedIdentity: context.identity,
     signal,
+    resource: filePath == null ? null
+      : `file ${JSON.stringify(filePath)} in project ${JSON.stringify(context.project)} (project lock)`,
   });
 }
 
@@ -1014,7 +1019,7 @@ async function writeProjectFile(filePath, content, expectedRevision, userId, age
     const revision = fileRevision(content);
     appendLog(context.dir, `Wrote \`${filePath}\` (${content.split('\n').length} lines)`);
     return `Wrote ${filePath} (revision ${revision})`;
-  }, signal);
+  }, signal, filePath);
 }
 
 async function editProjectFile(filePath, oldStr, newStr, userId, agentId, signal = null) {
@@ -1035,7 +1040,7 @@ async function editProjectFile(filePath, oldStr, newStr, userId, agentId, signal
     const preview = oldStr.length > 60 ? oldStr.slice(0, 60) + '…' : oldStr;
     appendLog(context.dir, `Edited \`${filePath}\` — replaced "${preview}"`);
     return `Edited ${filePath} (revision ${fileRevision(updated)})`;
-  }, signal);
+  }, signal, filePath);
 }
 
 async function deleteProjectFile(filePath, userId, agentId, signal = null) {
@@ -1057,7 +1062,7 @@ async function deleteProjectFile(filePath, userId, agentId, signal = null) {
     unlinkSync(abs);
     appendLog(context.dir, `Deleted file \`${filePath}\``);
     return `Deleted ${filePath}`;
-  }, signal);
+  }, signal, filePath);
 }
 
 // Streaming shell executor: yields `{type:'token'}` chunks live and a final
@@ -1225,7 +1230,9 @@ async function* runCommand(command, timeout, userId, agentId, signal = null) {
     await producer;
     if (producerError) {
       if (signal?.aborted || producerError?.name === 'AbortError') throw cancellationError(signal);
-      yield { type: 'result', text: `Error: ${producerError.message}` };
+      yield { type: 'result', text: `Error: ${producerError.message}`,
+        ...(producerError.code === 'RESOURCE_LOCKED'
+          ? { isError: true, failureKind: 'resource_locked', resourceLock: producerError.resourceLock } : {}) };
     }
   } finally {
     signal?.removeEventListener('abort', forwardAbort);
@@ -1945,7 +1952,7 @@ async function multiEditProjectFile(filePath, edits, userId, agentId, signal = n
     atomicWriteSync(abs, content);
     appendLog(context.dir, `Multi-edited \`${filePath}\` (${edits.length} edits)`);
     return `Applied ${edits.length} edit${edits.length === 1 ? '' : 's'} to ${filePath} (revision ${fileRevision(content)})`;
-  }, signal);
+  }, signal, filePath);
 }
 
 // TODOs are scoped to (project incarnation, durable agent). Their authoritative
@@ -2775,6 +2782,11 @@ export async function* executeSkillTool(name, args, userId = 'default', agentId,
     }
   } catch (e) {
     if (signal?.aborted || e?.name === 'AbortError') throw cancellationError(signal);
+    if (e?.code === 'RESOURCE_LOCKED') {
+      yield { type: 'result', text: e.message, isError: true,
+        failureKind: 'resource_locked', resourceLock: e.resourceLock };
+      return;
+    }
     text = `Error: ${e.message}`;
   }
   yield { type: 'result', text: String(text ?? '') };

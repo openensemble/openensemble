@@ -1670,6 +1670,8 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   }
 
   // name === 'spawn_worker' — leaf rule: a worker can't hire workers.
+  // Admission rejections remain errors for the caller to correct, but carry
+  // a category so they do not become flaky-tool diagnostic proposals.
   // An unattended non-scheduled task already has one completion owner and no
   // child barrier. Refuse a second detached owner so the current task returns
   // the real work result instead of a premature worker acknowledgement.
@@ -1709,7 +1711,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: `${normalizedAllocation.error} If the user did not name a provider or model: ${INHERITED_EXECUTION_GUIDANCE} No worker was started.`,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1723,7 +1725,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: 'No worker was started because this is an ordinary prompt. Complete it directly in the current execution path; workers require an explicit user request for background or agent execution.',
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1747,7 +1749,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: `worker_count must be a whole number from 2 to ${MAX_DECLARED_WORKSTREAMS}. No worker was started; do not silently substitute another count.`,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1771,7 +1773,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: 'No worker was started because the server could not verify the initiating user request. Retry from the original chat turn.',
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1780,7 +1782,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     hasWorkerCount ? modelRequestedWorkstreams : null,
   );
   if (!initialAllocation.ok) {
-    yield { type: 'result', text: initialAllocation.error, isError: true };
+    yield { type: 'result', text: initialAllocation.error, isError: true, failureKind: 'request_rejected' };
     return;
   }
   if (hasWorkerCount && trustedExactCounts.length === 0) {
@@ -1789,7 +1791,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       text: admittedAllocationEntries.length
         ? 'execution_targets was not authorized because the provider/model name in the user request was not verified against this exact configured catalog pair. Call list_execution_targets in the same turn and pass only an exact returned pair. No worker was started.'
         : 'worker_count was not accepted because the user did not explicitly request an exact number of agents. No worker was started.',
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1797,7 +1799,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: `worker_count ${modelRequestedWorkstreams} does not match any exact agent count in the user's request (${trustedExactCounts.join(', ')}). No worker was started.`,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1806,7 +1808,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: `This prompt gives separate exact agent outcomes (${trustedExactCounts.join(', ')}). Pass the count for this specific outcome as worker_count; no worker was started.`,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1835,7 +1837,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       targetHints: attestedTargetHints,
     });
     if (!authorized.ok) {
-      yield { type: 'result', text: authorized.error, isError: true };
+      yield { type: 'result', text: authorized.error, isError: true, failureKind: 'request_rejected' };
       return;
     }
     exactOutcome = authorized.outcome;
@@ -1845,7 +1847,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: `execution_targets was not authorized because the user did not name a provider or model for the requested agents. ${INHERITED_EXECUTION_GUIDANCE} No worker was started.`,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1857,7 +1859,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       yield {
         type: 'result',
         text: 'The execution target allocation requests multiple agents, but the user did not request parallel agent execution. No worker was started.',
-        isError: true,
+        isError: true, failureKind: 'request_rejected',
       };
       return;
     }
@@ -1865,7 +1867,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       yield {
         type: 'result',
         text: `The execution target allocation requests ${initialAllocation.declaredCount} agents, but the user did not specify that exact count. Adaptive fan-out is limited to 2–${MAX_ADAPTIVE_WORKSTREAMS}; no worker was started.`,
-        isError: true,
+        isError: true, failureKind: 'request_rejected',
       };
       return;
     }
@@ -1876,7 +1878,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     requestedWorkstreams,
   );
   if (!allocationPlan.ok) {
-    yield { type: 'result', text: allocationPlan.error, isError: true };
+    yield { type: 'result', text: allocationPlan.error, isError: true, failureKind: 'request_rejected' };
     return;
   }
   if (requestedWorkstreams === null
@@ -1886,7 +1888,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: 'A one-agent execution target cannot satisfy the user\'s uncounted parallel-agent request. Omit the target count to apply it to every adaptive child. No worker was started.',
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1894,7 +1896,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: `The user requested ${requestedWorkstreams} agents, above this server's per-outcome safety cap of ${MAX_PARALLEL_WORKSTREAMS}. No worker was started; report the limit instead of silently reducing the request.`,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1967,7 +1969,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield {
       type: 'result',
       text: launchReservation.reason,
-      isError: true,
+      isError: true, failureKind: 'request_rejected',
     };
     return;
   }
@@ -1996,7 +1998,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       spawn: () => bg.spawnWorker({
         // Keep the user's task as the durable display/idempotency identity;
         // detached-autonomy guidance is only the model execution input.
-        workerAgent, task, executionTask: workerTask, userId, chipOwnerId, ownerKey,
+        workerAgent, task, label, executionTask: workerTask, userId, chipOwnerId, ownerKey,
         originalTask: task,
         workerName: `${ownerAgent.name} worker`, emoji: ownerAgent.emoji || '🤖',
         rootTaskId: sourceTurn?.rootId || null,
@@ -2108,7 +2110,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       type: 'result',
       text: isWorker
         ? 'You are a background worker and there are no other agents to hand work to. Finish the task yourself with your own tools, then reply with your report — it is delivered to your owner automatically.'
-        : 'This deployment runs a single agent (you) — there are no specialists to delegate to. Do the task directly with your own tools. For a long or parallel job, call spawn_worker with a complete, self-contained task: it runs detached, shows a progress chip, and its report lands back in this chat when done. If a tool you need is missing this turn, call request_tools.',
+        : 'This deployment runs a single agent (you) — there are no specialists to delegate to. Do the task directly with your own tools. Only when the user explicitly requests background or agent execution, call spawn_worker with a complete, self-contained task: it runs detached, shows a progress chip, and its report lands back in this chat when done. If a tool you need is missing this turn, call request_tools.',
     };
     return;
   }

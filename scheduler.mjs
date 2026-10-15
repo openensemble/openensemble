@@ -710,6 +710,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     const scheduledNote =
       `[SCHEDULED RUN] You are executing a previously-scheduled task right now. ` +
       `The user is NOT present and cannot answer follow-up questions. ` +
+      `This run already executes in the background. Complete the work directly with your own tools, using request_tools if needed. Start a worker only if the task itself explicitly requests background workers or agent execution; being scheduled or taking a long time is not worker authorization. ` +
       `Any "in N minutes" / "tomorrow" / "at HH:MM" phrases in the request are the trigger time that has already arrived — do not try to re-schedule. ` +
       `The user's original scheduling message IS the confirmation: execute every action directly and do NOT show drafts, ask "are you sure?", or wait for "send it"/"confirm" — there is no one here to answer. ` +
       `This overrides any "show draft and wait for approval" rule from skill prompts (email, finance, etc) for this run. ` +
@@ -762,6 +763,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
       originTaskRunId: scheduledCtx.runId,
+      originTaskLabel: task.label,
       originTaskManual: manual,
       rootTaskId: scheduledCtx.runId,
       traceSource: 'scheduled',

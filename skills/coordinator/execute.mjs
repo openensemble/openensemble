@@ -94,7 +94,7 @@ export default async function* execute(name, args, userId, agentId) {
     if (!r.addedToolNames.length) {
       const { getOrchestrationPolicy } = await import('../../lib/orchestration-policy.mjs');
       const fallback = getOrchestrationPolicy(userId).mode === 'single'
-        ? 'Continue with your own tools, or use spawn_worker for genuinely long or parallel work.'
+        ? 'Continue with your own tools. Use spawn_worker only when the user explicitly requests background or agent execution; scheduled tasks already run in the background.'
         : 'If you need a role-gated capability, use ask_agent to delegate instead.';
       yield { type: 'result', text: `No additional tools matched (reason: "${reason ?? '?'}", groups: ${JSON.stringify(groups ?? [])}). ${fallback}` };
       return;

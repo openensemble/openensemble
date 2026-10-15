@@ -11,6 +11,7 @@ import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { getTurnContext, runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { runInTaskContext } from '../lib/task-proxy-context.mjs';
+import { resourceLockConflictReport } from '../lib/task-resource-lock.mjs';
 import { toolRouterContext } from '../lib/tool-router-context.mjs';
 import { getScheduledContext } from '../lib/scheduled-context.mjs';
 import { learnToolPlanFromToolEvents, matchToolPlan } from '../lib/tool-plan-memory.mjs';
@@ -649,6 +650,7 @@ export async function _publishWorkerCompletion({
   taskId, userId, coordinatorAgentId, agentName, result, errorMsg, originalTask,
   persistedImages = [], verifierLeaseRequired = false, verifierLeaseToken = null,
   rawContextDurable = false, completionStatus = errorMsg ? 'error' : 'done',
+  requiredNotice = '',
 }) {
   const sessionAgentId = await _resolveRuntimeSessionKey(userId, coordinatorAgentId);
   if (!sessionAgentId) return false;
@@ -708,6 +710,8 @@ export async function _publishWorkerCompletion({
       originalTask, result, errorMsg, completionStatus,
     });
   }
+  // A named lock refusal must survive model summarization and crash recovery.
+  if (requiredNotice && !body.includes(requiredNotice)) body = _completionWithExactResult(body, requiredNotice);
   const ts = Date.now();
   const row = {
     // Even the deterministic OpenEnsemble fallback is a user-facing assistant
@@ -751,6 +755,7 @@ async function _runContinuation({
   reportImages = [], persistedImages = [], verifierLeaseRequired = false,
   verifierLeaseToken = null, rawContextDurable = false,
   completionStatus = errorMsg ? 'error' : 'done',
+  requiredNotice = '',
 }) {
   if (!isWorker && (errorMsg || !result)) return false;
   const sessionAgentId = await _resolveRuntimeSessionKey(userId, coordinatorAgentId);
@@ -762,6 +767,7 @@ async function _runContinuation({
       result, errorMsg, originalTask, persistedImages,
       verifierLeaseRequired, verifierLeaseToken,
       rawContextDurable, completionStatus,
+      requiredNotice,
     });
     await _publishWorkerArtifacts({
       taskId, userId, sessionAgentId, wsAgentId: agentId,
@@ -831,6 +837,12 @@ async function completeInProject(taskId, userId, coordinatorAgentId, agentName, 
   rec._finalizationClaimed = true;
   userId = rec.userId || userId;
   coordinatorAgentId = rec.coordinatorAgentId || coordinatorAgentId;
+  const lockReport = resourceLockConflictReport(rec);
+  if (lockReport) {
+    // Deterministic delivery: a model summary cannot hide an unresolved lock.
+    errorMsg = [errorMsg, lockReport].filter(Boolean).join('\n\n');
+    if (finalStatus !== 'cancelled') finalStatus = 'error';
+  }
   let status = finalStatus || (errorMsg ? 'error' : 'done');
   if (rec.status === 'cancelling') {
     status = 'cancelled';
@@ -862,6 +874,7 @@ async function completeInProject(taskId, userId, coordinatorAgentId, agentName, 
       status,
       result,
       error: errorMsg,
+      requiredNotice: lockReport,
       images: persistedImages,
     });
   }
@@ -1179,6 +1192,7 @@ async function completeInProject(taskId, userId, coordinatorAgentId, agentName, 
         verifierLeaseToken: rec ? (verifierLeaseTokens.get(rec) || null) : null,
         rawContextDurable: workerRawContextDurable,
         completionStatus: status,
+        requiredNotice: lockReport,
       });
     } catch (e) {
       if (rec.isWorker) completionDeliveryDurable = false;

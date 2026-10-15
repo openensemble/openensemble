@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createHash } from 'node:crypto';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 import { resolveBodyDoc, deleteBodyDoc } from '../../lib/email-body-doc.mjs';
 import { sendEmailIdempotently } from '../../lib/email-idempotency.mjs';
@@ -21,6 +22,9 @@ import {
 import { emailLabelsEnabled, recordLabelings, recordCorrection, removeCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
 import { buildEmailSubjectHeader } from '../../lib/email-headers.mjs';
 import { USERS_DIR } from '../../lib/paths.mjs';
+import { withTaskResourceLock } from '../../lib/task-resource-lock.mjs';
+import { getTurnContext } from '../../lib/turn-abort-context.mjs';
+import { abortError, isAbortError } from '../../lib/abort-utils.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const GMAIL_CLI = path.join(SKILL_DIR, 'gmail.mjs');
@@ -247,14 +251,19 @@ function spawnGmail(cmdArgs, userId, accountId) {
     const MAX_BUF = 512 * 1024; // 512KB max per stream
     proc.stdout.on('data', d => { if (out.length < MAX_BUF) out += d; });
     proc.stderr.on('data', d => { if (err.length < MAX_BUF) err += d; });
-    proc.on('close', () => resolve((out || err || 'done').trim()));
-    proc.on('error', e => resolve(`Error: ${e.message}`));
+    let timedOut = false;
+    let killTimer = null;
+    const finish = text => { clearTimeout(timer); clearTimeout(killTimer); resolve(text); };
+    proc.on('close', () => finish(timedOut ? 'Error: subprocess timed out after 30s' : (out || err || 'done').trim()));
+    proc.on('error', e => { if (!proc.pid) finish(`Error: ${e.message}`); });
     // Kill subprocess after 30s to prevent hangs
     const timer = setTimeout(() => {
+      timedOut = true;
       proc.kill('SIGTERM');
-      resolve('Error: subprocess timed out after 30s');
+      // Keep the mailbox lock until the subprocess actually exits, even if
+      // it ignores SIGTERM. Resolving at timeout would admit a second writer.
+      killTimer = setTimeout(() => proc.kill('SIGKILL'), 2_000);
     }, 30000);
-    proc.on('close', () => clearTimeout(timer));
   });
 }
 
@@ -763,7 +772,21 @@ export async function executePendingEmail(userId, agentId = null, expectedOpId =
 
 // ── Main executor ─────────────────────────────────────────────────────────────
 
-export default async function execute(name, args, userId) {
+const MAILBOX_MUTATIONS = new Set([
+  'email_compose', 'email_reply', 'email_trash', 'email_batch_trash',
+  'email_batch_label', 'email_label_query', 'email_purge_sender', 'email_mark_read',
+  'email_sort_local', 'email_correct_label', 'email_remove_label_correction',
+]);
+
+function mailboxLockPath(userId, account) {
+  if (!userId || path.basename(userId) !== userId || userId === '.' || userId === '..') {
+    throw new Error('A valid user is required for a mailbox lock.');
+  }
+  const key = createHash('sha256').update(JSON.stringify([account.provider, account.id])).digest('hex');
+  return path.join(USERS_DIR, userId, '.resource-locks', `mailbox-${key}.lock`);
+}
+
+export default async function execute(name, args, userId, _agentId, ctx) {
   // Stage destructive ops behind a chat-text confirmation
   if (DESTRUCTIVE_TOOLS.has(name) && !args?._userApproved) {
     const desc = name === 'email_purge_sender'
@@ -779,13 +802,30 @@ export default async function execute(name, args, userId) {
     return `⚠️ You are about to ${desc}. This is destructive. Type **APPROVE PURGE** in the chat to proceed, or say anything else to cancel.`;
   }
 
-  const result = await _executeInner(name, args, userId);
+  const signal = ctx?.signal ?? getTurnContext()?.signal ?? null;
+  let result;
+  try {
+    if (signal?.aborted) throw abortError(signal);
+    const mutates = MAILBOX_MUTATIONS.has(name) && !(name === 'email_sort_local' && args?.apply === false);
+    const account = mutates ? resolveAccount(loadAccounts(userId), requestedAccount(args)) : null;
+    result = account?.id
+      ? await withTaskResourceLock(mailboxLockPath(userId, account),
+        () => _executeInner(name, args, userId, account), {
+          userId, resource: `mailbox ${JSON.stringify(account.label)}`,
+          conflict: 'wait', signal, timeoutMs: 120_000,
+        })
+      : await _executeInner(name, args, userId);
+  } catch (error) {
+    if (isAbortError(error, signal)) throw abortError(signal, error.message);
+    if (error?.code === 'RESOURCE_LOCKED') throw error;
+    return `Tool error: Email operation failed: ${error.message}`;
+  }
   const compacted = isVoiceSource() ? compactForVoice(result, name) : result;
   if (UNTRUSTED_RESULTS.has(name)) return wrapUntrusted(compacted);
   return compacted;
 }
 
-async function _executeInner(name, args, userId) {
+async function _executeInner(name, args, userId, lockedAccount = null) {
   // List accounts — no account resolution needed
   if (name === 'email_list_accounts') {
     const accounts = loadAccounts(userId);
@@ -822,7 +862,7 @@ async function _executeInner(name, args, userId) {
   if (name === 'email_correct_label') {
     if (!emailLabelsEnabled()) return 'Email-label learning is turned off (cfg.localTier.emailLabels).';
     const accounts = loadAccounts(userId);
-    const account = resolveAccount(accounts, requestedAccount(args));
+    const account = lockedAccount || resolveAccount(accounts, requestedAccount(args));
     const labels = Array.isArray(args.labels) ? args.labels
       : (args.labels ? [args.labels] : (args.label ? [args.label] : []));
     const r = recordCorrection(userId, {
@@ -842,7 +882,7 @@ async function _executeInner(name, args, userId) {
   if (name === 'email_remove_label_correction') {
     if (!emailLabelsEnabled()) return 'Email-label learning is turned off (cfg.localTier.emailLabels).';
     const accounts = loadAccounts(userId);
-    const account = resolveAccount(accounts, requestedAccount(args));
+    const account = lockedAccount || resolveAccount(accounts, requestedAccount(args));
     const r = removeCorrection(userId, {
       sender: args.sender,
       subjectContains: Array.isArray(args.subject_contains) ? args.subject_contains
@@ -857,9 +897,9 @@ async function _executeInner(name, args, userId) {
   }
 
   const accounts = loadAccounts(userId);
-  if (!accounts.length) return 'No email accounts connected. Ask the user to connect an account in Settings → Profile → Connected Accounts.';
+  if (!accounts.length && !lockedAccount) return 'No email accounts connected. Ask the user to connect an account in Settings → Profile → Connected Accounts.';
 
-  const account = resolveAccount(accounts, requestedAccount(args));
+  const account = lockedAccount || resolveAccount(accounts, requestedAccount(args));
   if (!account) return 'Could not find a matching email account.';
 
   // Validate before taking the idempotency claim. body_doc_id is resolved only
