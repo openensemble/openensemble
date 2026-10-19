@@ -4,6 +4,7 @@ import { getProcessIdentity } from '../lib/file-lock.mjs';
 import { stableAgentRef } from '../lib/agent-ref.mjs';
 import { _journalMutateEntry, _journalReadEntry } from './journal.mjs';
 import { activeTasks } from './state.mjs';
+import { currentRunBudget } from '../lib/run-budgets.mjs';
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_ACTIONS = 256;
@@ -16,6 +17,7 @@ export function taskCheckpoint(agent, task, { userId, note = null, disabledReaso
     version: 1, owner: getProcessIdentity(), revision: 0, resumes: 0,
     status: 'running', actions: [], events: [], updatedAt: Date.now(),
     disabledReason,
+    ...(currentRunBudget()?.userId === userId ? { budgetRunId: currentRunBudget().runId } : {}),
     execution: {
       agentId: stableAgentRef(userId, agent.id), sessionId: agent.id,
       task: String(task || ''), note,

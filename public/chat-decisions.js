@@ -54,26 +54,11 @@ function appendProposalBubble(proposal, scroll = true) {
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex;gap:8px';
 
-  const acceptBtn = document.createElement('button');
-  acceptBtn.textContent = proposal.accept_label || 'Set it up';
-  acceptBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--accent, #6c8cff);background:var(--accent, #6c8cff);color:#fff;border-radius:4px;cursor:pointer;font-size:12px';
-  acceptBtn.addEventListener('click', () => respondToProposal(el, id, 'accept', acceptBtn, dismissBtn));
-  actions.appendChild(acceptBtn);
-
-  const dismissBtn = document.createElement('button');
-  dismissBtn.textContent = proposal.dismiss_label || 'No thanks';
-  dismissBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px';
-  dismissBtn.addEventListener('click', () => respondToProposal(el, id, 'dismiss', acceptBtn, dismissBtn));
-  actions.appendChild(dismissBtn);
-
-  // Permanent opt-out — dismiss only snoozes this pattern for 24h; this one
-  // records it so it's never proposed again.
-  const neverBtn = document.createElement('button');
-  neverBtn.textContent = "Don't propose again";
-  neverBtn.title = 'Never suggest this again (a normal dismiss only hides it for 24h)';
-  neverBtn.style.cssText = 'padding:6px 12px;border:none;background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px;text-decoration:underline;opacity:0.75';
-  neverBtn.addEventListener('click', () => respondToProposal(el, id, 'never', acceptBtn, dismissBtn));
-  actions.appendChild(neverBtn);
+  const reviewBtn = document.createElement('button');
+  reviewBtn.textContent = 'Review in Needs attention';
+  reviewBtn.className = 'cdraw-btn';
+  reviewBtn.addEventListener('click', () => openNeedsAttention({ proposalId: id }));
+  actions.appendChild(reviewBtn);
 
   el.appendChild(actions);
   insertBefore(el);
@@ -84,8 +69,7 @@ function appendProposalBubble(proposal, scroll = true) {
 // bubble — mutates the bubble in place. Three sources call this:
 //   1. session-load render pass (replay of persisted proposal_outcome entries)
 //   2. WS push of type 'proposal_outcome' (live update from server)
-//   3. respondToProposal local optimism on click (best-effort — the WS push
-//      will overwrite with the authoritative server state)
+// Pending actions live in Needs attention; the server owns outcome updates.
 //
 // Status progression: pending → running → (accepted | dismissed | failed).
 // Idempotent within a status: re-applying the same status leaves the bubble
@@ -183,28 +167,6 @@ function applyProposalOutcome(proposalId, status, outcome) {
     outcomeEl.textContent = `· ${status}`;
   }
   el.appendChild(outcomeEl);
-}
-
-async function respondToProposal(el, id, action, acceptBtn, dismissBtn) {
-  acceptBtn.disabled = true; dismissBtn.disabled = true;
-  acceptBtn.style.opacity = '0.5'; dismissBtn.style.opacity = '0.5';
-  try {
-    const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-    const data = await r.json().catch(() => ({}));
-    if (action === 'accept') {
-      // Server accepted asynchronously — render the in-flight state. The
-      // authoritative final outcome arrives via WS 'proposal_outcome' push
-      // when the agent run completes (success or retry-exhausted failure).
-      applyProposalOutcome(id, data.ok ? 'running' : 'failed', data.ok ? 'Setting it up…' : `Couldn’t set it up: ${data.error || 'unknown'}`);
-    } else {
-      // Dismiss is fast (no agent run) — apply final state immediately.
-      applyProposalOutcome(id, 'dismissed', null);
-    }
-  } catch (e) {
-    acceptBtn.disabled = false; dismissBtn.disabled = false;
-    acceptBtn.style.opacity = '1'; dismissBtn.style.opacity = '1';
-    alert('Proposal action failed: ' + e.message);
-  }
 }
 
 // Attachment save/discard prompt. Emitted by chat-dispatch at the end of any

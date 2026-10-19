@@ -966,13 +966,20 @@ async function finalizeScheduledTask(task, {
   await recordTaskRun(task, {
     ...(runId ? { runId } : {}),
     scheduledFor: task.datetime ?? task.time ?? null,
-    status: succeeded ? 'ok' : errorCode === 'persistence_failed' ? 'warning' : 'error',
+    status: succeeded ? 'ok' : errorCode === 'persistence_failed' || errorCode?.startsWith('RUN_BUDGET') ? 'warning' : 'error',
     output, attempts, errorCode,
     ...(startedAt ? { firedAt: startedAt, durationMs: Date.now() - startedAt } : {}),
     ...(succeeded ? {} : { error: lastError || 'unknown' }),
     ...(manual ? { manual: true } : {}),
   });
 
+  if (errorCode?.startsWith('RUN_BUDGET')) {
+    // Waiting for an explicit allowance is neither success nor a provider
+    // failure streak. Preserve one-shot tasks and their paused run receipt.
+    await updateTask(task.id, { lastRun: new Date().toISOString(), lastError: lastError || 'Run paused for budget review.' }, task.ownerId);
+    if (broadcast) broadcast({ type: 'task_ledger_updated', ownerId: task.ownerId, taskId: task.id });
+    return;
+  }
   if (manual) {
     // Test fire: never delete or disable. Record the outcome for the drawer
     // but leave the schedule + failure streak exactly as they were.

@@ -536,6 +536,7 @@ function reloadDocumentSession(agentId) {
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
   if (typeof _authSuspended !== 'undefined' && _authSuspended) return;
+  if (typeof notifyNeedsAttention === 'function') notifyNeedsAttention(msg.type);
   if (msg.type === 'project_deleted') {
     handleProjectSpaceDeleted(msg.projectId);
     return;
@@ -1182,9 +1183,8 @@ function handleServerMessage(msg) {
       streamEl = null; streamBuf = ''; resetToolRun();
       setStreaming(false); setTyping(false); showTurnError(msg.message, msg); break;
     case 'proposal':
-      // Friction-tracker proposal — actionable repeat detected, two-button
-      // bubble offering to set up the suggested automation. Persisted to
-      // the agent's session jsonl so it survives reload.
+      // Proposal notice links to Needs attention for review. The notice
+      // persists in the agent's session so it survives reload.
       if (!msg.agent || msg.agent === activeAgent) {
         appendProposalBubble(msg);
       }
@@ -1406,7 +1406,9 @@ function handleServerMessage(msg) {
       const requestedProjectAgent = new URLSearchParams(location.search).get('agent');
       if (requestedProjectAgent && agents.some(a => a.id === requestedProjectAgent)) {
         activeAgent = requestedProjectAgent;
-        const cleanUrl = new URL(location.href); cleanUrl.searchParams.delete('agent'); history.replaceState(null, '', cleanUrl);
+        const cleanUrl = new URL(location.href);
+        if (!cleanUrl.searchParams.has('searchMessage')) cleanUrl.searchParams.delete('agent');
+        history.replaceState(null, '', cleanUrl);
         if (!(activeAgent in sessions)) sessions[activeAgent] = [];
         requestAgentSession(activeAgent);
         renderSession();

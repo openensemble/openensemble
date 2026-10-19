@@ -1,3 +1,4 @@
+import { budgetIsActive } from '../../lib/run-budgets.mjs';
 /**
  * Anthropic Messages API streaming with tool calling + prompt caching.
  *
@@ -136,6 +137,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     if (!reasoningDisabled) applyAnthropicReasoning(body, agent);
 
     yield modelCallTraceEvent({
+      budgetRequest: body,
       provider: 'anthropic', model: agent.model, tools: body.tools, round: guard.count,
       requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
       wireReasoningEffort: body.output_config?.effort ?? null,
@@ -257,6 +259,9 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';
       console.log(`[anthropic] cache: mode=${tierMode} created=${cacheCreated} read=${cacheRead} uncached=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
     }
+
+    if (budgetIsActive()) yield { type: '__budget_usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens,
+      cachedTokens: totalCacheRead, cacheCreatedTokens: totalCacheCreated, provider: 'anthropic', usageComplete: Boolean(sawTerminal || stopReason) };
 
     // Refuse incomplete tool arguments and preserve the partial draft as
     // evidence. Retry ownership above this adapter guards completed effects.

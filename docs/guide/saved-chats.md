@@ -1,7 +1,7 @@
 ---
 title: "Saved chats"
 parent: User guide
-nav_order: 13
+nav_order: 15
 permalink: /guide/saved-chats/
 ---
 

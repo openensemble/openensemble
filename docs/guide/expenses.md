@@ -1,7 +1,7 @@
 ---
 title: "Expenses"
 parent: User guide
-nav_order: 19
+nav_order: 21
 permalink: /guide/expenses/
 ---
 

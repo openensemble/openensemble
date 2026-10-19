@@ -1,3 +1,4 @@
+import { budgetIsActive } from '../../lib/run-budgets.mjs';
 /**
  * LM Studio streaming — two paths:
  *   - streamLMStudio: native /api/v1/chat (stateful, no-tools only).
@@ -37,7 +38,7 @@ export async function* streamLMStudio(agent, systemPrompt, messages, signal, use
   // the vision turn) so a picture sent to a vision model isn't answered blind.
   const lastUser = [...messages].reverse().find(m => m.role === 'user');
   const hasAttachment = Array.isArray(lastUser?.content);
-  if (agent.tools?.length || hasAttachment) {
+  if (agent.tools?.length || hasAttachment || budgetIsActive()) {
     yield* streamLMStudioCompat(agent, systemPrompt, messages, signal, userId);
     return;
   }
@@ -62,6 +63,7 @@ export async function* streamLMStudio(agent, systemPrompt, messages, signal, use
   if (prevId) body.previous_response_id = prevId;
 
   yield modelCallTraceEvent({
+      budgetRequest: body,
     provider: 'lmstudio', model: agent.model, tools: body.tools, round: 1,
     requestedReasoningEffort: effort,
     wireReasoningEffort: body.reasoning ?? null,
@@ -235,6 +237,7 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
     }
 
     yield modelCallTraceEvent({
+      budgetRequest: body,
       provider: 'lmstudio', model: agent.model, tools: body.tools, round: guard.count,
       requestedReasoningEffort: effort,
       wireReasoningEffort: body.reasoning ?? null,
@@ -322,6 +325,8 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
       lmInputTokens  += iterUsage.prompt_tokens     ?? 0;
       lmOutputTokens += iterUsage.completion_tokens ?? 0;
     }
+
+    if (budgetIsActive()) yield { type: '__budget_usage', inputTokens: lmInputTokens, outputTokens: lmOutputTokens, provider: 'lmstudio', usageComplete: Boolean(iterUsage) };
 
     // Some LM Studio-compatible models stream their entire response in
     // reasoning_content and never emit content. Prefer normal content whenever

@@ -825,7 +825,8 @@ export default async function execute(name, args, userId, _agentId, ctx) {
     return `Tool error: Email operation failed: ${error.message}`;
   }
   const compacted = isVoiceSource() ? compactForVoice(result, name) : result;
-  if (name === 'email_workspace' && ['read', 'list', 'list_drafts', 'folders'].includes(args?.operation)) return wrapUntrusted(compacted);
+  if (name === 'email_workspace' && ['read', 'list', 'list_drafts', 'folders', 'check_sent'].includes(args?.operation)
+    && !(await import('../../lib/mail-workspace.mjs')).isMailUiAction()) return wrapUntrusted(compacted);
   if (UNTRUSTED_RESULTS.has(name)) return wrapUntrusted(compacted);
   return compacted;
 }

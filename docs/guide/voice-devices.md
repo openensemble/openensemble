@@ -1,7 +1,7 @@
 ---
 title: "Voice devices"
 parent: User guide
-nav_order: 29
+nav_order: 31
 permalink: /guide/voice-devices/
 ---
 

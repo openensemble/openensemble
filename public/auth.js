@@ -133,6 +133,10 @@ function suspendAccountSession() {
   for (const element of Array.from($('messages').children)) if (!element.id) element.remove();
   if (typeof renderAttachmentTray === 'function') renderAttachmentTray();
   if (typeof resetMailWorkspace === 'function') resetMailWorkspace();
+  if (typeof resetNeedsAttention === 'function') resetNeedsAttention();
+  if (typeof resetRunBudgets === 'function') resetRunBudgets();
+  if (typeof resetWorkSearch === 'function') resetWorkSearch();
+  if (typeof resetBackupChecks === 'function') resetBackupChecks();
   if (typeof resetChatAgents === 'function') resetChatAgents();
   if (typeof closeAllDrawers === 'function') closeAllDrawers();
   setStatus('offline');

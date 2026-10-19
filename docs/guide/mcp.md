@@ -1,7 +1,7 @@
 ---
 title: "MCP connections"
 parent: User guide
-nav_order: 24
+nav_order: 26
 permalink: /guide/mcp/
 ---
 

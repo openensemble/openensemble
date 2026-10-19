@@ -204,7 +204,10 @@ export async function handle(req, res) {
   if (req.method === 'GET' && pathname.endsWith('/download')) {
     const id = pathname.split('/')[3];
     const archive = archives.get(id);
-    if (!archive || archive.userId !== userId) { json(404, { error: 'Download expired or not found. Select the files again.' }); return true; }
+    if (!archive || archive.userId !== userId || archive.claimed) { json(404, { error: 'Download expired or not found. Select the files again.' }); return true; }
+    // Claim before yielding so concurrent requests cannot reuse this one-use ZIP.
+    // Keep it in the map until cleanup so active transfers still count toward limits.
+    archive.claimed = true;
     try {
       // A share revoked after preparation must not grant access via a cached ZIP.
       for (const item of archive.items) resolveItem(userId, item);

@@ -212,66 +212,8 @@ function avatarColor(seed) {
   return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
 
-// ── Conversation search ──────────────────────────────────────────────────────
-let _searchDebounce = null;
-function openSearch() {
-  const modal = $('searchModal');
-  modal.style.display = 'flex';
-  const input = $('searchInput');
-  input.value = '';
-  $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">Type to search your conversations</div>';
-  setTimeout(() => input.focus(), 50);
-  input.oninput = () => {
-    clearTimeout(_searchDebounce);
-    _searchDebounce = setTimeout(() => runSearch(input.value), 300);
-  };
-  input.onkeydown = e => { if (e.key === 'Escape') closeSearch(); };
-}
-function closeSearch() { $('searchModal').style.display = 'none'; }
-
-// Wrappers for the event-delegation harness — the harness routes
-// data-action="<name>" to window[name], so multi-statement inline handlers
-// move into named functions here. Keeps the call sites declarative.
-function _searchResultClick(agent) { closeSearch(); switchAgent(agent); }
+// Cross-work search and exact source navigation: work-search.js.
 function _dismissReminder(_event) { this.parentElement?.remove(); }
-
-async function runSearch(query) {
-  if (query.trim().length < 2) {
-    $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">Type at least 2 characters</div>';
-    return;
-  }
-  $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">Searching...</div>';
-  try {
-    const r = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-    const data = await r.json();
-    if (!data.results?.length) {
-      $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">No results found</div>';
-      return;
-    }
-    const agentMap = {};
-    agents.forEach(a => { const local = a.id.replace(/^user_[a-zA-Z0-9]+_/, ''); agentMap[local] = a; });
-    $('searchResults').innerHTML = data.results.map(r => {
-      const agent = agentMap[r.agent];
-      const name = agent?.name ?? r.agent;
-      const emoji = agent?.emoji ?? '🤖';
-      const date = r.ts ? new Date(r.ts).toLocaleDateString() : '';
-      // Escape regex metacharacters — searching "c++" or "(test" used to
-      // throw and blank the results pane.
-      const safeQuery = escHtml(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const snippet = escHtml(r.content).replace(new RegExp(`(${safeQuery})`, 'gi'), '<mark>$1</mark>');
-      return `<div class="search-result" data-action="_searchResultClick" data-args='${JSON.stringify([r.agent]).replace(/'/g, "&#39;")}' style="padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:4px;border:1px solid var(--border)">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-          <span>${emoji}</span><strong style="font-size:13px">${escHtml(name)}</strong>
-          <span style="margin-left:auto;font-size:11px;opacity:.5">${date}</span>
-          <span style="font-size:11px;opacity:.4;text-transform:capitalize">${r.role}</span>
-        </div>
-        <div style="font-size:12px;opacity:.8;line-height:1.4;overflow:hidden;max-height:40px">${snippet}</div>
-      </div>`;
-    }).join('');
-  } catch (e) {
-    $('searchResults').innerHTML = `<div style="text-align:center;color:var(--error);padding:24px">${escHtml(e.message)}</div>`;
-  }
-}
 
 // Ctrl+K keyboard shortcut for search
 document.addEventListener('keydown', e => {

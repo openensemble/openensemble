@@ -1,3 +1,4 @@
+import { searchWork, readSearchItem } from '../lib/work-search.mjs';
 import { projectSessionKey } from '../lib/project-context.mjs';
 import { getSavedChat } from '../lib/saved-chats.mjs';
 import { getProjectSpace } from '../lib/project-spaces.mjs';
@@ -10,7 +11,7 @@ import path from 'path';
 import {
   requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, isPrivileged,
   loadUsers, loadNotes, saveNotes, withLock, NOTES_PATH, readBody, safeId, BASE_DIR, getUserDir,
-  broadcastToUsers, getUserSessions, revokeSessionByPrefix, getAgentsForUser,
+  broadcastToUsers, getUserSessions, revokeSessionByPrefix, getAgentsForUser, listAgents,
   clearUserSessionsExcept, clearUserVoiceDeviceSessions, clearUserNodeSessions,
 } from './_helpers.mjs';
 
@@ -194,40 +195,19 @@ export async function handle(req, res) {
     return true;
   }
 
-  // ── Conversation search ──────────────────────────────────────────────────
-  if (req.url.startsWith('/api/search') && req.method === 'GET') {
-    const authId = requireAuth(req, res); if (!authId) return true;
-    const params = new URL(req.url, 'http://x').searchParams;
-    const q = (params.get('q') ?? '').trim().toLowerCase();
-    if (!q || q.length < 2) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Query must be at least 2 characters' }));
-      return true;
-    }
-    const sessDir = path.join(getUserDir(authId), 'sessions');
-    const results = [];
-    const MAX_RESULTS = 50;
+  // Account-wide search keeps the original /api/search result envelope.
+  const searchUrl = new URL(req.url, 'http://localhost');
+  if (['/api/search', '/api/search/item'].includes(searchUrl.pathname) && req.method === 'GET') {
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
+    const send = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     try {
-      if (fs.existsSync(sessDir)) {
-        for (const file of fs.readdirSync(sessDir).filter(f => f.endsWith('.jsonl'))) {
-          const agentLocalId = file.replace('.jsonl', '');
-          const lines = fs.readFileSync(path.join(sessDir, file), 'utf8').trim().split('\n').filter(Boolean);
-          for (const line of lines) {
-            if (results.length >= MAX_RESULTS) break;
-            try {
-              const msg = JSON.parse(line);
-              const content = typeof msg.content === 'string' ? msg.content : '';
-              if (content.toLowerCase().includes(q)) {
-                results.push({ agent: agentLocalId, role: msg.role, content: content.slice(0, 300), ts: msg.ts });
-              }
-            } catch {}
-          }
-          if (results.length >= MAX_RESULTS) break;
-        }
-      }
-    } catch (e) { console.warn('[search]', e.message); }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ results, total: results.length }));
+      const owned = listAgents().filter(agent => agent.ownerId === authId);
+      const args = Object.fromEntries(searchUrl.searchParams);
+      const result = searchUrl.pathname === '/api/search/item'
+        ? await readSearchItem(authId, args, owned)
+        : await searchWork(authId, args.q, owned, { kind: args.kind || 'all', limit: args.limit });
+      send(200, result);
+    } catch (error) { send(error.status || 500, { error: error.status ? error.message : 'Search is temporarily unavailable.' }); }
     return true;
   }
 

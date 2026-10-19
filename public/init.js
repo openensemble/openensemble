@@ -277,6 +277,8 @@ async function init() {
   }
 
   connect();
+  if (typeof refreshNeedsAttention === 'function') refreshNeedsAttention();
+  if (typeof openWorkSearchTarget === 'function') openWorkSearchTarget().catch(error => showToast(error.message));
 
   // Fire-and-forget: light up the Guide button's "new" dot if whats-new.md
   // changed since this browser last opened it. Cheap GET; no need to await.

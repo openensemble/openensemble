@@ -1,7 +1,7 @@
 ---
 title: "OE Bridge"
 parent: User guide
-nav_order: 25
+nav_order: 27
 permalink: /guide/browser-bridge/
 ---
 

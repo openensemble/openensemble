@@ -4,7 +4,7 @@
     const node = lucide.icons[name.split('-').map(part => part[0].toUpperCase() + part.slice(1)).join('')];
     return node ? lucide.createElement(node, { class: 'icon', width: size, height: size, 'aria-hidden': 'true' }).outerHTML : '';
   };
-  const M = { accounts: [], account: 'all', folders: {}, folderRequests: new Map(), collapsedFolders: new Set(), folderMutation: false, folder: 'inbox', query: '', filter: 'all', emails: [], drafts: [], cursors: {}, selected: new Set(), detail: null, draft: null, dirty: false, saving: null, timer: null, poll: null, generation: 0, detailGeneration: 0, session: 0, busy: false, sending: false, upload: false, images: false };
+  const M = { accounts: [], account: 'all', folders: {}, folderRequests: new Map(), collapsedFolders: new Set(), folderMutation: false, folder: 'inbox', query: '', filter: 'all', emails: [], drafts: [], resolved: [], reviewNotes: new Map(), reviewing: false, cursors: {}, selected: new Set(), detail: null, draft: null, dirty: false, saving: null, timer: null, poll: null, generation: 0, detailGeneration: 0, session: 0, busy: false, sending: false, upload: false, images: false };
   const e = value => escHtml(String(value ?? ''));
   const editorHtml = value => DOMPurify.sanitize(value, { ALLOWED_TAGS: ['p', 'br', 'div', 'span', 'b', 'strong', 'i', 'em', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'a', 'pre', 'code', 'h1', 'h2', 'h3', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'], ALLOWED_ATTR: ['href', 'title', 'colspan', 'rowspan'] });
   const key = mail => `${mail.accountId}\n${mail.id}`;
@@ -51,9 +51,10 @@
       } else if (event.target.id === 'mailMove') {
         if (event.target.value && M.detail) update('move', event.target.value, M.detail).catch(error => notice(error.message, true));
       } else if (event.target.id === 'mailFiles') uploadFiles(event.target.files).catch(error => notice(error.message, true));
+      else if (event.target.id === 'mailReviewNote') M.reviewNotes.set(M.draft?.id, event.target.value);
       else if (event.target.closest('#mailComposer')) changed();
     });
-    section.addEventListener('input', event => { if (event.target.closest('#mailComposer')) changed(); });
+    section.addEventListener('input', event => { if (event.target.id === 'mailReviewNote') M.reviewNotes.set(M.draft?.id, event.target.value); else if (event.target.closest('#mailComposer')) changed(); });
     section.addEventListener('submit', event => { if (event.target.id === 'mailFolderForm') { event.preventDefault(); saveFolderForm(); } });
     section.addEventListener('paste', event => {
       if (event.target.id !== 'mailEditor') return;
@@ -72,9 +73,9 @@
       if (event.key === 'Escape') handle(M.draft ? 'save-close' : M.detail ? 'back' : 'close').catch(error => notice(error.message, true));
     }, { signal: M.events.signal });
   }
-  async function openMailWorkspace() {
+  async function openMailWorkspace(options = {}) {
     shell();
-    if (active()) return closeMailWorkspace();
+    if (active()) { if (!options.draftId) return closeMailWorkspace(); await openReviewDraft(options.draftId); return; }
     closeAllDrawers();
     document.querySelector('.desk').classList.add('mail-mode'); $('mailWorkspace').hidden = false;
     $('sbtnInbox').classList.add('active'); $('sbtnInbox').setAttribute('aria-expanded', 'true');
@@ -92,13 +93,14 @@
       const errors = await refreshFolders();
       if (generation !== M.generation) return;
       renderNavigation(); await load();
+      if (options.draftId) await openReviewDraft(options.draftId);
       if (errors.length) notice(errors.join(' · '), true);
       clearInterval(M.poll);
       M.poll = setInterval(() => { if (active() && !document.hidden) refreshDrafts().catch(() => {}); }, 5000);
     } catch (error) { if (generation === M.generation) notice(error.message, true); }
   }
   async function closeMailWorkspace() {
-    if (M.sending) { notice('Wait for this message to finish sending.', true); return; }
+    if (M.sending || M.reviewing) { notice('Wait for this mail operation to finish.', true); return; }
     if (M.upload) { notice('Wait for attachments to finish uploading.', true); return; }
     if (M.draft) { await saveDraft(); M.draft = null; }
     M.readerResize?.disconnect();
@@ -112,7 +114,7 @@
   function resetMailWorkspace() {
     M.readerResize?.disconnect();
     clearTimeout(M.timer); clearTimeout(changeTimer); clearTimeout(folderChangeTimer); pendingFolderAccounts.clear(); clearInterval(M.poll); M.events?.abort(); M.generation++; M.detailGeneration++; M.session++;
-    Object.assign(M, { accounts: [], account: 'all', folders: {}, folderRequests: new Map(), collapsedFolders: new Set(), folderMutation: false, folder: 'inbox', query: '', filter: 'all', cursors: {}, emails: [], drafts: [], selected: new Set(), draft: null, detail: null, dirty: false, saving: null, conflict: false, busy: false, sending: false, deletingDraft: false, upload: false, images: false });
+    Object.assign(M, { accounts: [], account: 'all', folders: {}, folderRequests: new Map(), collapsedFolders: new Set(), folderMutation: false, folder: 'inbox', query: '', filter: 'all', cursors: {}, emails: [], drafts: [], resolved: [], reviewNotes: new Map(), reviewing: false, selected: new Set(), draft: null, detail: null, dirty: false, saving: null, conflict: false, busy: false, sending: false, deletingDraft: false, upload: false, images: false });
     document.querySelector('.desk')?.classList.remove('mail-mode', 'mail-chat');
     $('mailAssistantClose')?.remove();
     $('mailWorkspace')?.remove();
@@ -123,7 +125,7 @@
   }
   function folderTitle() {
     if (M.folder.startsWith('custom:')) return M.folders[M.account]?.find(f => f.id === M.folder.slice(7))?.name || 'Folder';
-    return ({ inbox: M.account === 'all' ? 'All inboxes' : 'Inbox', drafts: 'Drafts', sent: 'Sent', archive: 'Archive', trash: 'Trash', starred: 'Starred' })[M.folder] || 'Mail';
+    return ({ inbox: M.account === 'all' ? 'All inboxes' : 'Inbox', drafts: 'Drafts', review: 'Delivery review', resolved: 'Resolved delivery', sent: 'Sent', archive: 'Archive', trash: 'Trash', starred: 'Starred' })[M.folder] || 'Mail';
   }
   async function refreshFolders(accountId = null) {
     const session = M.session;
@@ -240,13 +242,13 @@
   function renderNavigation() {
     const a = account(M.account);
     const folders = M.folders[M.account] || [], tree = ['microsoft', 'imap'].includes(a?.provider) ? folderTree(folders) : null;
-    const standard = [['inbox', 'Inbox', 'inbox'], ['drafts', 'Drafts', 'file-pen-line'], ['sent', 'Sent', 'send'], ['archive', 'Archive', 'archive'], ['trash', 'Trash', 'trash-2']];
+    const standard = [['inbox', 'Inbox', 'inbox'], ['drafts', 'Drafts', 'file-pen-line'], ['review', 'Delivery review', 'shield-alert'], ['resolved', 'Resolved delivery', 'circle-check'], ['sent', 'Sent', 'send'], ['archive', 'Archive', 'archive'], ['trash', 'Trash', 'trash-2']];
     if (a?.provider === 'gmail') standard.splice(1, 0, ['starred', 'Starred', 'star']);
-    const folderButtons = standard.filter(([kind]) => kind === 'inbox' || kind === 'drafts' || M.account === 'all' || folders.some(f => f.kind === kind)).map(([id, label, glyph]) => {
+    const folderButtons = standard.filter(([kind]) => kind === 'inbox' || ['drafts', 'review', 'resolved'].includes(kind) || M.account === 'all' || folders.some(f => f.kind === kind)).map(([id, label, glyph]) => {
       const folder = tree && folders.find(f => f.kind === id);
       if (folder?.parentId) return '';
       if (folder) return tree.row(folder, 0, id);
-      return `<button class="mail-nav-item ${M.folder === id ? 'active' : ''}" data-mail="folder" data-value="${id}" ${M.folder === id ? 'aria-current="page"' : ''}>${icon(glyph, 18)}<span>${label}</span>${id === 'drafts' && M.drafts.length ? `<b>${M.drafts.length}</b>` : ''}</button>`;
+      return `<button class="mail-nav-item ${M.folder === id ? 'active' : ''}" data-mail="folder" data-value="${id}" ${M.folder === id ? 'aria-current="page"' : ''}>${icon(glyph, 18)}<span>${label}</span>${['drafts', 'review'].includes(id) && M.drafts.filter(d => (M.account === 'all' || d.accountId === M.account) && (id !== 'review' || ['sending', 'uncertain'].includes(d.status))).length ? `<b>${M.drafts.filter(d => (M.account === 'all' || d.accountId === M.account) && (id !== 'review' || ['sending', 'uncertain'].includes(d.status))).length}</b>` : ''}</button>`;
     }).join('');
     const folderButton = (f, controls = false) => `<div class="mail-label-row"><button class="mail-nav-item ${M.folder === `custom:${f.id}` ? 'active' : ''}" data-mail="folder" data-value="${e(`custom:${f.id}`)}" title="${e(f.name)}">${icon(f.kind === 'label' ? 'tag' : ({ SPAM: 'shield-alert', IMPORTANT: 'bookmark', DRAFT: 'file-pen-line', __snoozed__: 'clock', __all__: 'mails', __purchases__: 'shopping-bag' })[f.id] || 'folder', 16)}<span>${e(f.name)}</span></button>${controls ? `<span class="mail-label-actions">${command('label-edit', `Edit label ${f.name}`, 'pencil', f.id, 'mail-icon-btn')}${command('label-delete', `Delete label ${f.name}`, 'trash-2', f.id, 'mail-icon-btn')}</span>` : ''}</div>`;
     const extraFolders = tree ? tree.roots.filter(f => !['inbox', 'sent', 'archive', 'trash'].includes(f.kind)).map(f => tree.row(f)).join('') : folders.filter(f => ['label', 'folder'].includes(f.kind)).map(f => folderButton(f, a?.provider === 'gmail' && f.kind === 'label')).join('');
@@ -256,30 +258,30 @@
   }
   function visible() { return M.filter === 'unread' ? M.emails.filter(m => m.unread) : M.emails; }
   function renderList() {
-    const drafts = M.folder === 'drafts';
-    const list = drafts ? M.drafts.filter(d => M.account === 'all' || d.accountId === M.account).filter(d => !M.query || `${d.subject} ${d.body} ${d.to}`.toLowerCase().includes(M.query.toLowerCase())) : visible();
+    const drafts = ['drafts', 'review', 'resolved'].includes(M.folder);
+    const list = drafts ? (M.folder === 'resolved' ? M.resolved : M.drafts).filter(d => M.folder !== 'review' || ['sending', 'uncertain'].includes(d.status)).filter(d => M.account === 'all' || d.accountId === M.account).filter(d => !M.query || `${d.subject} ${d.body} ${d.to}`.toLowerCase().includes(M.query.toLowerCase())) : visible();
     $('mailLoadedCount').textContent = `${list.length} ${drafts ? 'saved' : 'loaded'}`;
     document.querySelectorAll('.mail-filter button').forEach(button => { button.classList.toggle('active', button.dataset.value === M.filter); button.disabled = drafts; });
     $('mailSelectAll').disabled = drafts || !list.length;
     $('mailSelectAll').checked = !drafts && list.length > 0 && list.every(m => M.selected.has(key(m)));
     $('mailSelectAll').indeterminate = !drafts && M.selected.size > 0 && !list.every(m => M.selected.has(key(m)));
     $('mailList').innerHTML = list.map((mail, index) => {
-      if (drafts) return `<article class="mail-row mail-draft-row ${M.draft?.id === mail.id ? 'selected' : ''}" role="listitem"><button class="mail-row-main" data-mail="edit-draft" data-value="${e(mail.id)}" aria-label="Open draft: ${e(mail.subject || 'Untitled message')}"><div class="mail-row-heading"><span class="mail-draft-label">Draft</span><time>${date(mail.updatedAt)}</time></div><strong>${e(mail.subject || 'Untitled message')}</strong><p>${e(mail.to || 'No recipients yet')}</p><p>${e(mail.body?.slice(0, 100) || 'Continue writing…')}</p>${mail.status !== 'draft' ? '<small class="mail-error-text">Check Sent · delivery unconfirmed</small>' : ''}</button>${mail.status === 'draft' ? command('delete-draft', `Delete draft: ${mail.subject || 'Untitled message'}`, 'trash-2', mail.id, 'mail-icon-btn mail-draft-delete') : ''}</article>`;
+      if (drafts) return `<article class="mail-row mail-draft-row ${M.draft?.id === mail.id ? 'selected' : ''}" role="listitem"><button class="mail-row-main" data-mail="edit-draft" data-value="${e(mail.id)}" aria-label="Open draft: ${e(mail.subject || 'Untitled message')}"><div class="mail-row-heading"><span class="mail-draft-label">${({ sent: 'Confirmed sent', archived: 'Archived review', sending: 'Review delivery', uncertain: 'Review delivery' })[mail.status] || 'Draft'}</span><time>${date(mail.updatedAt)}</time></div><strong>${e(mail.subject || 'Untitled message')}</strong><p>${e(mail.to || 'No recipients yet')}</p><p>${e(mail.body?.slice(0, 100) || 'Continue writing…')}</p>${['sending', 'uncertain'].includes(mail.status) ? '<small class="mail-error-text">Check Sent · delivery unconfirmed</small>' : ''}</button>${mail.status === 'draft' ? command('delete-draft', `Delete draft: ${mail.subject || 'Untitled message'}`, 'trash-2', mail.id, 'mail-icon-btn mail-draft-delete') : ''}</article>`;
       const k = key(mail), selected = M.detail && key(M.detail) === k;
       const tone = M.accounts.findIndex(a => a.id === mail.accountId) % 4;
       return `<article class="mail-row ${mail.unread ? 'unread' : ''} ${selected ? 'selected' : ''} ${M.selected.has(k) ? 'checked' : ''}" role="listitem"><button class="mail-row-select ${M.selected.has(k) ? 'is-checked' : ''}" data-mail="select" data-value="${e(k)}" aria-label="Select ${e(mail.subject)}" aria-pressed="${M.selected.has(k)}">${icon(M.selected.has(k) ? 'square-check' : 'square', 15)}</button><button class="mail-row-main" data-mail="read" data-value="${e(k)}" aria-label="${e(name(mail.from))}: ${e(mail.subject)}" ${selected ? 'aria-current="true"' : ''}><div class="mail-row-heading"><span>${e(name(mail.from))}</span><time>${date(mail.date)}</time></div><strong>${e(mail.subject || '(No subject)')}</strong><p>${e(mail.snippet || 'Open to read this message')}</p><div class="mail-row-foot"><span class="mail-mailbox-tag"><i class="tone-${tone}"></i>${e(account(mail.accountId)?.label || '')}</span>${mail.hasAttachments || mail.attachments?.length ? icon('paperclip', 13) : ''}${mail.unread ? '<span class="mail-unread-dot" aria-label="Unread"></span>' : ''}</div></button><button class="mail-row-star ${mail.starred ? 'starred' : ''}" data-mail="star" data-value="${e(k)}" aria-label="${mail.starred ? 'Unstar' : 'Star'} message">${icon('star', 15)}</button></article>`;
-    }).join('') || `<div class="mail-list-empty">${icon(M.query ? 'search' : 'inbox', 30)}<strong>${M.query ? 'No matches here' : drafts ? 'Your drafts will live here' : M.filter === 'unread' ? 'No unread mail loaded' : 'You’re all caught up'}</strong><p>${M.query ? 'Try another search or choose a different mailbox.' : drafts ? 'Start a message. We’ll save it as you write.' : 'Refresh to check for new messages.'}</p></div>`;
+    }).join('') || `<div class="mail-list-empty">${icon(M.query ? 'search' : 'inbox', 30)}<strong>${M.query ? 'No matches here' : M.folder === 'review' ? 'No delivery reviews waiting' : M.folder === 'resolved' ? 'No resolved reviews yet' : drafts ? 'Your drafts will live here' : M.filter === 'unread' ? 'No unread mail loaded' : 'You’re all caught up'}</strong><p>${M.query ? 'Try another search or choose a different mailbox.' : M.folder === 'review' ? 'Messages with uncertain delivery appear here.' : M.folder === 'resolved' ? 'Confirmed and archived reviews keep their evidence here.' : drafts ? 'Start a message. We’ll save it as you write.' : 'Refresh to check for new messages.'}</p></div>`;
     $('mailListFooter').innerHTML = !drafts && Object.values(M.cursors).some(Boolean) ? command('more', 'Load more messages', 'chevron-down') : `<span>${list.length ? 'You’re viewing the latest loaded mail' : ''}</span>`;
     const bulk = $('mailBulk'); bulk.hidden = !M.selected.size || drafts;
     bulk.innerHTML = `<span>${M.selected.size} selected</span>${command('archive', 'Archive', 'archive', '', 'mail-icon-btn')}${command('unread', 'Mark unread', 'mail', '', 'mail-icon-btn')}${command('trash', 'Move to Trash', 'trash-2', '', 'mail-icon-btn')}${command('clear-selection', 'Clear selection', 'x', '', 'mail-icon-btn')}`;
   }
   async function refreshDrafts() {
     const generation = M.generation;
-    const data = await api('list_drafts');
+    const [data, resolved] = await Promise.all([api('list_drafts'), M.folder === 'resolved' || ['sent', 'archived'].includes(M.draft?.status) ? api('list_drafts', { view: 'resolved' }) : Promise.resolve(null)]);
     if (generation !== M.generation) return;
-    M.drafts = data.drafts || [];
+    M.drafts = data.drafts || []; if (resolved) M.resolved = resolved.drafts || [];
     if (M.draft && !M.dirty && !M.saving && !M.upload && !M.busy && !M.deletingDraft) {
-      const fresh = M.drafts.find(d => d.id === M.draft.id);
+      const fresh = [...M.drafts, ...M.resolved].find(d => d.id === M.draft.id);
       if (fresh && (fresh.version > M.draft.version || fresh.status !== M.draft.status)) {
         const edited = fresh.version > M.draft.version;
         M.draft = fresh; renderComposer();
@@ -287,14 +289,14 @@
       }
       else if (!fresh) { M.draft = null; M.detail ? renderReader() : renderEmpty(); notice('This draft was sent or discarded elsewhere.'); }
     }
-    if (M.folder === 'drafts') renderList();
+    if (['drafts', 'review', 'resolved'].includes(M.folder)) renderList();
     renderNavigation();
   }
   async function load(more = false) {
     const generation = ++M.generation;
     notice('');
     if (!more) { M.selected.clear(); M.emails = []; M.cursors = {}; renderList(); }
-    if (M.folder === 'drafts') { await refreshDrafts(); return; }
+    if (['drafts', 'review', 'resolved'].includes(M.folder)) { await refreshDrafts(); return; }
     if (!M.accounts.length) { renderEmpty('Connect your first mailbox', 'Bring your Gmail, Microsoft or IMAP accounts together in one place.', true); return; }
     $('mailListFooter').innerHTML = '<span class="mail-loading">Loading messages…</span>';
     const accounts = M.accounts.filter(a => (M.account === 'all' || a.id === M.account) && folderFor(a) && (!more || M.cursors[a.id]));
@@ -460,7 +462,7 @@
     M.draft.body = $('mailEditor').innerText;
     M.draft.html = editorHtml($('mailEditor').innerHTML);
   }
-  function changed() { captureDraft(); M.dirty = true; $('mailSaveStatus').textContent = 'Unsaved changes'; clearTimeout(M.timer); if (!M.conflict) M.timer = setTimeout(() => saveDraft().catch(error => notice(error.message, true)), 700); }
+  function changed() { if (!M.draft || M.draft.status !== 'draft' || M.reviewing) return; captureDraft(); M.dirty = true; $('mailSaveStatus').textContent = 'Unsaved changes'; clearTimeout(M.timer); if (!M.conflict) M.timer = setTimeout(() => saveDraft().catch(error => notice(error.message, true)), 700); }
   function draftConflict() {
     M.conflict = true;
     if ($('mailDraftConflict') || !$('mailComposer')) return;
@@ -484,7 +486,7 @@
         M.draft.id = result.draft.id; M.draft.version = result.draft.version;
         M.drafts = M.drafts.filter(d => d.id !== result.draft.id).concat(result.draft);
         $('mailSaveStatus').textContent = M.dirty ? 'Unsaved changes' : 'Saved in OE';
-        renderNavigation(); if (M.folder === 'drafts') renderList();
+        renderNavigation(); if (['drafts', 'review', 'resolved'].includes(M.folder)) renderList();
       } catch (error) { if (generation === M.detailGeneration) { M.dirty = true; if ($('mailSaveStatus')) $('mailSaveStatus').textContent = 'Not saved — retry'; if (/changed elsewhere|no longer available/i.test(error.message)) draftConflict(); } throw error; }
       finally { if (generation === M.detailGeneration) M.saving = null; }
     })();
@@ -528,11 +530,72 @@
     const d = M.draft; if (!d) return;
     const locked = M.sending || (d.status && d.status !== 'draft');
     $('mailWorkspace').classList.add('mail-reading-open');
-    $('mailReading').innerHTML = `<div id="mailComposer" class="mail-composer"><div class="mail-compose-heading"><div><span class="mail-eyebrow">${locked ? 'DELIVERY UNCONFIRMED' : 'YOUR DRAFT'}</span><h2>${d.inReplyTo ? 'Reply' : 'New message'}</h2></div><span id="mailSaveStatus">${d.id ? 'Saved in OE' : 'Saving…'}</span>${command('save-close', 'Save & close', 'x', '', 'mail-icon-btn')}</div><div class="mail-compose-fields"><label><span>From</span><select id="mailDraftAccount" ${d.inReplyTo || d.attachments.some(a => a.source) || locked ? 'disabled' : ''}>${M.accounts.map(a => `<option value="${e(a.id)}" ${a.id === d.accountId ? 'selected' : ''}>${e(a.label)}${a.email || a.username ? ` · ${e(a.email || a.username)}` : ''}</option>`).join('')}</select></label>${['to', 'cc', 'bcc', 'subject'].map(field => `<label><span>${({ to: 'To', cc: 'Cc', bcc: 'Bcc', subject: 'Subject' })[field]}</span><input id="mailDraft_${field}" value="${e(d[field] || '')}" placeholder="${field === 'subject' ? 'Add a subject' : field === 'to' ? 'Recipients' : 'Optional'}" ${locked ? 'disabled' : ''} aria-label="${field}"></label>`).join('')}</div><div class="mail-formatting" role="toolbar" aria-label="Text formatting">${command('format', 'Bold', 'bold', 'bold', 'mail-icon-btn')}${command('format', 'Italic', 'italic', 'italic', 'mail-icon-btn')}${command('format', 'Bulleted list', 'list', 'insertUnorderedList', 'mail-icon-btn')}<span class="mail-format-divider"></span>${command('attach', 'Attach file', 'paperclip')}${command('assist-draft', 'Ask assistant', 'sparkles')}</div><div id="mailEditor" class="mail-editor" contenteditable="${!locked}" role="textbox" aria-multiline="true" aria-label="Message body" data-placeholder="Write something…"></div><div id="mailDraftAttachments" class="mail-draft-attachments"></div><input type="file" id="mailFiles" multiple hidden><div class="mail-compose-footer">${locked ? '<p>Check your provider’s Sent folder before composing another message.</p>' : `${command('send', 'Send message', 'send', '', 'mail-primary')}<span>Draft saved to your OE profile</span>${command('discard', 'Discard draft', 'trash-2', '', 'mail-icon-btn')}`}</div></div>`;
+    $('mailReading').innerHTML = `<div id="mailComposer" class="mail-composer"><div class="mail-compose-heading"><div><span class="mail-eyebrow">${d.status === 'sent' ? 'CONFIRMED SENT' : d.status === 'archived' ? 'ARCHIVED REVIEW' : locked ? 'DELIVERY UNCONFIRMED' : 'YOUR DRAFT'}</span><h2>${d.inReplyTo ? 'Reply' : 'New message'}</h2></div><span id="mailSaveStatus">${d.id ? 'Saved in OE' : 'Saving…'}</span>${command('save-close', 'Save & close', 'x', '', 'mail-icon-btn')}</div><div class="mail-compose-fields"><label><span>From</span><select id="mailDraftAccount" ${d.inReplyTo || d.attachments.some(a => a.source) || locked ? 'disabled' : ''}>${M.accounts.map(a => `<option value="${e(a.id)}" ${a.id === d.accountId ? 'selected' : ''}>${e(a.label)}${a.email || a.username ? ` · ${e(a.email || a.username)}` : ''}</option>`).join('')}</select></label>${['to', 'cc', 'bcc', 'subject'].map(field => `<label><span>${({ to: 'To', cc: 'Cc', bcc: 'Bcc', subject: 'Subject' })[field]}</span><input id="mailDraft_${field}" value="${e(d[field] || '')}" placeholder="${field === 'subject' ? 'Add a subject' : field === 'to' ? 'Recipients' : 'Optional'}" ${locked ? 'disabled' : ''} aria-label="${field}"></label>`).join('')}</div><div class="mail-formatting" role="toolbar" aria-label="Text formatting">${command('format', 'Bold', 'bold', 'bold', 'mail-icon-btn')}${command('format', 'Italic', 'italic', 'italic', 'mail-icon-btn')}${command('format', 'Bulleted list', 'list', 'insertUnorderedList', 'mail-icon-btn')}<span class="mail-format-divider"></span>${command('attach', 'Attach file', 'paperclip')}${command('assist-draft', 'Ask assistant', 'sparkles')}</div><div id="mailEditor" class="mail-editor" contenteditable="${!locked}" role="textbox" aria-multiline="true" aria-label="Message body" data-placeholder="Write something…"></div><div id="mailDraftAttachments" class="mail-draft-attachments"></div><input type="file" id="mailFiles" multiple hidden><div class="mail-compose-footer">${locked ? '<p>This saved message cannot be sent again.</p>' : `${command('send', 'Send message', 'send', '', 'mail-primary')}<span>Draft saved to your OE profile</span>${command('discard', 'Discard draft', 'trash-2', '', 'mail-icon-btn')}`}</div></div>`;
     $('mailEditor').innerHTML = editorHtml(d.html || e(d.body || '').replace(/\n/g, '<br>'));
     renderDraftAttachments();
+    renderDeliveryReview(d);
     if (locked) $('mailComposer').querySelectorAll('.mail-formatting button,.mail-draft-file button').forEach(button => { button.disabled = true; });
     if (M.sending) { $('mailComposer').querySelector('.mail-eyebrow').textContent = 'SENDING MESSAGE'; $('mailComposer').querySelector('.mail-compose-footer').textContent = 'Waiting for your mail provider…'; }
+  }
+  async function openReviewDraft(id) {
+    if (M.sending || M.reviewing || M.upload) throw new Error('Wait for this mail operation to finish.');
+    if (M.draft) await saveDraft();
+    const session = M.session;
+    const [activeDrafts, resolved] = await Promise.all([api('list_drafts'), api('list_drafts', { view: 'resolved' })]);
+    if (session !== M.session || !active()) return;
+    M.drafts = activeDrafts.drafts || []; M.resolved = resolved.drafts || [];
+    const draft = [...M.drafts, ...M.resolved].find(item => item.id === id);
+    if (!draft) throw new Error('This saved mail review is no longer available in your profile.');
+    M.account = draft.accountId; M.folder = ['sent', 'archived'].includes(draft.status) ? 'resolved' : draft.status === 'draft' ? 'drafts' : 'review';
+    M.detailGeneration++; M.draft = structuredClone(draft); M.detail = null; M.dirty = false; M.conflict = false;
+    renderNavigation(); renderList(); renderComposer(); notice('');
+  }
+  function renderDeliveryReview(draft) {
+    const pending = ['sending', 'uncertain'].includes(draft.status), history = draft.resolutions || [];
+    if (!pending && !history.length) return;
+    const evidence = draft.sentCheck;
+    const panel = document.createElement('section'); panel.className = 'mail-delivery-review'; panel.setAttribute('aria-label', 'Delivery review');
+    panel.innerHTML = `${pending ? `<h3>Resolve this delivery</h3><p>The provider did not confirm this send. Check Sent for evidence before deciding what happened.</p>${draft.sendAttempt?.startedAt ? `<p class="mail-review-meta">Attempted ${e(date(draft.sendAttempt.startedAt, true))}</p>` : ''}${evidence ? `<div class="mail-review-evidence" role="status"><strong>${({ matched: 'Exact Sent match', possible: 'Possible Sent matches', not_found: 'No matching Sent copy', unavailable: 'Sent check unavailable' })[evidence.outcome] || 'Sent checked'}</strong><p>${e(evidence.note)}</p><small>Checked ${e(date(evidence.checkedAt, true))}${evidence.truncated ? ' · Limited results; other messages may exist.' : ''}</small>${(evidence.matches || []).map((mail, index) => `<article><strong>${e(mail.subject || '(No subject)')}</strong><span>${e(mail.to)} · ${e(date(mail.date, true))}</span><small>${mail.match === 'exact' ? 'Same delivery identifier' : 'Similar subject, recipients and time'}</small>${command('review-evidence', 'Open Sent message', 'external-link', index)}</article>`).join('')}</div>` : ''}<div class="mail-review-check">${command('check-sent', evidence ? 'Check Sent again' : 'Check Sent', 'refresh-cw')}</div><label for="mailReviewNote">Verification note <span>${evidence?.outcome === 'matched' ? '(optional when confirming this match)' : '(required to confirm sent or not sent)'}</span></label><textarea id="mailReviewNote" rows="2" maxlength="2000" placeholder="How did you verify delivery?">${e(M.reviewNotes.get(draft.id) || '')}</textarea><div class="mail-review-actions">${command('resolve-send', 'Confirm sent', 'check', 'sent')}${command('resolve-send', 'Confirm not sent', 'file-pen-line', 'not_sent')}${command('resolve-send', 'Archive review', 'archive', 'archive')}</div><p class="mail-review-meta">Confirm not sent unlocks this saved draft for editing. Sending still requires a separate action. Archiving keeps the evidence and frees an active draft slot.</p>` : ''}${history.length ? `<details class="mail-review-history" ${pending ? '' : 'open'}><summary>Resolution history (${history.length})</summary>${history.slice(-20).reverse().map(item => `<article><strong>${({ sent: 'Confirmed sent', not_sent: 'Confirmed not sent', archive: 'Archived without confirming delivery' })[item.outcome] || 'Resolved'}</strong><small>${e(date(item.at, true))} · ${item.basis === 'provider' ? 'Provider evidence reviewed' : 'User verification'}</small>${item.note ? `<p>${e(item.note)}</p>` : ''}${item.evidence ? `<p>${e(item.evidence.note)}</p>` : ''}${item.attempt?.messageId ? `<code>${e(item.attempt.messageId)}</code>` : ''}</article>`).join('')}</details>` : ''}`;
+    if (pending) $('mailComposer').querySelector('.mail-compose-heading').after(panel);
+    else $('mailComposer').append(panel);
+    if (evidence?.outcome === 'matched') panel.querySelector('[data-mail="resolve-send"][data-value="not_sent"]')?.setAttribute('disabled', '');
+    if (M.reviewing) panel.querySelectorAll('button,textarea').forEach(element => { element.disabled = true; });
+  }
+  async function reviewDelivery(commandName, resolution) {
+    if (!M.draft || !['sending', 'uncertain'].includes(M.draft.status) || M.busy) return;
+    const draft = M.draft, session = M.session;
+    const note = M.reviewNotes.get(draft.id) || '';
+    if (commandName === 'resolve-send') {
+      const exact = draft.sentCheck?.outcome === 'matched';
+      if (resolution !== 'archive' && !(resolution === 'sent' && exact) && note.trim().length < 5) { $('mailReviewNote').focus(); throw new Error('Add a verification note explaining how you checked delivery.'); }
+      const prompt = resolution === 'sent' ? 'Confirm that this message was sent? It will remain locked and its evidence will be saved.' : resolution === 'not_sent' ? 'Have you verified this message was not sent? This unlocks the draft for editing. It will not send automatically.' : 'Archive this review without confirming delivery? The message stays locked and its evidence is kept.';
+      if (!confirm(prompt)) return;
+    }
+    M.reviewing = true; M.busy = true; renderComposer(); notice(commandName === 'check-sent' ? 'Checking Sent for delivery evidence…' : 'Saving your delivery resolution…');
+    try {
+      const result = await api(commandName === 'check-sent' ? 'check_sent' : 'resolve_send', { draftId: draft.id, version: draft.version, ...(commandName === 'resolve-send' ? { resolution, confirmed: true, note } : {}) }, true);
+      if (session !== M.session) return;
+      M.draft = result.draft; M.dirty = false;
+      M.drafts = M.drafts.filter(item => item.id !== draft.id); M.resolved = M.resolved.filter(item => item.id !== draft.id);
+      (['sent', 'archived'].includes(M.draft.status) ? M.resolved : M.drafts).unshift(M.draft);
+      if (result.resolved) {
+        M.reviewNotes.delete(draft.id); M.folder = M.draft.status === 'draft' ? 'drafts' : 'resolved';
+        notice(resolution === 'not_sent' ? 'Marked not sent. Review the draft before choosing Send message.' : resolution === 'sent' ? 'Delivery confirmed. The message and evidence are saved.' : 'Review archived. Delivery remains unconfirmed; the saved message cannot be sent again.');
+      } else notice(result.evidence?.note || 'Sent check finished.');
+      renderNavigation(); renderList();
+    } finally {
+      if (session === M.session) { M.reviewing = false; M.busy = false; renderComposer(); }
+    }
+  }
+  async function openDeliveryEvidence(index) {
+    const draft = M.draft, match = draft?.sentCheck?.matches?.[index]; if (!match) return;
+    const generation = ++M.detailGeneration;
+    notice('Opening Sent evidence…');
+    const data = await api('read', { account: draft.accountId, folder: match.folder, messageId: match.id });
+    if (generation !== M.detailGeneration || !active()) return;
+    M.draft = null; M.dirty = false; M.images = false;
+    M.detail = { ...match, accountId: draft.accountId, unread: false, messages: data.messages || [] };
+    renderReader(); renderList(); notice('Sent evidence. Return to Delivery review to resolve the saved message.');
   }
   function renderDraftAttachments() {
     if (!$('mailDraftAttachments')) return;
@@ -577,7 +640,7 @@
       if (!result.deleted) throw new Error('OE did not confirm the draft deletion.');
       if (open) { M.draft = null; M.dirty = false; M.conflict = false; M.detailGeneration++; M.detail ? renderReader() : renderEmpty(); }
       M.drafts = M.drafts.filter(d => d.id !== id);
-      if (M.folder === 'drafts') renderList();
+      if (['drafts', 'review', 'resolved'].includes(M.folder)) renderList();
       renderNavigation(); notice('Draft deleted.');
     } catch (error) {
       if (session === M.session) {
@@ -634,6 +697,9 @@
     if (cmd === 'assistant' && document.querySelector('.desk').classList.contains('mail-chat')) { closeMailAssistant(); return; }
     if (M.sending) throw new Error('Wait for this message to finish sending.');
     if (M.deletingDraft) throw new Error('Wait for the draft deletion to finish.');
+    if (M.reviewing) throw new Error('Wait for the delivery review operation to finish.');
+    if (cmd === 'check-sent' || cmd === 'resolve-send') return reviewDelivery(cmd, value);
+    if (cmd === 'review-evidence') return openDeliveryEvidence(Number(value));
     if (cmd === 'folder-new' || cmd === 'label-new') return showFolderDialog(false, value);
     if (cmd === 'folder-rename' || cmd === 'label-edit') return showFolderDialog(true, value);
     if (cmd === 'label-delete') return showLabelDelete(value);
@@ -687,7 +753,7 @@
     if (cmd === 'remove-attachment') { M.draft.attachments.splice(Number(value), 1); changed(); renderDraftAttachments(); return; }
     if (cmd === 'edit-draft') {
       if (M.draft) await saveDraft();
-      const draft = M.drafts.find(d => d.id === value); if (!draft) return;
+      const draft = [...M.drafts, ...M.resolved].find(d => d.id === value); if (!draft) return;
       M.detailGeneration++; M.draft = structuredClone(draft); M.dirty = false; renderComposer(); renderList(); return;
     }
     if (cmd === 'save-close') { await saveDraft(); M.draft = null; M.detailGeneration++; M.detail ? renderReader() : renderEmpty(); $('mailWorkspace').classList.toggle('mail-reading-open', !!M.detail); return; }
@@ -753,5 +819,5 @@
       (message.operation === 'update' || message.operation === 'send_draft' ? load() : refreshDrafts()).catch(error => notice(error.message, true));
     }, 400);
   }
-  Object.assign(window, { openMailWorkspace: () => openMailWorkspace().catch(error => notice(error.message, true)), closeMailWorkspace, resetMailWorkspace, mailWorkspaceChanged, mailWorkspaceIsOpen: active, mailWorkspaceChatContext });
+  Object.assign(window, { openMailWorkspace: options => openMailWorkspace(options).catch(error => notice(error.message, true)), closeMailWorkspace, resetMailWorkspace, mailWorkspaceChanged, mailWorkspaceIsOpen: active, mailWorkspaceChatContext });
 })();

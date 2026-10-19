@@ -193,7 +193,7 @@ function buildMobileMenu() {
     rows.appendChild(r);
     return r;
   };
-  addRow('search', 'Search conversations', '_closeDrawerThen', '["openSearch"]');
+  addRow('search', 'Search your work', '_closeDrawerThen', '["openSearch"]');
   const newAgentRow = addRow('sparkles', 'New agent', '_closeDrawerThen', '["openNewAgentModal"]');
   newAgentRow.dataset.agentCreateControl = 'true';
   const upd = $('updateBadge');

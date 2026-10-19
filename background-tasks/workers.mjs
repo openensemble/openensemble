@@ -1,3 +1,4 @@
+import { pauseBudgetTask } from '../chat/run-budgets.mjs';
 /**
  * Agent-owned background workers + query/list helpers.
  * Extracted from background-tasks.mjs — pure move with bindWorkerDeps for
@@ -409,7 +410,7 @@ export function spawnWorker({
             pushWorkerProgress(taskId, { kind: 'result', tool: ev.type, text: `produced ${ev.filename}` });
             pushTaskProgress(taskId, `${workerName} produced ${ev.filename}`, { currentTool: null, phase: 'result' });
           }
-          if (ev.type === 'error') throw new Error(ev.message);
+          if (ev.type === 'error') throw Object.assign(new Error(ev.message), { code: ev.code, runId: ev.runId });
         }
       })));
       if (completionContract) {
@@ -442,6 +443,7 @@ export function spawnWorker({
       }
       await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`, null, null, toolEvents, workerAgent.id, originalTask, { images: reportImages });
     } catch (err) {
+      if (String(err.code || '').startsWith('RUN_BUDGET')) { await pauseBudgetTask(taskId, userId, err.message, err.runId); return; }
       const stopped = ac.signal.aborted;
       await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, null,
         stopped ? 'Worker stopped by its manager.' : err.message,

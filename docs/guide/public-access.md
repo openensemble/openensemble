@@ -1,7 +1,7 @@
 ---
 title: "Public and private access"
 parent: User guide
-nav_order: 26
+nav_order: 28
 permalink: /guide/public-access/
 ---
 

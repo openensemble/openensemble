@@ -1,3 +1,4 @@
+import { budgetIsActive, noteBudgetNetworkAttempt } from '../../lib/run-budgets.mjs';
 /**
  * OpenAI Codex (ChatGPT OAuth) via the Responses API.
  *
@@ -271,6 +272,7 @@ function toolResultWithAttachmentEvidence(result, toolName, args, agent, generat
 }
 
 async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null, xaiClient = false, userId = '' } = {}) {
+  if (budgetIsActive()) attempts = 1;
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     if (init.signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
@@ -380,6 +382,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     return;
   }
   const noteProviderAttempt = () => {
+    noteBudgetNetworkAttempt();
     // Revalidate after all prompt construction and immediately before fetch.
     // This closes the worker-completion gap if the lease expired, was removed,
     // or changed after detached completion publication began.
@@ -573,6 +576,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
     console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}${body.prompt_cache_key ? ` cache_key=${body.prompt_cache_key}` : ''}`);
     yield modelCallTraceEvent({
+      budgetRequest: body,
       provider: tag, model: agent.model, tools: body.tools, round: guard.count,
       requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
       wireReasoningEffort: body.reasoning?.effort ?? null,
@@ -1106,6 +1110,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       };
       return;
     }
+    if (budgetIsActive()) yield { ...usageTelemetry(), type: '__budget_usage' };
+
     confirmXaiCLIResponse(res, !finalRound || toolCalls.size === 0);
     } finally { confirmXaiCLIResponse(res, false); }
 

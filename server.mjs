@@ -66,6 +66,8 @@ import { handle as handleSavedChats } from './routes/saved-chats.mjs';
 import { handle as handleProactiveWork } from './routes/proactive-work.mjs';
 import { startProactiveWork, stopProactiveWork } from './lib/personalization/work-engine.mjs';
 import { handle as handleJobRecovery } from './routes/job-recovery.mjs';
+import { handle as handleNeedsAttention } from './routes/needs-attention.mjs';
+import { handle as handleRunBudgets } from './routes/run-budgets.mjs';
 import { handle as handleDashboards } from './routes/dashboards.mjs';
 import { handle as handleOAuth }         from './routes/oauth.mjs';
 import { handle as handleMsOAuth }       from './routes/ms-oauth.mjs';
@@ -344,6 +346,8 @@ const routeHandlers = [
   handleSavedChats,
   handleProactiveWork,
   handleJobRecovery,
+  handleNeedsAttention,
+  handleRunBudgets,
   handleDashboards, // per-user dashboards + authenticated renderer compatibility APIs
   handlePlugins,   // must be early — delegates /api/* to plugin servers
   handleOAuth,          // /api/oauth/google/* — per-user Google OAuth flow
@@ -592,6 +596,7 @@ const httpServer = http.createServer(async (req, res) => {
     const exemptFromBodyCap =
       req.url === '/api/admin/restore' ||
       req.url === '/api/admin/restore-initial' ||
+      (req.method === 'POST' && _pathname === '/api/admin/backup/verify') ||
       (req.method === 'POST' && req.url.startsWith('/api/shared-docs')) ||
       // Chat attachments (audio/video for transcription, large images, etc.)
       // — enforced at 500 MB by the route-level busboy parser.

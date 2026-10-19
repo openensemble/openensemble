@@ -1,4 +1,6 @@
 import { currentProjectId, currentChatId } from '../lib/project-context.mjs';
+import { budgetChatStream, budgetProviderStream } from './run-budgets.mjs';
+import { currentRunBudget, rememberBudgetConversation } from '../lib/run-budgets.mjs';
 import { buildProjectContext } from '../lib/project-spaces.mjs';
 import { buildWorkContext } from '../lib/personalization/work-store.mjs';
 /**
@@ -110,6 +112,11 @@ import {
 const BOUND_DETACHED_TRACE = Symbol('boundDetachedTrace');
 
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
+  yield* budgetChatStream(() => streamChatWithTrace(agent, userText, signal, emit, userId, attachment, systemNote, silent, voiceCtx, turnOpts),
+    { agent, userText, userId, systemNote, silent, signal, turnOpts });
+}
+
+async function* streamChatWithTrace(agent, userText, signal, emit, userId, attachment, systemNote, silent, voiceCtx, turnOpts) {
   if (turnOpts?.rootTaskId || turnOpts?.traceSource) {
     yield* iterateInDetachedTurn(() => streamChatInTurn(agent, userText, signal, emit, userId,
       attachment, systemNote, silent, voiceCtx, { ...turnOpts, [BOUND_DETACHED_TRACE]: true }), {
@@ -879,6 +886,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     editContext?.attachment ? [...attachments, editContext.attachment] : attachments);
 
   const working = [...trimmed, currentUserTurn];
+  rememberBudgetConversation(currentRunBudget(), working, agent);
 
   const buildRawProviderGen = (agentObj, prompt, messages) => {
     const compatProviderKey = agentObj.provider === 'grok' ? 'xai' : agentObj.provider;
@@ -931,7 +939,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
     return { withSignalWordsGate: result.withSignalWordsGate, providerFactory: () => {
       const providerGen = initial || buildRawProviderGen(agentObj, prompt, messages).providerGen;
       initial = null;
-      return withProviderUpdateFeedback(providerGen, { userId, provider: agentObj.provider, model: agentObj.model });
+      return budgetProviderStream(withProviderUpdateFeedback(providerGen, { userId, provider: agentObj.provider, model: agentObj.model }));
     } };
   };
   const consumeChatProvider = (factory, options) => consumeProviderWithRetry(factory, { ...options, retry: Boolean(projectId), signal });

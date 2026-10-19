@@ -1,3 +1,4 @@
+import { budgetIsActive } from '../../lib/run-budgets.mjs';
 /**
  * OpenRouter — OpenAI-compat SSE with tool calling.
  */
@@ -121,6 +122,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     if (body.tools?.length || body.reasoning) body.provider = { require_parameters: true };
 
     yield modelCallTraceEvent({
+      budgetRequest: body,
       provider: 'openrouter', model: agent.model, tools: body.tools, round: guard.count,
       requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
       wireReasoningEffort: body.reasoning?.effort
@@ -222,6 +224,8 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       totalOutputTokens += iterUsage.completion_tokens ?? 0;
       cachedTokens      += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
     }
+
+    if (budgetIsActive()) yield { type: '__budget_usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: 'openrouter', usageComplete: Boolean(iterUsage) };
 
     if (finalRound && toolCalls.size > 0) {
       if (textContent.trim()) yield { type: 'replace', text: '' };

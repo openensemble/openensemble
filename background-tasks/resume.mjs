@@ -6,6 +6,8 @@ import { runInTaskContext } from '../lib/task-proxy-context.mjs';
 import { runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { toolRouterContext } from '../lib/tool-router-context.mjs';
 import { iterateUntilAbort } from '../lib/abortable-async-iterator.mjs';
+import { assertBudgetRunning } from '../lib/run-budgets.mjs';
+import { pauseBudgetTask } from '../chat/run-budgets.mjs';
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 
@@ -101,6 +103,7 @@ export async function resumeJob(userId, taskId, { revision, resolutions = [] } =
   const entry = getJobCheckpoint(userId, taskId);
   if (!entry) throw httpError(404, 'Job not found.');
   const cp = entry.checkpoint;
+  if (cp.budgetRunId) assertBudgetRunning({ userId, runId: cp.budgetRunId });
   if (cp.status !== 'paused' || activeTasks.get(taskId)?.status !== 'paused') throw httpError(409, 'This job is already running or finished.');
   if (cp.disabledReason) throw httpError(409, cp.disabledReason);
   await executionAgent(entry);
@@ -127,6 +130,7 @@ export async function resumeJob(userId, taskId, { revision, resolutions = [] } =
 
 async function startResumedJob(taskId, userId) {
   const entry = getJobCheckpoint(userId, taskId);
+  if (entry.checkpoint.budgetRunId) assertBudgetRunning({ userId, runId: entry.checkpoint.budgetRunId });
   const agent = await executionAgent(entry);
   const savedNote = checkpointNote(entry.checkpoint);
   const rec = activeTasks.get(taskId);
@@ -172,6 +176,7 @@ async function startResumedJob(taskId, userId) {
           `${cp.execution.note || ''}${savedNote}`, false, null, {
             isolatedTaskRun: true, routeText: entry.originalTask,
             workerMemoryAgentId: cp.execution.workerMemoryAgentId,
+            budgetRunId: cp.budgetRunId, budgetSpanId: cp.budgetSpanId,
             ...backgroundRunTraceOptions(rec),
           }), ac.signal, 'Resumed job stopped')) {
           if (ev.type === 'token') text += ev.text;
@@ -185,7 +190,7 @@ async function startResumedJob(taskId, userId) {
             rec.lastActivityAt = Date.now();
             pushWatcherStatus(userId, entry.watcherId, ev.type === 'tool_call' ? `Continuing: ${ev.name}` : `${ev.name} finished`, { phase: rec.phase, currentTool: rec.currentTool });
           }
-          if (ev.type === 'error') throw new Error(ev.message);
+          if (ev.type === 'error') throw Object.assign(new Error(ev.message), { code: ev.code, runId: ev.runId });
         }
         if (ac.signal.aborted) throw new Error('Job stopped.');
         toolEvents = checkpointToolEvents(getJobCheckpoint(userId, taskId).checkpoint);
@@ -197,6 +202,7 @@ async function startResumedJob(taskId, userId) {
         await _onComplete(taskId, userId, entry.coordinatorAgentId || entry.visibleAgentId, entry.agentName, entry.agentEmoji,
           text.trim() || 'Job completed.', null, null, toolEvents, agent.id, entry.originalTask, { images });
       } catch (error) {
+        if (String(error.code || '').startsWith('RUN_BUDGET')) { await pauseBudgetTask(taskId, userId, error.message, error.runId); return; }
         // Failed/stopped recovery still has completed actions to inspect.
         const saved = getJobCheckpoint(userId, taskId)?.checkpoint;
         if (saved) toolEvents = checkpointToolEvents(saved);

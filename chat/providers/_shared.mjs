@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { loadConfig } from '../../routes/_helpers.mjs';
 import { resolveOllamaKey } from '../../lib/ollama-cloud.mjs';
+import { budgetIsActive, estimateBudgetRequest, noteBudgetNetworkAttempt } from '../../lib/run-budgets.mjs';
 
 /**
  * Return a correlation-safe identity for a provider tool call. Native IDs are
@@ -35,7 +36,19 @@ export function modelCallTraceEvent({
   provider, model, tools, round = null,
   requestedReasoningEffort = null,
   wireReasoningEffort = null,
+  budgetRequest = null,
 }) {
+  let budgetEstimate;
+  if (budgetIsActive() && budgetRequest) {
+    const enforceable = provider !== 'openai-oauth'; // This endpoint rejects max_output_tokens.
+    let outputTokens;
+    if (budgetRequest.options) outputTokens = budgetRequest.options.num_predict;
+    else if (Array.isArray(budgetRequest.input)) outputTokens = budgetRequest.max_output_tokens ??= 4096;
+    else if (budgetRequest.max_completion_tokens != null) outputTokens = budgetRequest.max_completion_tokens;
+    else outputTokens = budgetRequest.max_tokens ??= 4096;
+    if (!enforceable) delete budgetRequest.max_output_tokens;
+    budgetEstimate = { ...estimateBudgetRequest({ provider, model, request: budgetRequest, outputTokens, config: loadConfig() }), enforceable };
+  }
   try {
     const toolsPresent = Array.isArray(tools);
     const exactTools = toolsPresent ? tools : [];
@@ -51,6 +64,7 @@ export function modelCallTraceEvent({
     });
     return {
       type: '__model_call',
+      ...(budgetEstimate ? { budgetEstimate } : {}),
       provider: provider ?? null,
       model: model ?? null,
       phase: 'dispatch_planned',
@@ -222,11 +236,15 @@ export function waitForProviderRetry(ms, signal) {
 }
 
 export async function fetchWithRetry(url, opts = {}, { tries = 3, label = 'provider' } = {}) {
+  // A transport failure can follow acceptance. Budgeted work must reconcile
+  // or explicitly review that reservation before making another request.
+  if (budgetIsActive()) tries = 1;
   let lastErr = null;
   for (let attempt = 1; attempt <= tries; attempt++) {
     if (opts.signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     let res;
     try {
+      noteBudgetNetworkAttempt();
       res = await fetch(url, opts);
     } catch (e) {
       if (e.name === 'AbortError' || opts.signal?.aborted) throw e;

@@ -35,6 +35,8 @@ New installation? Start with [installation](../getting-started), then
 
 ## Daily use
 
+- [Search and needs attention](./search-attention/)
+- [Run budgets](./run-budgets/)
 - [Saved chats](./saved-chats/)
 - [Projects and goals](./project-spaces/)
 - [Display dashboards](./dashboards/)

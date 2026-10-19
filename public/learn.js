@@ -1,15 +1,14 @@
 // ── Learn drawer ─────────────────────────────────────────────────────────────
-// Unified surface for proposals (pending inbox) + audit of accepted learnings
-// (rules, aliases, routines, custom skills). Read endpoints:
-//   GET  /api/proposals?status=pending|snoozed   (snoozed via add-on below)
+// Learning settings and the audit of accepted learnings (rules, aliases,
+// routines, custom skills). Pending proposals are reviewed in Needs attention.
+// Read endpoints:
 //   GET  /api/learnings
 // Write endpoints:
-//   POST /api/proposals/:id/accept|dismiss|snooze
 //   DELETE /api/learnings/rules/:roleId/:idx
 //   DELETE /api/learnings/aliases/:phrase
 //   DELETE /api/learnings/routines/:id
 
-let _learnState = { pending: [], learnings: null, ledger: null, busy: new Set(), policyBusy: false };
+let _learnState = { learnings: null, ledger: null, policyBusy: false };
 let _learnFactRefs = new Map();
 let _learnLoadGeneration = 0;
 const _learnProfileTypes = new Set(['pattern', 'fact', 'relationship', 'preference', 'constraint', 'goal', 'routine']);
@@ -40,18 +39,15 @@ async function loadLearnDrawer() {
   try {
     // Ledger fetch is failure-isolated: personalization being unavailable
     // (feature off, route error) must not blank the whole drawer.
-    const [propsRes, learnRes, ledgerRes] = await Promise.all([
-      fetch('/api/proposals', { cache: 'no-store' }).then(readLearnResponse),
+    const [learnRes, ledgerRes] = await Promise.all([
       fetch('/api/learnings', { cache: 'no-store' }).then(readLearnResponse),
       fetch('/api/personalization/ledger', { cache: 'no-store' })
         .then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
     if (generation !== _learnLoadGeneration) return;
-    _learnState.pending = propsRes.pending ?? [];
     _learnState.learnings = learnRes ?? null;
     _learnState.ledger = Array.isArray(ledgerRes?.ledger) ? ledgerRes.ledger : null;
     _renderLearnDrawer();
-    _updateLearnBadge();
   } catch (e) {
     if (generation !== _learnLoadGeneration) return;
     body.innerHTML = `<div style="color:var(--err,#c33);font-size:13px;padding:20px">${escHtml(e.message)}</div>`;
@@ -61,7 +57,7 @@ async function loadLearnDrawer() {
 async function readLearnResponse(response) {
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Could not load suggestions (${response.status}).`);
+    throw new Error(data.error || `Could not load learning history (${response.status}).`);
   }
   return response.json();
 }
@@ -85,18 +81,6 @@ async function openLearnFactEditor(memoryId) {
   return true;
 }
 
-function _updateLearnBadge() {
-  const badge = $('learnBadge');
-  if (!badge) return;
-  const n = (_learnState.pending || []).length;
-  if (n > 0) {
-    badge.textContent = String(n);
-    badge.style.display = '';
-  } else {
-    badge.style.display = 'none';
-  }
-}
-
 function _renderLearnDrawer() {
   const body = $('learnBody');
   if (!body) return;
@@ -104,7 +88,6 @@ function _renderLearnDrawer() {
   const L = _learnState.learnings || {};
   body.innerHTML = [
     _renderLearningSettingsSection(L.learningPolicy || {}, L.salienceStatus || []),
-    _renderPendingSection(_learnState.pending),
     _renderLedgerSection(_learnState.ledger),
     _renderRulesSection(L.rules || []),
     _renderDefaultsSection(L.defaults || []),
@@ -213,143 +196,6 @@ async function learnToggleSuggestions(enabled) {
     loadLearnDrawer();
   }
 }
-
-// ── Pending proposals ───────────────────────────────────────────────────────
-
-function _renderPendingSection(items) {
-  let body = '';
-  if (!items.length) {
-    body = _renderEmptyHint('Nothing waiting. As you use OE, suggestions land here.');
-  } else {
-    // Phase-13: bulk action bar above the pending list when there are 2+ items
-    if (items.length >= 2) {
-      body += `<div style="padding:4px 12px;display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted)">
-        <span>Bulk:</span>
-        <button data-action="learnBulkAccept" style="background:transparent;border:1px solid var(--border);border-radius:3px;padding:1px 8px;font-size:11px;color:var(--muted);cursor:pointer">Accept all</button>
-        <button data-action="learnBulkDismiss" style="background:transparent;border:1px solid var(--border);border-radius:3px;padding:1px 8px;font-size:11px;color:var(--muted);cursor:pointer">Dismiss all</button>
-      </div>`;
-    }
-    body += items.map(_renderPendingCard).join('');
-  }
-  return _renderSectionHdr('Pending suggestions', items.length) + body;
-}
-
-async function learnBulkAccept() {
-  const ids = (_learnState.pending || []).map(p => p.id);
-  if (!ids.length) return;
-  if (!confirm(`Accept all ${ids.length} pending suggestions?`)) return;
-  try {
-    const r = await fetch('/api/proposals/bulk/accept', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    });
-    const result = await readLearnResponse(r);
-    reportBulkProposalFailures(result);
-  } catch (e) { alert(`Failed: ${e.message}`); return; }
-  loadLearnDrawer();
-}
-
-async function learnBulkDismiss() {
-  const ids = (_learnState.pending || []).map(p => p.id);
-  if (!ids.length) return;
-  if (!confirm(`Dismiss all ${ids.length} pending suggestions?`)) return;
-  try {
-    const r = await fetch('/api/proposals/bulk/dismiss', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    });
-    const result = await readLearnResponse(r);
-    reportBulkProposalFailures(result);
-  } catch (e) { alert(`Failed: ${e.message}`); return; }
-  loadLearnDrawer();
-}
-
-function reportBulkProposalFailures(result) {
-  const failures = (result.results || []).filter(item => !item.ok);
-  if (failures.length) {
-    const reasons = [...new Set(failures.map(item => item.error || 'Unknown error'))].join('; ');
-    alert(`${failures.length} suggestion(s) could not be updated: ${reasons}`);
-  }
-}
-
-function _renderPendingCard(p) {
-  const busy = _learnState.busy.has(p.id);
-  const ageNote = p.createdAt ? `<span style="color:var(--muted);font-size:11px">${_learnAgo(p.createdAt)}</span>` : '';
-  const policy = p.policy || {};
-  const risk = policy.risk || p.risk || '';
-  const score = policy.utilityScore ?? policy.confidence ?? p.utilityScore ?? p.confidence;
-  const scoreLabel = Number.isFinite(score) ? ` · ${Math.round(score * 100)}%` : '';
-  const kindBadge = `<span style="font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">${escHtml(p.kind || '')}${risk ? ` · ${escHtml(risk)}${scoreLabel}` : ''}</span>`;
-  const message = escHtml(p.message || '').replace(/\n/g, '<br>');
-  const preview = policy.preview || p.preview;
-  const previewHtml = preview ? `<div style="font-size:11px;line-height:1.35;color:var(--muted);margin:-4px 0 10px">${escHtml(_learnPreviewText(preview))}</div>` : '';
-  const whyHtml = p.personalizationWhy
-    ? `<div style="font-size:11px;line-height:1.4;color:var(--muted);margin:-4px 0 10px">${escHtml(p.personalizationWhy)}</div>` : '';
-  const accept = escHtml(p.accept_label || 'Accept');
-  const dismiss = escHtml(p.dismiss_label || 'Dismiss');
-  const disabled = busy ? 'disabled' : '';
-  const btnArgs = JSON.stringify([p.id]).replace(/"/g, '&quot;');
-  return `<div style="margin:8px 12px;padding:10px 12px;border:1px solid var(--border);border-left:3px solid var(--accent,#4f82ff);border-radius:6px;background:var(--bg1)">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
-      ${kindBadge}${ageNote}
-    </div>
-    <div style="font-size:13px;line-height:1.45;margin-bottom:10px">${message}</div>
-    ${whyHtml}
-    ${previewHtml}
-    <div style="display:flex;gap:6px;flex-wrap:wrap">
-      <button class="btn-small" data-action="learnAcceptProposal" data-args='${btnArgs}' ${disabled} style="background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">${accept}</button>
-      <button class="btn-small" data-action="learnSnoozeProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--text)">Snooze 7d</button>
-      <button class="btn-small" data-action="learnDismissProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted)">${dismiss}</button>
-      ${p.editPreferenceId ? `<button class="btn-small" data-action="openLearnFactEditor" data-args='${JSON.stringify([p.editPreferenceId]).replace(/"/g, '&quot;')}' ${disabled} style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--text)">Edit preference</button>` : ''}
-      <button class="btn-small" data-action="learnNeverProposal" data-args='${btnArgs}' ${disabled} title="Never suggest this again (a normal dismiss only hides it for 24h)" style="background:transparent;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted);text-decoration:underline">Don't propose again</button>
-    </div>
-  </div>`;
-}
-
-function _learnPreviewText(preview) {
-  if (!preview || typeof preview !== 'object') return '';
-  if (preview.effect === 'fills_missing_tool_arg') {
-    return `Dry run: when ${preview.tool || 'this tool'} omits ${preview.arg || 'the arg'}, OE fills the proposed value; explicit user args still win.`;
-  }
-  if (preview.effect === 'force_route_on_contains_match') {
-    return `Dry run: messages containing "${preview.pattern || ''}" route directly to ${preview.forcedAgent || 'the selected agent'}.`;
-  }
-  if (preview.effect === 'add_local_utterance_match') {
-    return `Dry run: these phrases match ${preview.skillId || 'the skill'}/${preview.intentId || 'intent'} locally${preview.confirm ? ' with confirmation' : ''}.`;
-  }
-  if (preview.effect === 'bind_phrase_to_action') {
-    return `Dry run: "${preview.trigger || ''}" runs ${preview.service || 'the action'} on ${preview.entityId || 'the target'}.`;
-  }
-  if (preview.effect === 'bind_phrase_to_entity') {
-    return `Dry run: "${preview.phrase || ''}" resolves to ${preview.entityId || 'the target entity'}.`;
-  }
-  return `Dry run: ${preview.effect || 'review effect before accepting'}.`;
-}
-
-async function _proposalAction(id, action) {
-  if (_learnState.busy.has(id)) return;
-  _learnState.busy.add(id);
-  _renderLearnDrawer();
-  try {
-    const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      alert(`Failed: ${err.error || r.statusText}`);
-    }
-  } catch (e) {
-    alert(`Failed: ${e.message}`);
-  } finally {
-    _learnState.busy.delete(id);
-    // Reload to pick up status transitions + any new learnings written by the
-    // accept handler (rule added, alias bound, etc.).
-    loadLearnDrawer();
-  }
-}
-
-function learnAcceptProposal(id)  { return _proposalAction(id, 'accept'); }
-function learnDismissProposal(id) { return _proposalAction(id, 'dismiss'); }
-function learnSnoozeProposal(id)  { return _proposalAction(id, 'snooze'); }
-function learnNeverProposal(id)   { return _proposalAction(id, 'never'); }
 
 // ── "What I've learned about you" (personalization ledger) ─────────────────
 // Moved here from Settings → Personalization 2026-07-07: settings is a
@@ -942,38 +788,12 @@ function _renderDeltaBadge(delta, semantic, note) {
   return `<span style="font-size:10px;color:${color};white-space:nowrap" title="${title}">${arrow} ${abs}</span>`;
 }
 
-// ── WS hook — auto-refresh on inbound proposal events ───────────────────────
-// Listens for proposal / proposal_outcome envelopes pushed via the chat WS so
-// the drawer badge updates without manual refresh when a new card lands.
-
+// Accepted learning and history stay current when the drawer is open.
 (function () {
-  // websocket.js owns the global onmessage and dispatches via
-  // handleServerMessage(msg). Top-level functions in /public are window-scoped,
-  // so we can wrap by reading + reassigning window.handleServerMessage.
   const orig = window.handleServerMessage;
   if (typeof orig !== 'function') return;
   window.handleServerMessage = function (msg) {
-    try {
-      if (msg && (msg.type === 'proposal' || msg.type === 'proposal_outcome')) {
-        fetch('/api/proposals', { cache: 'no-store' })
-          .then(r => r.json())
-          .then(d => {
-            _learnState.pending = d.pending ?? [];
-            _updateLearnBadge();
-            if (activeDrawerId === 'drawerLearn') loadLearnDrawer();
-          })
-          .catch(() => {});
-      }
-    } catch (_) { /* swallow — never block other WS handlers */ }
+    if (msg?.type === 'proposal_outcome' && activeDrawerId === 'drawerLearn') loadLearnDrawer();
     return orig.apply(this, arguments);
   };
 })();
-
-// Prime the badge once on page load so the dot shows up without opening
-// the drawer first.
-window.addEventListener('load', () => {
-  fetch('/api/proposals', { cache: 'no-store' })
-    .then(r => r.json())
-    .then(d => { _learnState.pending = d.pending ?? []; _updateLearnBadge(); })
-    .catch(() => {});
-});

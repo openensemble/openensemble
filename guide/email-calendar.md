@@ -197,6 +197,23 @@ and existing bulk-trash approval rules remain in effect. This first workspace
 does not include provider-draft synchronization, offline mail, scheduled send,
 contact management, or calendar editing.
 
+## Uncertain email delivery
+
+**Mail → Delivery review** lists sends whose delivery was not confirmed. Select a
+message and choose **Check Sent**. OE looks for the saved delivery identifier when
+the provider supports it and shows possible matches separately. Similar messages
+or a missing Sent copy do not establish whether delivery happened.
+
+- **Confirm sent** locks the saved record and preserves its evidence.
+- **Confirm not sent** requires a verification note and unlocks the saved draft
+  for editing. Sending still requires a separate Send action.
+- **Archive review** preserves the record and evidence while freeing an active
+  draft slot. The message remains locked and delivery remains unconfirmed.
+
+The **Resolved delivery** view retains resolution history. These decisions require
+your confirmation in Mail; an agent cannot resolve an uncertain send on your
+behalf. Review decisions never automatically resend a message.
+
 ## Automatic labels
 
 For Gmail automatic labeling, open **Settings → Tasks → Auto-Label**. Select

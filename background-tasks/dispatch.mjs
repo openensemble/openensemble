@@ -1,3 +1,4 @@
+import { pauseBudgetTask } from '../chat/run-budgets.mjs';
 import { withoutConversationSuffix, projectIdFromSession, chatIdFromSession, projectContext } from '../lib/project-context.mjs';
 /**
  * Background dispatch + completion pipeline.
@@ -293,6 +294,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
           toolPlan: stagePlan,
           routeText: stageRoute,
           isolatedTaskRun: true,
+          ...(opts.budgetRunId ? { budgetRunId: opts.budgetRunId, budgetSpanId: opts.budgetSpanId } : {}),
           ...backgroundRunTraceOptions(rec, scheduledNote ? 'scheduled' : 'background'),
         }), ac.signal, `Background task ${taskId} cancelled`)) {
           if (ev.type === 'token') text += ev.text;
@@ -359,7 +361,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
             pushWorkerProgress(taskId, { kind: 'result', tool: ev.type, text: `produced ${ev.filename}` });
             pushTaskProgress(taskId, `${stageName} produced ${ev.filename}`, { currentTool: null, phase: 'result' });
           }
-          if (ev.type === 'error') throw new Error(ev.message);
+          if (ev.type === 'error') throw Object.assign(new Error(ev.message), { code: ev.code, runId: ev.runId });
         }
         // An abort can end the provider stream without an error event — don't
         // let a cancelled run masquerade as a completed one (or start stage 2).
@@ -440,6 +442,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       })));
       await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, finalText.trim() || `${pipeName} completed the task.`, null, null, toolEvents, scopedAgent.id, task, { images: reportImages });
     } catch (err) {
+      if (String(err.code || '').startsWith('RUN_BUDGET')) { await pauseBudgetTask(taskId, userId, err.message, err.runId); return; }
       console.error('[background-tasks] error in task', taskId, err.message);
       const failMsg = ac.signal.aborted ? 'Task cancelled by user.' : err.message;
       // Scheduled run that was supposed to end in an email → deterministic

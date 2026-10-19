@@ -1,7 +1,7 @@
 ---
 title: "Routines & saved fast paths"
 parent: User guide
-nav_order: 17
+nav_order: 19
 permalink: /guide/routines/
 ---
 

@@ -28,6 +28,8 @@
 <link rel="stylesheet" href="/proactive-work.css">
 <link rel="stylesheet" href="/voice-diagnostics.css">
 <link rel="stylesheet" href="/mail-workspace.css">
+<link rel="stylesheet" href="/needs-attention.css">
+<link rel="stylesheet" href="/work-search.css">
 </head>
 <body>
 
@@ -123,6 +125,7 @@
   <!-- Left sidebar strip -->
   <div class="sidebar-strip" id="sidebarStrip">
     <div class="sidebar-feature-scroll" id="sidebarFeatureScroll">
+      <button class="strip-btn" id="sbtnAttention" data-action="openNeedsAttention" title="Needs attention" aria-label="Needs attention" aria-controls="drawerAttention"><i data-lucide="circle-alert"></i><span class="strip-tooltip">Needs attention</span><span class="strip-badge" id="attentionBadge" style="display:none" aria-hidden="true"></span></button>
       <button class="strip-btn" id="sbtnProjects" data-action="openProjectSpaces" title="Projects and goals" aria-label="Projects and goals"><i data-lucide="folder-open"></i><span class="strip-tooltip">Projects and goals</span><span class="strip-badge" id="projectsBadge" style="display:none" aria-hidden="true"></span></button>
       <button class="strip-btn" id="sbtnWork" data-action="openProactiveWork" title="Projects"><i data-lucide="list-checks"></i><span class="strip-tooltip">Projects</span></button>
       <button class="strip-btn" id="sbtnAgents" data-action="toggleDrawer" data-args="[&quot;drawerAgents&quot;, &quot;sbtnAgents&quot;]" title="Agents">
@@ -158,7 +161,6 @@
       <button class="strip-btn" id="sbtnLearn" data-action="toggleDrawer" data-args="[&quot;drawerLearn&quot;, &quot;sbtnLearn&quot;]" title="Learn">
         <i data-lucide="sparkles"></i>
         <span class="strip-tooltip">Learn</span>
-        <span class="strip-badge" id="learnBadge" style="display:none"></span>
       </button>
       <button class="strip-btn" id="sbtnRunInspector" data-action="toggleDrawer" data-args="[&quot;drawerRunInspector&quot;, &quot;sbtnRunInspector&quot;]" title="Run Inspector" style="display:none">
         <i data-lucide="scan-search"></i>
@@ -218,7 +220,7 @@
         <span class="strip-tooltip">Clear session</span>
         <span class="session-dot" id="sessionDot"></span>
       </button>
-      <button class="strip-btn" id="sbtnSearch" data-action="openSearch" title="Search conversations (Ctrl+K)">
+      <button class="strip-btn" id="sbtnSearch" data-action="openSearch" title="Search your work (Ctrl+K)">
         <i data-lucide="search"></i>
         <span class="strip-tooltip">Search</span>
       </button>
@@ -448,6 +450,22 @@
     </div>
 
     <!-- Drawer: Tasks -->
+    <div class="desk-drawer" id="drawerAttention">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="circle-alert"></i></span>
+        <span class="drawer-label">Needs attention</span>
+        <button class="btn-drawer-x" data-action="closeAllDrawers" aria-label="Close Needs attention">✕</button>
+      </div>
+      <div class="desk-drawer-body">
+        <div class="attention-toolbar">
+          <label>Show<select id="attentionFilter" data-change-action="renderNeedsAttention"><option value="all">All</option><option value="approval">Approvals</option><option value="failure">Failures</option><option value="connection">Connections</option><option value="uncertain">Uncertain actions</option><option value="paused">Paused work</option></select></label>
+          <button class="cdraw-btn" data-action="refreshNeedsAttention">Refresh</button>
+        </div>
+        <p id="attentionStatus" role="status">Check approvals, interrupted work, and connection problems across your account.</p>
+        <div id="attentionList"></div>
+      </div>
+    </div>
+
     <div class="desk-drawer" id="drawerTasks">
       <div class="desk-drawer-hdr">
         <span class="drawer-icon"><i data-lucide="square-check"></i></span>
@@ -479,7 +497,7 @@
       </div>
     </div>
 
-    <!-- Drawer: Learn (proposal inbox + audit of accepted learnings) -->
+    <!-- Drawer: Learn (learning settings and accepted history) -->
     <div class="desk-drawer" id="drawerLearn">
       <div class="desk-drawer-hdr">
         <span class="drawer-icon"><i data-lucide="sparkles"></i></span>
@@ -896,6 +914,7 @@
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;plugins&quot;]" id="stab-plugins">Drawers</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;skills&quot;]"  id="stab-skills">Skills</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;tasks&quot;]"   id="stab-tasks">Tasks</button>
+        <button class="stab-btn" data-action="openRunBudgets" id="stab-budgets">Budgets</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;users&quot;]"   id="stab-users"  style="display:none">Users</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;providers&quot;]" id="stab-providers" style="display:none">Providers</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;profile&quot;]" id="stab-profile">Profile</button>
@@ -1862,7 +1881,7 @@
   <div class="modal" style="width:500px;max-height:70vh;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
       <i data-lucide="search" style="width:18px;height:18px;opacity:.6"></i>
-      <input id="searchInput" type="text" placeholder="Search conversations…" style="flex:1;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text-primary);font-size:14px" autocomplete="off">
+      <input id="searchInput" type="text" placeholder="Search chats, saved results and files" style="flex:1;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text-primary);font-size:14px" autocomplete="off">
     </div>
     <div id="searchResults" style="overflow-y:auto;flex:1;min-height:0"></div>
   </div>
@@ -2004,6 +2023,9 @@
 </dialog>
 <script src="/event-delegation.js"></script>
 <script src="/core.js"></script>
+<script src="/work-search.js"></script>
+<script src="/needs-attention.js"></script>
+<script src="/run-budgets.js"></script>
 <script src="/optional-scripts.js"></script>
 <dialog id="proactiveWorkDialog" class="proactive-work-dialog" aria-labelledby="proactiveWorkTitle">
   <header><div><h2 id="proactiveWorkTitle">Projects</h2><small id="proactiveWorkScope"></small></div><button data-action="closeProactiveWork" aria-label="Close Projects">✕</button></header>

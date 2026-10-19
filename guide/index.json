@@ -62,6 +62,14 @@
       "title": "Daily use",
       "pages": [
         {
+          "slug": "search-attention",
+          "title": "Search and needs attention"
+        },
+        {
+          "slug": "run-budgets",
+          "title": "Run budgets"
+        },
+        {
           "slug": "saved-chats",
           "title": "Saved chats"
         },

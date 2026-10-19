@@ -13,6 +13,7 @@ import {
 } from './paths.mjs';
 import { withLock, makeModify } from './io-lock.mjs';
 import { loadConfig } from '../_helpers.mjs';
+import { tokenPricing, tokenCost } from '../../lib/token-cost.mjs';
 
 // ── Expense groups ───────────────────────────────────────────────────────────
 export function loadExpGroups() {
@@ -94,18 +95,7 @@ export async function recordActivity(userId, agentId, { message = false, apiCall
 
 // ── Token usage tracking ────────────────────────────────────────────────────
 function estimateCost(provider, model, input, output) {
-  if (provider === 'ollama' || provider === 'ollama-local' || provider === 'lmstudio') return 0;
-  if (provider === 'anthropic') return (input * 3 + output * 15) / 1_000_000;
-  if (provider === 'fireworks') return (input * 3 + output * 15) / 1_000_000;
-  if (provider === 'grok') return (input * 5 + output * 15) / 1_000_000;
-  if (provider === 'openrouter') {
-    try {
-      const cfg = loadConfig();
-      const p = cfg.openrouterPricing?.[model];
-      if (p) return (input * p.input + output * p.output) / 1_000_000;
-    } catch { /* ignore */ }
-  }
-  return 0;
+  return tokenCost(tokenPricing(provider, model, loadConfig()), input, output) ?? 0;
 }
 
 export async function recordTokenUsage(userId, inputTokens, outputTokens, provider, model) {

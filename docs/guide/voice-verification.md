@@ -1,7 +1,7 @@
 ---
 title: "Wake verification (advanced)"
 parent: User guide
-nav_order: 38
+nav_order: 40
 permalink: /guide/voice-verification/
 ---
 

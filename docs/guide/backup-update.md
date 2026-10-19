@@ -1,7 +1,7 @@
 ---
 title: "Backup, restore, auto-update"
 parent: User guide
-nav_order: 35
+nav_order: 37
 permalink: /guide/backup-update/
 ---
 
@@ -16,6 +16,9 @@ profiles, documents, configuration, and registries listed below into one
 `tar.gz` (or encrypted `.oeb`).
 
 ### Export
+
+Choose **Check backup contents** to see included categories, estimated sizes,
+exclusions, limits, and any saved links or special files that need review.
 
 **Settings → Backup → Export Backup** → **Download**. The file includes:
 
@@ -35,6 +38,18 @@ work keeps changing those files, export asks you to pause that work and retry.
 The copy and archive work runs separately so chat and device connections remain
 responsive during export.
 
+Every download also passes a disposable restore check before it is sent. OE
+creates the archive, decrypts it when needed, stages and applies a restore in a
+temporary installation, and compares the restored files with the staged
+inventory. These operations run outside the server event loop. **Cancel check**
+stops the work and removes temporary files. Checks need free disk space for the
+archive and disposable copies, and stop after ten minutes.
+
+The last successful check records the exact archive's SHA-256, byte size, snapshot
+format, verifier version, and time. It applies only to that archive. Verification
+checks file integrity and restore behavior; it does not start the restored app,
+execute custom code, or test external accounts and providers.
+
 ### Password-protected backups
 
 The Export panel has an optional **Password** field. If you fill it in:
@@ -47,6 +62,11 @@ The Export panel has an optional **Password** field. If you fill it in:
 If you leave the password field blank, the backup is plain `.tar.gz` exactly as before, no encryption.
 
 ### Restore
+
+For an existing installation, select the archive, enter its password if encrypted,
+and choose **Verify selected backup**. Restore becomes available after this check.
+Changing the file or password clears the selection's verification. The actual
+restore upload must still match the verified SHA-256 before OE stages it.
 
 Two paths:
 

@@ -1,7 +1,7 @@
 ---
 title: "Flashing voice devices"
 parent: User guide
-nav_order: 30
+nav_order: 32
 permalink: /guide/voice-device-flashing/
 ---
 

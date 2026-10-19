@@ -1,3 +1,4 @@
+import { budgetIsActive } from '../../lib/run-budgets.mjs';
 /**
  * Generic OpenAI-compat streaming.
  *
@@ -67,7 +68,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   let maxTokenRetried = false;
   let updateContext = null;
   let feedRetried = false;
-  const testChange = proposal => testProviderCompatibility({ provider: providerKey, model: agent.model,
+  const testChange = proposal => budgetIsActive() ? Promise.resolve({ ok: false, reason: 'Automatic provider probes are paused while a run budget is active.' }) : testProviderCompatibility({ provider: providerKey, model: agent.model,
     endpoint: configuredEndpoint, apiKey, userId, signal, ...proposal });
   const failUpdate = reason => {
     if (!updateContext) return null;
@@ -134,6 +135,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, providerKey, agent);
 
     yield modelCallTraceEvent({
+      budgetRequest: body,
       provider: providerKey, model: agent.model, tools: body.tools, round: guard.count,
       requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
       wireReasoningEffort: body.reasoning_effort
@@ -319,6 +321,8 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       // cache_control telemetry. Not all providers populate this; missing = 0.
       cachedTokens += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
     }
+
+    if (budgetIsActive()) yield { type: '__budget_usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: providerKey, usageComplete: Boolean(iterUsage) };
 
     if (compatibilityChanged && (sawDone || finishReason) && (textContent.trim() || toolCalls.size)
       && !(finalRound && toolCalls.size > 0)) {

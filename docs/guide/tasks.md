@@ -1,7 +1,7 @@
 ---
 title: "Tasks & scheduler"
 parent: User guide
-nav_order: 16
+nav_order: 18
 permalink: /guide/tasks/
 ---
 
@@ -80,13 +80,13 @@ Active watches are managed in **Tasks → Monitors**. Expand one to inspect it a
 
 ## Friction proposals — the bubble that asks "make this recurring?"
 
-If you ask for the same thing three times in a row in the same agent (the cortex same-instruction head decides what counts), a small bubble appears in chat: *"Make this a recurring task?"* with **Schedule daily** and **No, just this once** buttons. It's an offer, never an automatic action.
+If you ask for the same thing three times in a row in the same agent (the cortex same-instruction head decides what counts), a small bubble appears in chat: *"Make this a recurring task?"* with a **Review in Needs attention** button. Open it to choose **Schedule daily** or **No, just this once**. It's an offer, never an automatic action.
 
 - **Accept** runs the agent in the background and sets up the right scheduled task or watch using sensible defaults (daily at the time you mentioned, or 09:00 if no time was specified). The bubble flips to *"Setting it up…"* immediately, then *"✓ Accepted"* when the agent finishes.
 - **Dismiss** silences the same pattern for 24 hours so it doesn't immediately re-propose.
 - **Destructive verbs** (delete, remove, wipe, format, drop, purge, rm, uninstall, reset, etc.) are filtered out — they never auto-propose, even when repeated. You can still set up a destructive recurring task explicitly via your agent; friction-as-proposer just won't escalate ad-hoc deletes into a daily one.
 
-The bubble persists across reloads. Pending proposals can also be inspected via `/api/proposals` if you want to see what's outstanding.
+The notice persists across reloads. Pending proposals are reviewed in **Needs attention** and can also be inspected via `/api/proposals` if you want to see what's outstanding.
 
 ## Editing & disabling
 

@@ -1,7 +1,7 @@
 ---
 title: "Personalization"
 parent: User guide
-nav_order: 21
+nav_order: 23
 permalink: /guide/personalization/
 ---
 
@@ -15,7 +15,7 @@ OpenEnsemble can quietly learn from how you use it — the questions you ask, wh
 
 Consequential actions start ask-first. Learning happens passively in the background; purchases, messages, calendar changes, destructive operations, external delivery, and anything without an exact undo path always appear as a suggestion first. If you enable **Safe initiative**, a reviewed skill may start a private informational watcher automatically—but only through a validated, exactly stoppable contract, with a durable receipt and **Undo / Stop updates** controls. Unreviewed or modified skill code falls back to a suggestion even when its manifest labels itself informational.
 
-Set it up in **Settings → Personalization** (sources, privacy, model, engagement style, and reset controls). Review what it has actually learned in the **Learn** drawer, under **About you**.
+Set it up in **Settings → Personalization** (sources, privacy, model, engagement style, and reset controls). Review pending suggestions in **Needs attention**. Review what it has actually learned in the **Learn** drawer, under **About you**.
 
 For accepted suggestions that save aliases, voice routines, standing rules, tool defaults, routing overrides, or learned phrases, **Undo** restores the previous value within 24 hours. If you have saved changes in the same area since acceptance, OE keeps those changes and directs you to review the current value in **Learn**. Older suggestions without saved history also require review in **Learn**.
 
@@ -171,7 +171,7 @@ keywords. **Quiet** suppresses both activation suggestions and safe automatic st
 
 Choose whether unsolicited websocket updates arrive immediately or are held. Held lead results fold into the next scheduled briefing; automatic-action receipts remain visible in **Proactive activity** for review. If no briefing is scheduled, durable items do not disappear. Quiet hours and daily limits use the timezone captured during setup; lead results and automatic-action receipts wait rather than interrupting during that window. Every immediate receipt shares the same daily ping budget as lead updates. Upgraded installs and travelers can choose **Use this browser’s timezone** beside the quiet-hours controls at any time.
 
-The **Proactive activity** list is durable: an update written while you're offline remains pending instead of disappearing. Delivered items can be marked read individually or all at once. Each item also includes a **Why this appeared** explanation and a mode label: **Safe initiative** when the restricted setting started a reviewed preference monitor, **You approved this** when you explicitly enabled that exact preference monitor, **Requested follow-up** for something you asked it to keep checking, or **Previously approved** for a behavior you separately graduated to automatic handling. Ask-first suggestions remain in chat and do nothing until you approve them.
+The **Proactive activity** list is durable: an update written while you're offline remains pending instead of disappearing. Delivered items can be marked read individually or all at once. Each item also includes a **Why this appeared** explanation and a mode label: **Safe initiative** when the restricted setting started a reviewed preference monitor, **You approved this** when you explicitly enabled that exact preference monitor, **Requested follow-up** for something you asked it to keep checking, or **Previously approved** for a behavior you separately graduated to automatic handling. Ask-first suggestions appear in **Needs attention**, with notices linking there from chat, and do nothing until you approve them.
 
 ## Decision history
 

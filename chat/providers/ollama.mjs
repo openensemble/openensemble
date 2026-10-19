@@ -1,3 +1,4 @@
+import { budgetIsActive } from '../../lib/run-budgets.mjs';
 /**
  * Ollama streaming (chat + tools).
  *
@@ -73,6 +74,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     }
 
     yield modelCallTraceEvent({
+      budgetRequest: body,
       provider: agent.provider || 'ollama', model: agent.model, tools: body.tools, round: guard.count,
       requestedReasoningEffort: effort,
       wireReasoningEffort: typeof body.think === 'string'
@@ -194,6 +196,8 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
         yield { type: 'token', text: msg.content };
       }
     }
+
+    if (budgetIsActive()) yield { type: '__budget_usage', inputTokens: ollamaInputTokens, outputTokens: ollamaOutputTokens, provider: agent.provider || 'ollama' };
 
     // ── Qwen inline tool calls (emitted as text instead of structured tool_calls) ─
     // Parse them into the structured shape HERE — before the executor below — so

@@ -6,6 +6,7 @@
  */
 import path from 'path';
 import { beginTaskAction, checkpointToolEvent } from '../background-tasks/checkpoints.mjs';
+import { beginBudgetAction, finishBudgetAction } from '../lib/run-budgets.mjs';
 import { existsSync, readFileSync } from 'fs';
 import { pathToFileURL } from 'url';
 import { SKILLS_DIR, USERS_DIR, userSkillsDir, getUserFilesDir, readConfig } from '../lib/paths.mjs';
@@ -147,9 +148,10 @@ export const NON_LEARNING_BLOCKED_TOOLS = new Set([
 // (which would create a circular import). Used only for the child-account
 // tool gate below — a tight, read-only, non-cached path.
 export async function* executeToolStreaming(name, args, userId = 'default', agentId = null, allowedTools = null) {
-  const checkpoint = { action: null };
+  const checkpoint = { action: null, budgetAction: null };
   for await (const event of executeCheckpointedTool(name, args, userId, agentId, allowedTools, checkpoint)) {
     checkpointToolEvent(checkpoint.action, event);
+    finishBudgetAction(checkpoint.budgetAction, event);
     yield event;
   }
 }
@@ -389,6 +391,12 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
     name,
     mergedArgs,
   );
+  checkpoint.budgetAction = beginBudgetAction({ userId, name, args: mergedArgs, mutation: advancesReplayEpoch });
+  if (checkpoint.budgetAction?.replay) {
+    for (const event of checkpoint.budgetAction.events || []) yield event;
+    yield { type: 'result', text: `${checkpoint.budgetAction.text}\n\n[Saved result: this completed action was not repeated.]`, isError: checkpoint.budgetAction.isError, _reusedToolResult: true };
+    return;
+  }
   checkpoint.action = beginTaskAction({ userId, name, args: mergedArgs, mutation: advancesReplayEpoch });
   if (checkpoint.action?.replay) {
     for (const event of checkpoint.action.events) yield event;

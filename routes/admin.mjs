@@ -7,7 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import {
   requireAuth, requirePrivileged, getAuthToken, getSessionUserId,
@@ -40,10 +40,10 @@ import {
   applyUpdate, forceApplyUpdate, restartProcess,
 } from '../lib/update.mjs';
 import { broadcastToUsers } from '../ws-handler.mjs';
-import { encryptBackup, decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
+import { decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
 import { buildEmailSubjectHeader } from '../lib/email-headers.mjs';
-import { pipeline } from 'node:stream/promises';
-import { BACKUP_MAX_BYTES, createBackupArchive, stageRestore } from '../lib/backup-state.mjs';
+import { BACKUP_MAX_BYTES, stageRestore } from '../lib/backup-state.mjs';
+import { handle as handleBackupChecks } from './backup-checks.mjs';
 
 // ── Rate limiting for invite redemption ────────────────────────────────────
 // Same pattern as routes/auth.mjs login limiter. Two buckets:
@@ -574,38 +574,7 @@ export async function handle(req, res) {
     return true;
   }
 
-  // Build and validate the complete archive before acknowledging a download.
-  // Both formats share the restore limit; encryption includes the saved keys.
-  if (req.url === '/api/admin/backup' && (req.method === 'GET' || req.method === 'POST')) {
-    const authId = requirePrivileged(req, res); if (!authId) return true;
-    let bundle;
-    try {
-      bundle = await createBackupArchive(BASE_DIR);
-      const password = (req.headers['x-backup-password'] || '').toString();
-      const dateStr = new Date().toISOString().slice(0, 10);
-      if (password) {
-        const encrypted = encryptBackup(fs.readFileSync(bundle.archive), password);
-        res.writeHead(200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Length': encrypted.length,
-          'Content-Disposition': `attachment; filename="openensemble-backup-${dateStr}.oeb"`,
-          'X-Backup-Encrypted': '1',
-        });
-        res.end(encrypted);
-      } else {
-        res.writeHead(200, {
-          'Content-Type': 'application/gzip',
-          'Content-Length': fs.statSync(bundle.archive).size,
-          'Content-Disposition': `attachment; filename="openensemble-backup-${dateStr}.tar.gz"`,
-        });
-        await pipeline(fs.createReadStream(bundle.archive), res);
-      }
-    } catch (error) {
-      if (!res.headersSent) safeError(res, error);
-      else if (!res.writableEnded) res.destroy(error);
-    } finally { await bundle?.cleanup(); }
-    return true;
-  }
+  if (await handleBackupChecks(req, res)) return true;
 
   // ── Restore endpoint ──────────────────────────────────────────────────────
   // Validated uploads are staged; the launcher applies them before server import.
@@ -618,6 +587,19 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
       let raw = await readRestoreBody(req);
+      const expectedHash = req.headers['x-restore-expected-sha256'];
+      if (expectedHash) {
+        const hash = createHash('sha256');
+        for (let offset = 0; offset < raw.length; offset += 1024 * 1024) {
+          hash.update(raw.subarray(offset, offset + 1024 * 1024));
+          if (offset % (8 * 1024 * 1024) === 0) await new Promise(resolve => setImmediate(resolve));
+        }
+        if (!/^[a-f0-9]{64}$/.test(expectedHash) || hash.digest('hex') !== expectedHash) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'This file differs from the verified archive. Verify the selected file again before restoring.' }));
+          return true;
+        }
+      }
       raw = await maybeDecryptRestore(raw, req, res); if (!raw) return true;
       const restored = await performRestore(raw);
       res.writeHead(200, { 'Content-Type': 'application/json' });

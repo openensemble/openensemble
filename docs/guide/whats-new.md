@@ -1,7 +1,7 @@
 ---
 title: "What's new"
 parent: User guide
-nav_order: 39
+nav_order: 41
 permalink: /guide/whats-new/
 ---
 
@@ -16,6 +16,21 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 ---
 
 ## 2026-10-19
+
+**Find, review, and continue your work**
+[Search](../search-attention/) now covers original and saved conversations,
+project results, and profile files, with links to the exact saved content.
+**Needs attention** brings approvals, failures, connection issues, uncertain
+email, and paused work into one account-scoped queue. Proposal decisions now
+live here, including Accept, Dismiss, Snooze, and permanent opt-out. Chat notices
+link to this inbox; Learn keeps saved knowledge, settings, and accepted history.
+
+[Run budgets](../run-budgets/) provide account defaults, project allowances and
+per-run token or estimated USD limits across delegates and retries. Paused work
+requires explicit authorization to continue. [Mail delivery review](../email-calendar/#uncertain-email-delivery)
+checks Sent evidence and saves your sent, not-sent, or archive decision without
+automatically resending. [Backups](../backup-update/) show a contents preflight and
+verify the exact archive through a disposable restore before download or restore.
 
 **Reliability and performance fixes**
 Signing out or revoking a session now closes its authenticated connections, and

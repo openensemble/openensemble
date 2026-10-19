@@ -1,7 +1,7 @@
 ---
 title: "Display dashboards"
 parent: User guide
-nav_order: 15
+nav_order: 17
 permalink: /guide/dashboards/
 ---
 
