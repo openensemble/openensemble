@@ -901,12 +901,50 @@
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;providers&quot;]" id="stab-providers" style="display:none">Providers</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;profile&quot;]" id="stab-profile">Profile</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;system&quot;]"  id="stab-system" style="display:none">System</button>
+        <button class="stab-btn" data-action="switchSettingsTab" data-args="[&quot;shares&quot;]" id="stab-shares">Network Shares</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;mcp&quot;]"      id="stab-mcp">MCP</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;browser&quot;]" id="stab-browser">Browser</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;backup&quot;]" id="stab-backup" style="display:none">Backup</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;personalization&quot;]" id="stab-personalization">Personalization</button>
       </div>
       <div class="desk-drawer-body">
+
+        <div class="stab-panel" id="stab-panel-shares">
+          <div class="settings-section-title">Network Shares</div>
+          <p class="network-share-note">Connect SMB or NFS folders to your account. Browse them here, or ask in chat: “Connect to the shared folder on shareserver” and “Copy my report to that share.”</p>
+          <div id="networkSharesList" aria-live="polite"></div>
+          <details>
+            <summary>Find shared folders on a server</summary>
+            <div class="network-share-form">
+              <label>Server<input id="networkShareServer" placeholder="shareserver" autocomplete="off"></label>
+              <button class="btn-sm" data-action="discoverNetworkSharesSettings">Find shares</button>
+              <div id="networkShareDiscovery" aria-live="polite"></div>
+            </div>
+          </details>
+          <details open>
+            <summary>Connect a share</summary>
+            <div class="network-share-form">
+              <label>Share address<input id="networkShareLocation" placeholder="//shareserver/shared or nfs://shareserver/export" data-input-action="toggleNetworkShareProtocol" autocomplete="off"></label>
+              <label>Name (optional)<input id="networkShareName" placeholder="Shared files" maxlength="100"></label>
+              <div id="networkShareSmbFields">
+                <p class="network-share-note">Leave login fields empty to use a saved login or guest access.</p>
+                <div class="network-share-login">
+                  <label>Username<input id="networkShareUsername" autocomplete="off" maxlength="1024"></label>
+                  <label>Password<input id="networkSharePassword" type="password" autocomplete="new-password" maxlength="1024"></label>
+                  <label>Domain (optional)<input id="networkShareDomain" autocomplete="off" maxlength="1024"></label>
+                </div>
+              </div>
+              <div id="networkShareNfsFields" hidden>
+                <label>NFS version<select id="networkShareVersion"><option value="4">NFS 4</option><option value="3">NFS 3</option></select></label>
+                <p class="network-share-note">NFS uses server export permissions and the OE service identity. It does not use an SMB username or password.</p>
+              </div>
+              <label style="flex-direction:row;align-items:center"><input id="networkShareReadOnly" type="checkbox">Read only</label>
+              <button id="networkShareConnect" class="btn-sm" data-action="connectNetworkShareSettings">Connect</button>
+              <div id="networkShareStatus" role="status" aria-live="polite"></div>
+            </div>
+          </details>
+          <div id="networkShareBrowser" aria-live="polite"></div>
+        </div>
 
         <!-- ── Agents tab ── -->
         <div class="stab-panel active" id="stab-panel-agents">
@@ -2002,6 +2040,7 @@
 <script src="/settings-ops.js"></script>
 <script src="/settings-drawers.js"></script>
 <script src="/settings-tv.js"></script>
+<script src="/settings-shares.js"></script>
 <script src="/settings.js"></script>
 <script src="/personalization.js"></script>
 <script src="/oauth.js"></script>

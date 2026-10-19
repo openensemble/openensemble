@@ -93,6 +93,97 @@ Agents can also create brand-new documents (*"make me a packing list for the cam
 
 Only the document's **owner** can edit or restore; docs shared with you are read-only (ask your agent for an edited copy instead). PDFs, Word files, and media can't be edited — only viewed. Research documents get the same version trail whether you edit them from the viewer or the Researcher updates them itself.
 
+## Network shares (SMB and NFS)
+
+Connect a NAS or file server from **Settings → Network Shares**, or ask in chat:
+
+- “Connect to the shared folder on shareserver.”
+- “Connect to `//shareserver/shared`.”
+- “Connect to `nfs://shareserver/export/data`.”
+- “What's in that share?”
+- “Read the project notes in it.”
+- “Copy my report to `reports/report.pdf` on that share.”
+- “Pull the photos into my OE Images folder.”
+
+Connections belong to your signed-in OE account. Adult accounts with the
+Network Shares skill enabled can use them. The share must be reachable from
+the **OE server**. A share reachable only from your laptop needs network access
+from OE too. Existing TV video-library sources remain household media sources;
+connect a folder here to use it for your account's chat and file transfers.
+
+If you know only the server name, OE can list its advertised SMB shares and
+NFS exports. It asks which folder to use if the answer is ambiguous. Some NFSv4
+servers do not advertise exports; an exact export address can still work.
+
+For SMB, OE tries your saved login or guest access. When a login is required,
+an inline form collects **Username**, **Password**, and optional **Domain**.
+Submitting it continues the connection. These fields bypass the chat transcript
+and model; a successful login is saved encrypted for your account. To replace
+a saved login, ask to connect with a new login. Cancel closes the request
+without saving a new connection. In Settings, enter the same fields directly.
+
+NFS supports versions 3 and 4 and defaults to 4. Select the server's version in
+Settings or mention it in chat. NFS uses the OE service's operating-system
+UID/GID and the server's export permissions. It does not accept an SMB password.
+The server must allow this host and identity. Exports that require a reserved
+client port need an administrator to configure that access for `fuse-nfs`.
+Kerberos-based NFS login is not configured by this feature.
+
+Use **Browse** to inspect a saved share. Chat can list directories, read text,
+extract PDF text, show small images, and copy files or folders in either
+direction. Documents accepts regular files; Images, Videos, and Audio accept
+their media type. Imported documents appear in Profile Files with their source
+names and new file IDs. Media imports use unique filenames. Source files stay
+in place. Copies do not overwrite existing files or follow symbolic links.
+Each copy is limited to 2,000 files and 1 GiB; large directories can be copied
+in smaller groups. A failed or interrupted upload may leave a partial destination;
+OE reports failures instead of claiming the copy succeeded.
+
+To remove particular files, ask for those files to be deleted **from** the share,
+for example, “remove both daily news briefings from the share.” OE lists the
+share to identify the exact filenames and deletes only the selected files.
+The share stays connected, its saved settings remain, and any originals in OE
+are preserved. File deletion supports up to 100 regular files per request;
+it rejects folders, symbolic links, the share root, and wildcard patterns.
+
+In chat, asking to remove the share itself presents three choices: **remove from OE
+only**, keeping the server share and all files; **delete all files and the
+share**; or **ignore this request**, keeping the connection, share, and files
+unchanged. Reply **3**, **ignore this request**, or **cancel** to cancel removal.
+Nothing changes until you choose. Permanent deletion requires an
+administrator, an authorized server node, and a separate typed confirmation
+that names the exact SMB or NFS address. A generic “yes” does not confirm
+deletion. Choices expire after ten minutes and apply only in the same chat.
+
+**Disconnect** unmounts the share, keeps its saved settings, and turns off
+automatic mounting. **Forget** removes the OE connection and any saved login
+unused by other shares on that server. Both preserve the server share and all
+files. Opening or connecting a saved share again enables automatic mounting.
+
+Connected shares **mount automatically when OE starts**, including after a
+server reboot, using their saved encrypted login. An unavailable server or
+rejected login does not block OE startup or erase connection settings. Retry
+Connect when the server is available; a changed SMB login can be replaced in
+the protected form. Backups contain connection settings and encrypted
+credentials, not the remote share's contents.
+
+### Host setup and troubleshooting
+
+The initial implementation uses Linux FUSE, rclone's SMB client, and fuse-nfs.
+On Debian, Ubuntu, or Mint, an administrator can prepare the OE installation
+with `scripts/install-share-tools.sh`. It downloads architecture-matched client
+packages and builds a pinned fuse-nfs client under OE's ignored `bin/` directory,
+without installing system packages or changing existing mounts. The host needs
+FUSE (`/dev/fuse` and `fusermount3` or `fusermount`), a C compiler, Debian package
+tools, and curl. Container deployments must expose FUSE. Other Linux
+distributions can provide rclone, fuse-nfs, and showmount on the service PATH.
+
+For **access denied**, check the SMB login/domain or the NFS export's host and
+UID/GID rules. For **unavailable**, check the address, firewall, and server.
+For **destination exists**, choose another filename. NFS support and reserved
+port setup are described in the [fuse-nfs documentation](https://github.com/sahlberg/fuse-nfs);
+SMB options are documented by [rclone](https://rclone.org/smb/).
+
 ## Storage
 
 Files live under `users/{userId}/`:

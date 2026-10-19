@@ -12,7 +12,7 @@ import os         from 'os';
 import crypto     from 'crypto';
 import { fileURLToPath } from 'url';
 import { listAgents } from './agents.mjs';
-import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
+import { loadRoleManifests, validateSkills, reconcileRoleDrawers, isSkillRuntimeEnabledForUser } from './roles.mjs';
 import { loadDrawerManifests, stopAllDrawerWorkers } from './plugins.mjs';
 import { startScheduler, stopScheduler, loadTasksForOwner, addTask, removeTask, registerBuiltin } from './scheduler.mjs';
 import { initPersonalization } from './lib/personalization/scheduler-init.mjs';
@@ -55,6 +55,7 @@ import { handle as handleAdmin }    from './routes/admin.mjs';
 import { handle as handleExpenses } from './routes/expenses.mjs';
 import { handle as handleResearch } from './routes/research.mjs';
 import { handle as handleDesktop }  from './routes/desktop.mjs';
+import { handle as handleDesktopSync } from './routes/desktop-sync.mjs';
 import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleMobile }   from './routes/mobile.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
@@ -85,6 +86,9 @@ import { handle as handleBrowserPairing } from './routes/browser-pairing.mjs';
 import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
 import { handle as handleVoiceGate }    from './routes/voice-gate.mjs';
+import { handle as handleNetworkShares } from './routes/network-shares.mjs';
+import { stopShareMounts } from './lib/network-share-mounts.mjs';
+import { restoreNetworkSharesAtStartup } from './lib/network-share-startup.mjs';
 import { handle as handleTv }           from './routes/tv.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
 import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
@@ -362,6 +366,7 @@ const routeHandlers = [
   handleReasonRuntime,
   handlePlanRuntime,
   handleResearch,
+  handleDesktopSync,
   handleDesktop,
   handleNodes,
   handleAdmission,
@@ -369,6 +374,7 @@ const routeHandlers = [
   handleDevices,
   handleWakewords,
   handleVoiceGate, // authenticated direct-LAN ingress; verifier stays loopback-only
+  handleNetworkShares, // /api/network-shares/*
   handleTv,        // /api/tv/* + /api/tv-app/* + /api/wakewords/stock/:id.tflite
                    // (after handleWakewords, which only matches /api/wakewords
                    // exactly and single-segment /api/wakewords/:id, so it falls
@@ -1074,6 +1080,13 @@ function _detectLanIp() {
 httpServer.listen(PORT, '0.0.0.0', () => {
   const lanIp = _detectLanIp();
   console.log(`\n🎵 OpenEnsemble running at http://${lanIp}:${PORT}\n`);
+  if (!ISOLATED_LAB_RUNTIME) {
+    void restoreNetworkSharesAtStartup({
+      canRestore: userId => loadUsers().some(user => user.id === userId && ['owner', 'admin', 'user'].includes(user.role))
+        && isSkillRuntimeEnabledForUser('network_shares', userId),
+      onResult: (userId, result) => console.log('[network-shares] startup', userId, result.id || '', result.connected ? 'connected' : result.code),
+    }).catch(() => console.warn('[network-shares] startup restore failed; saved connections are unchanged'));
+  }
 
   // Arm oe-admin boot-check. If a pending mutation is awaiting commit and
   // the server is now responding, this commits the change (or reverts +
@@ -1424,6 +1437,7 @@ async function shutdown(signal) {
   }, 15000);
   forceTimer.unref();
 
+  await stopShareMounts();
   await new Promise(r => setTimeout(r, 500));
 
   try { fs.unlinkSync(PID_FILE); } catch {}

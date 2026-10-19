@@ -86,6 +86,8 @@ import { assertLabVerifierLease } from './lib/lab-verifier-lease.mjs';
 // so exactly ONE restore fires ~3s after the LAST interruption settles.
 const _ambientRestoreTimers = new Map();
 import { buildVoiceSystemAddition } from './lib/voice-context.mjs';
+import { tryNetworkShareRemovalIntercept } from './chat-dispatch/network-share-removal.mjs';
+import { runWithShareDeletionApproval } from './lib/network-share-removal.mjs';
 import {
   loadConfig, getAgentsForUser,
   getUser, getUserCoordinatorAgentId, resolveRuntimeAgentId, recordActivity,
@@ -1368,7 +1370,7 @@ export async function handleChatMessage({
   // conversation window open on the room. Completed routines are terminal
   // too; a routine with run_prompt owns its nested question flow instead.
   const CONVERSATION_REARM_FASTPATHS = new Set([
-    tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
+    tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath, tryNetworkShareRemovalIntercept,
   ]);
   const TERMINAL_FASTPATHS = new Set([tryHaFastpath, tryRoutineFastpath]);
   // (The follow-up window gate runs much earlier — before the send-time
@@ -1390,7 +1392,9 @@ export async function handleChatMessage({
       // destructive ops, so only a real user turn may run them. A background
       // continuation or hidden internal turn arriving between "stage" and the
       // user's APPROVE used to wipe the staged op before they could confirm.
-      ...((_isBackgroundContinuation || _hiddenUser) ? [] : [tryApprovalIntercept]),
+      ...((_isBackgroundContinuation || _hiddenUser) ? [] : [
+        ...(_silent ? [] : [tryNetworkShareRemovalIntercept]), tryApprovalIntercept,
+      ]),
       slashAdapter,
       financePreprocess,
     ] : []),
@@ -1450,13 +1454,17 @@ export async function handleChatMessage({
       // followup can't itself match a routine trigger and recurse. Target
       // device may differ — push the LLM reply to the room where the routine
       // is playing rather than the originating mic.
-      await handleChatMessage({
+      const continueTurn = () => handleChatMessage({
         userId, agentId, text: r.followupPrompt,
         attachment: null, source, deviceId: r.targetDeviceId ?? deviceId, wakeSlot,
         onEvent, onBroadcast, onNotify,
         _isRoutineFollowup: true,
         ...(r.skillActivationContinue ? { _hiddenUser: true, toolPlan, conversationMode } : {}),
+        ...(r.networkShareDeletionApproval ? { _hiddenUser: true, _suppressLearning: true, conversationMode, toolPlan: { mode: 'auto' } } : {}),
       });
+      if (r.networkShareDeletionApproval) {
+        await runWithShareDeletionApproval(r.networkShareDeletionApproval, continueTurn);
+      } else await continueTurn();
     }
     return;
   }

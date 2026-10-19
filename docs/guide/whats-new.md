@@ -17,6 +17,21 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-10-19
 
+**Choose what removing a share means**
+Chat now asks whether to remove a connection from OE while keeping all files,
+permanently delete the files and server share, or ignore the request and change
+nothing. Requests to delete named files **from** a share use a separate file-only
+operation that keeps the share connected. Share deletion needs a separate
+confirmation of the exact share address. Connected SMB/NFS shares mount
+automatically on OE startup; deliberately disconnected shares stay disconnected.
+
+**Connect SMB and NFS shares in chat**
+**Settings → Network Shares** saves account-specific file-server connections.
+Ask to connect, browse, read files, or copy files between a share and your OE
+folders. SMB logins use a protected inline form; NFS uses export permissions.
+Copies preserve source files and avoid overwrites. See
+[Network shares](../documents/#network-shares-smb-and-nfs) for host setup and limits.
+
 **More room to read email**
 Mail now keeps the subject, message controls, and reply actions in one card.
 The email body grows with the available reading space. Opening a message marks

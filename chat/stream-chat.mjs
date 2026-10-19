@@ -41,6 +41,8 @@ import { getScheduledContext } from '../lib/scheduled-context.mjs';
 import { iterateInDetachedTurn } from '../lib/turn-trace-iterator.mjs';
 import { composeSkillSpaBlock } from '../lib/skill-prompt-composer.mjs';
 import { learnToolPlanFromTurn } from '../lib/tool-plan-memory.mjs';
+import { detectNetworkShareRemoval, SHARE_REMOVAL_REQUEST, getShareDeletionApproval } from '../lib/network-share-removal.mjs';
+import { networkShares } from '../lib/network-shares.mjs';
 import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from '../lib/run-inspector.mjs';
 import {
   buildWorkerStandingMemoryContext,
@@ -162,7 +164,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const inheritedLabVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
     && getTurnContext()?.suppressLearning === true;
   const labVerifierTurn = inheritedLabVerifierTurn;
-  const suppressLearning = scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId || !!chatId;
+  const suppressLearning = scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId || !!chatId || !!getShareDeletionApproval(userId);
   // Foreground verifier turns honor the dispatcher-authenticated 1..4 cap.
   // Detached verifier work gets two bounded extra rounds so a multi-step task
   // can correct one lookup and still produce a final answer.
@@ -237,6 +239,20 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const routeText = (typeof turnOpts?.routeText === 'string' && turnOpts.routeText.trim())
     ? turnOpts.routeText.trim()
     : sessionUserText;
+  // Interactive removal goes through the server-owned choice interceptor.
+  // Background/direct streams must not bypass it via a remembered admin
+  // recipe, tool recovery, or the old conversation's shell commands.
+  if (SHARE_REMOVAL_REQUEST.test(routeText) && !getShareDeletionApproval(userId)) {
+    const [shares, history] = await Promise.all([
+      networkShares.list(userId),
+      isolatedTaskRun ? [] : loadSession(agent.id),
+    ]);
+    if (detectNetworkShareRemoval(routeText, shares, history)) {
+      agent = { ...agent, tools: [] };
+      recomposeAgentPromptForTools(agent);
+      systemNote = `${systemNote || ''}\n\nShare removal requires a real user choice in chat before any action: (1) remove from OE only, keeping the server share and all files, (2) permanently delete all files and the share, followed by confirmation of its exact address, or (3) ignore the request and change nothing. No removal is authorized in this turn. Ask the user to make this choice in the interactive chat. Do not reuse old approvals, shell commands, or integration rollback recipes.`;
+    }
+  }
   // Per-turn tool routing: trim the coordinator's outbound tool list to the
   // always-on subset + on-demand skills whose intent_examples match this
   // user message. Other agents (specialists) are already tightly scoped and

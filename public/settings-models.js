@@ -1050,6 +1050,7 @@ function switchSettingsTab(name) {
   $(`stab-panel-${name}`)?.classList.add('active');
   if (name === 'agents') loadOrchestrationSettings();
   if (name === 'profile') { loadOAuthStatus(); loadActiveSessions(); if (typeof loadTelegramUser === 'function') loadTelegramUser(); if (typeof renderAvatarPicker === 'function') renderAvatarPicker($('avatarPickerContainer')); if (typeof renderMirrorStatus === 'function') renderMirrorStatus(); if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus(); }
+  if (name === 'shares') loadNetworkShares();
   if (name === 'skills') loadSkillsList();
   if (name === 'plugins') renderDrawersSettings();
   if (name === 'tasks') {

@@ -47,7 +47,29 @@ function appendCredentialPromptBubble(credentialId, label, description, kind) {
   }
 
   const form = document.createElement('form');
-  form.style.cssText = 'display:flex;gap:6px;align-items:center';
+  form.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+
+  const smbInputs = {};
+  if (kind === 'smb') {
+    const fields = document.createElement('div');
+    fields.style.cssText = 'display:flex;flex-direction:column;gap:6px;width:100%';
+    for (const [id, title, secret] of [['username', 'Username', false], ['password', 'Password', true], ['domain', 'Domain (optional)', false]]) {
+      const label = document.createElement('label');
+      label.textContent = title;
+      label.style.cssText = 'display:flex;flex-direction:column;gap:3px;font-size:12px';
+      const field = document.createElement('input');
+      field.type = secret ? 'password' : 'text';
+      field.autocomplete = 'off';
+      field.spellcheck = false;
+      field.required = id === 'username';
+      field.maxLength = 1024;
+      field.style.cssText = 'padding:7px;border:1px solid var(--border);background:var(--bg-input,#111);color:var(--fg);border-radius:4px';
+      label.appendChild(field);
+      fields.appendChild(label);
+      smbInputs[id] = field;
+    }
+    form.appendChild(fields);
+  }
 
   const input = document.createElement('input');
   input.type = kind === 'confirm' ? 'text' : 'password';
@@ -55,7 +77,7 @@ function appendCredentialPromptBubble(credentialId, label, description, kind) {
   input.spellcheck = false;
   input.style.cssText = 'flex:1;padding:6px 8px;border:1px solid var(--border);background:var(--bg-input, #111);color:var(--fg);border-radius:4px;font-family:inherit;font-size:13px';
   input.placeholder = kind === 'sudo' ? 'sudo password' : kind === 'confirm' ? 'type here…' : 'paste secret here';
-  form.appendChild(input);
+  if (kind !== 'smb') form.appendChild(input);
 
   const submitBtn = document.createElement('button');
   submitBtn.type = 'submit';
@@ -71,10 +93,11 @@ function appendCredentialPromptBubble(credentialId, label, description, kind) {
 
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
-    const value = input.value;
+    const value = kind === 'smb' ? JSON.stringify(Object.fromEntries(Object.entries(smbInputs).map(([key, field]) => [key, field.value]))) : input.value;
     if (!value) return;
     // Clear input immediately — the value lives only on the wire from here.
     input.value = '';
+    for (const field of Object.values(smbInputs)) field.value = '';
     submitBtn.disabled = true;
     cancelBtn.disabled = true;
     submitBtn.textContent = 'Submitting…';
@@ -85,6 +108,8 @@ function appendCredentialPromptBubble(credentialId, label, description, kind) {
     }
   });
   cancelBtn.addEventListener('click', () => {
+    input.value = '';
+    for (const field of Object.values(smbInputs)) field.value = '';
     submitBtn.disabled = true;
     cancelBtn.disabled = true;
     cancelBtn.textContent = 'Cancelled';
