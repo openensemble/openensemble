@@ -41,11 +41,160 @@ read-only connection needs separate SMTP configuration through OE's account
 API before it can send. **SMTP From email** only sets the sender address.
 For accounts requiring modern OAuth, use the Gmail/Microsoft connection path.
 
-## Inbox and automatic labels
+## Mail workspace
 
-Open **Inbox**, select an account, and use Refresh to retry a failed load.
-Open a message to read it; the back arrow returns to the list. Ask the assistant
-to draft a reply or organize a specific set of messages.
+Open **Mail** on the sidebar or mobile menu. The inbox fills the available
+workspace width. Selecting an email opens the list and reading pane side by
+side on larger screens; **Back to messages** restores the wide list. Phones
+show one pane at a time. **All accounts** combines the latest messages from
+connected mailboxes; select one account to browse its
+folders and Gmail labels. **Load more messages** pages through older mail.
+Search applies to the current account/folder selection, using each provider's
+search syntax. **Unread** filters the messages currently loaded in the list.
+Refresh retries failed loads; if one provider fails, the other results remain
+available and the failed account is named above the list.
+
+Select a message to read its conversation, download attachments, reply, reply
+to all recipients, or forward it with its original content and attachments.
+The subject, message controls, and reply actions share one message card, with a
+body that grows to fit the reading pane. Once the selected message loads and is
+displayed, OE marks it read in your mailbox and clears its blue unread dot.
+Read, unread, and star changes update the affected rows in place, keeping the
+loaded messages and list position without fetching the whole mailbox again.
+Use **Mark unread** to flag it again. Failed loads stay unread; if the provider
+cannot save the read status, OE keeps the dot and shows the error.
+Gmail and Microsoft support conversation reading; IMAP opens the selected
+message. External images are blocked until you choose **Load external images**.
+Use the row checkboxes to archive, mark unread, or move selected mail to Trash.
+The reader also offers **Move to…**, **Mark read**, and **Restore** from Trash.
+IMAP trash uses the server's advertised Trash folder; it does not permanently
+delete mail if that folder is unavailable.
+
+### Gmail labels
+
+Select your Gmail account and choose **New label** under **Labels**. Enter a
+name, optionally choose an existing label under **Nest under**, then click
+**Create label**. The label is created in Gmail and appears in Mail's sidebar
+and **Move to…** choices. Creating a label does not move or label any messages.
+Use the pencil beside a label to rename it or change **Nest under**. Choose
+**Top level** to unnest it. Nested labels move with their parent and keep their
+message assignments. Use the trash button beside a label to remove that label;
+the confirmation explains that emails and other labels remain. If Gmail accepts
+only part of a nested-label change, OE reports it and refreshes the label list.
+Duplicate names in the same location and Gmail's reserved system names are
+rejected. **Refresh** reloads labels created outside OE.
+
+The email agent can use `email_workspace` with `create_label`, `name`, and an
+optional `parentFolder` containing an existing custom label ID from `folders`.
+Use one name segment; OE adds the parent's path for nesting. The full name is
+limited to 225 characters. Labels created through this action appear in the
+open Mail workspace automatically. Label creation uses Gmail's
+[label API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.labels/create).
+The agent can also use `update_label` or `delete_label` with the exact custom
+label ID in `folder`. For updates, omit `name` to preserve it and omit
+`parentFolder` to preserve the parent; an empty parent means top level.
+
+Mail also shows Gmail's Important, Spam, provider Drafts, and available category
+labels, including Primary, Social, Updates, Forums, and Promotions. All Mail,
+Snoozed, and Purchases use Gmail searches. These views cannot be edited or used
+as label destinations. Gmail Drafts are viewable separately as **Drafts (Gmail)**;
+they are not synchronized with OE drafts. Scheduled sending and subscription
+management remain in Gmail. Gmail's supported search operators are documented
+in [Refine searches in Gmail](https://support.google.com/mail/answer/7190?hl=en).
+
+### Microsoft folders
+
+Select your Microsoft account to browse its folder tree, including folders
+inside Inbox and other folders. Use the arrows to collapse or expand branches.
+The labeled **New folder** button under **Folders** creates a folder at the top level
+or inside the location you choose. A folder's **New subfolder** button preselects
+that location; its pencil button renames a custom folder. Outlook's Inbox,
+Sent, Archive, Trash, Junk, Drafts, and Outbox are not offered for renaming.
+Duplicate names in the same location are rejected without replacing a folder.
+
+These changes apply to your Microsoft mailbox and appear in Outlook. **Refresh**
+reloads folders created or renamed in another client. Folder changes made by
+an OE agent appear automatically. **Move to…** shows full paths so you can
+distinguish identically named folders in different branches. Outlook's own
+draft folder is labeled **(Outlook)**; OE's saved drafts remain separate.
+
+The email agent can use `email_workspace` with `folders`, `create_folder`, or
+`rename_folder`. Creating a subfolder requires its parent's exact folder ID.
+Folder creation and renaming apply to Microsoft and IMAP accounts.
+
+### IMAP folders
+
+IMAP accounts have the same folder tree, **New folder**, **New subfolder**, and
+pencil controls. Changes apply to the mail server and can appear in your other
+mail apps. Choose a location and enter just the folder's name; OE uses the
+server's own separator and namespace. Servers without folder hierarchies allow
+top-level folders only. Server permissions and naming restrictions still apply.
+
+Folder groups can contain subfolders without holding messages themselves.
+They stay visible in the tree but cannot be opened or used as message move
+destinations. System folders and their parent groups are protected from renaming.
+The server's Drafts folder is labeled **(server)** to distinguish it from OE drafts.
+
+Renaming an IMAP folder also changes its children's paths. OE updates the selected
+folder, open message references, and saved forward attachments, and preserves
+subscriptions for other mail apps where the server permits it. If another draft
+editor was open, its usual version check protects concurrent edits. A subscription
+failure is reported separately from a successful rename. **Refresh** reloads
+changes made outside OE; changes made by an OE agent appear automatically.
+
+The agent uses the same `email_workspace` folder actions. IMAP folder IDs are
+exact server paths, and `rename_folder` returns `renamedFolders` with old and
+new IDs, including descendants. Use those IDs or reload folders before the next
+message action. POP3 is not supported.
+
+### Writing and saved drafts
+
+Choose **New message**. Select the sending account, add To/Cc/Bcc recipients,
+write with the formatting toolbar, and attach files. Changes save automatically
+to **Drafts** in your OE profile. These are **OE drafts**, separate from drafts
+saved in Gmail, Outlook, or another client. **Save & close** keeps a draft;
+**Discard draft** removes it.
+The trash button beside a draft in the list also deletes it without opening
+the editor. A draft awaiting delivery confirmation stays protected.
+If another tab or an agent edits the same draft,
+the editor offers to load their version or keep yours as a new draft.
+
+Choose **Send message** to submit the saved draft. A provider timeout after
+submission leaves a protected draft: check the provider's Sent folder before
+creating another message, because the original might already have been accepted.
+Microsoft acceptance does not itself confirm delivery to the recipient. SMTP
+submission saves a Sent copy when the IMAP server advertises that folder.
+The workspace accepts up to 15 attachments, totaling 20 MB; Microsoft sending
+currently has a 3 MB attachment limit. Uploaded files remain in your OE Files
+even if you later discard the draft.
+
+### Working with your assistant
+
+**Assistant** opens the existing OE conversation alongside Mail. Use the **X**
+at the top-right of the AI panel, or click **Assistant** again, to close it and
+give Mail the full width. Your selected email and both drafts stay in place;
+closing the panel does not stop an agent that is working. **Summarize**
+passes the selected account, folder, and message to the email agent.
+Ordinary chat messages also include the email or saved draft currently open
+beside the Assistant. You can ask "Is this a good deal?", "Reply to this email",
+"Delete this email", or "Move this to Shopping" without copying the message.
+The agent reads the selected email as needed; reply requests save a draft for
+review, and delete requests move the selected message to Trash. Label and folder
+destinations are resolved within that email's account. Changing the selection
+changes the context for your next message; retrying a failed message retains
+its original selection. Closing Mail or the Assistant stops attaching context.
+**Draft with AI** opens a saved reply draft and asks the agent to fill it in for
+review. The agent uses the same Mail workspace operations as the interface,
+and saved edits appear in the editor. If you already have unsent text in the
+chat input, send or clear it before using a mail shortcut.
+
+The `email_workspace` tool adds folder navigation, shared drafts, and mailbox
+actions to the Email skill. Existing account permissions still apply. Sending
+and existing bulk-trash approval rules remain in effect. This first workspace
+does not include provider-draft synchronization, offline mail, scheduled send,
+contact management, or calendar editing.
+
+## Automatic labels
 
 For Gmail automatic labeling, open **Settings → Tasks → Auto-Label**. Select
 the account and review the rules and their **keep in inbox** settings before

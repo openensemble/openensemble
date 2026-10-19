@@ -49,6 +49,7 @@ function serializeOutboxAttempt(attempt) {
     text: attempt.text || '',
     attachments: safeOutboxAttachments(attempt.attachments),
     toolPlan: attempt.toolPlan || null,
+    mailContext: attempt.mailContext || null,
     displayText: attempt.displayText || attempt.text || '',
     messageId: attempt.messageId,
     attemptId: attempt.attemptId,
@@ -207,6 +208,7 @@ function replayPendingAttempt(attempt, connectionGeneration) {
   };
   if (attempt.attachments?.length) replay.attachments = attempt.attachments;
   if (attempt.toolPlan) replay.toolPlan = attempt.toolPlan;
+  if (attempt.mailContext) replay.mailContext = attempt.mailContext;
   ws.send(JSON.stringify(replay));
 }
 

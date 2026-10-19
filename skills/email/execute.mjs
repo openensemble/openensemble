@@ -775,7 +775,7 @@ export async function executePendingEmail(userId, agentId = null, expectedOpId =
 const MAILBOX_MUTATIONS = new Set([
   'email_compose', 'email_reply', 'email_trash', 'email_batch_trash',
   'email_batch_label', 'email_label_query', 'email_purge_sender', 'email_mark_read',
-  'email_sort_local', 'email_correct_label', 'email_remove_label_correction',
+  'email_sort_local', 'email_correct_label', 'email_remove_label_correction', 'email_workspace',
 ]);
 
 function mailboxLockPath(userId, account) {
@@ -787,8 +787,12 @@ function mailboxLockPath(userId, account) {
 }
 
 export default async function execute(name, args, userId, _agentId, ctx) {
+  if (name === 'email_workspace' && args?.__validate) return 'Mail workspace ready.';
+  const workspaceBulkTrash = name === 'email_workspace' && args?.operation === 'update'
+    && args?.action === 'trash' && args?.messageIds?.length > 1
+    && !(await import('../../lib/mail-workspace.mjs')).isMailUiAction();
   // Stage destructive ops behind a chat-text confirmation
-  if (DESTRUCTIVE_TOOLS.has(name) && !args?._userApproved) {
+  if ((DESTRUCTIVE_TOOLS.has(name) || workspaceBulkTrash) && !args?._userApproved) {
     const desc = name === 'email_purge_sender'
       ? `purge all email from sender "${args.sender}"`
       : `move ${(args.messageIds || []).length} email(s) to trash`;
@@ -821,11 +825,18 @@ export default async function execute(name, args, userId, _agentId, ctx) {
     return `Tool error: Email operation failed: ${error.message}`;
   }
   const compacted = isVoiceSource() ? compactForVoice(result, name) : result;
+  if (name === 'email_workspace' && ['read', 'list', 'list_drafts', 'folders'].includes(args?.operation)) return wrapUntrusted(compacted);
   if (UNTRUSTED_RESULTS.has(name)) return wrapUntrusted(compacted);
   return compacted;
 }
 
 async function _executeInner(name, args, userId, lockedAccount = null) {
+  if (name === 'email_workspace') {
+    if (args?.__validate) return 'Mail workspace ready.';
+    const { workspaceAction } = await import('../../lib/mail-workspace.mjs');
+    const result = await workspaceAction(userId, args);
+    return JSON.stringify(result);
+  }
   // List accounts — no account resolution needed
   if (name === 'email_list_accounts') {
     const accounts = loadAccounts(userId);

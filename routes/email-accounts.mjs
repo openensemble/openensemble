@@ -191,6 +191,7 @@ export async function fetchDashboardInbox(userId, {
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function handle(req, res) {
+  if (req.url.startsWith('/api/mail/')) return (await import('./mail-workspace.mjs')).handle(req, res);
   const url = new URL(req.url, 'http://x');
 
   // ── GET /api/email-accounts ───────────────────────────────────────────────

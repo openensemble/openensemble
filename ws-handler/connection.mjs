@@ -1416,6 +1416,7 @@ export function onConnection(ws, req) {
         attachments: chatAttachments,
         toolPlan:   msg.toolPlan,
         documentRequest: incomingDocumentRequest,
+        mailContext: msg.mailContext,
         // Source hint — voice-device chats get a slim tool subset for low
         // latency (chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST); desktop-app
         // origin keeps the desktop_* tools past the router. The desktop app's

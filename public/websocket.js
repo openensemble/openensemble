@@ -560,6 +560,9 @@ function handleServerMessage(msg) {
   noteAgentLiveRevision(msg);
   if (!acceptTurnEnvelope(msg)) return;
   switch (msg.type) {
+    case 'mail_changed':
+      if (typeof mailWorkspaceChanged === 'function') mailWorkspaceChanged(msg);
+      break;
     case 'proactive_work':
       if (typeof showPreparedWorkNotice === 'function') showPreparedWorkNotice(msg);
       break;

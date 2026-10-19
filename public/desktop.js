@@ -8,8 +8,9 @@ let _currentDesktopView = 'chat'; // 'chat' or 'desktop'
 function syncPrimaryViewToggle() {
   const dashboardOpen = typeof activeDrawerId !== 'undefined'
     && activeDrawerId === 'drawerDashboard';
-  const desktopActive = !dashboardOpen && _currentDesktopView === 'desktop';
-  const chatActive = !dashboardOpen && !desktopActive;
+  const mailOpen = typeof mailWorkspaceIsOpen === 'function' && mailWorkspaceIsOpen();
+  const desktopActive = !dashboardOpen && !mailOpen && _currentDesktopView === 'desktop';
+  const chatActive = !dashboardOpen && !desktopActive && !mailOpen;
   $('viewBtnChat')?.classList.toggle('active', chatActive);
   $('mViewChat')?.classList.toggle('active', chatActive);
   $('viewBtnDashboard')?.classList.toggle('active', dashboardOpen);
@@ -18,8 +19,12 @@ function syncPrimaryViewToggle() {
   $('mViewDesktop')?.classList.toggle('active', desktopActive);
 }
 
-function switchView(mode) {
+function switchView(mode, keepMail = false) {
   if (mode !== 'chat' && mode !== 'desktop') return;
+  if (!keepMail && typeof mailWorkspaceIsOpen === 'function' && mailWorkspaceIsOpen()) {
+    closeMailWorkspace().then(() => { if (!mailWorkspaceIsOpen()) switchView(mode); }).catch(error => showToast(error.message));
+    return;
+  }
   _currentDesktopView = mode;
   if (typeof activeDrawerId !== 'undefined' && activeDrawerId === 'drawerDashboard') {
     closeAllDrawers();

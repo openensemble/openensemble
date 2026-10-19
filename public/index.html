@@ -28,6 +28,7 @@
 <link rel="stylesheet" href="/saved-chats.css">
 <link rel="stylesheet" href="/proactive-work.css">
 <link rel="stylesheet" href="/voice-diagnostics.css">
+<link rel="stylesheet" href="/mail-workspace.css">
 </head>
 <body>
 
@@ -129,10 +130,10 @@
         <i data-lucide="bot"></i>
         <span class="strip-tooltip">Agents</span>
       </button>
-      <button class="strip-btn" id="sbtnInbox" data-action="toggleDrawer" data-args="[&quot;drawerInbox&quot;, &quot;sbtnInbox&quot;]" title="Inbox">
+      <button class="strip-btn" id="sbtnInbox" data-action="openMailWorkspace" title="Mail" aria-label="Mail" aria-expanded="false">
         <i data-lucide="mail"></i>
         <span class="strip-badge" id="inboxBadge" style="display:none"></span>
-        <span class="strip-tooltip">Inbox</span>
+        <span class="strip-tooltip">Mail</span>
       </button>
       <button class="strip-btn" id="sbtnNews" data-action="toggleDrawer" data-args="[&quot;drawerNews&quot;, &quot;sbtnNews&quot;]" title="News">
         <i data-lucide="newspaper"></i>
@@ -2022,6 +2023,7 @@
 <script src="/dashboard.js"></script>
 <script src="/markets.js"></script>
 <script src="/inbox.js"></script>
+<script src="/mail-workspace.js"></script>
 <script src="/news.js"></script>
 <script src="/expenses.js"></script>
 <script src="/notes.js"></script>

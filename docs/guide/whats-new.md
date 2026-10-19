@@ -15,6 +15,58 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-19
+
+**More room to read email**
+Mail now keeps the subject, message controls, and reply actions in one card.
+The email body grows with the available reading space. Opening a message marks
+it read after its contents display, clearing the blue dot and updating the
+provider. **Mark unread** remains available.
+Read and star changes update individual rows without reloading the mailbox.
+Drafts also have a trash button in the list, so they can be deleted directly.
+
+**Create Gmail labels in Mail**
+Select a Gmail account and use **New label** under **Labels**, with optional
+nesting under an existing label. OE's email agent can create the same labels;
+they appear in Mail automatically. Creation leaves messages where they are.
+Existing labels can be renamed, nested, unnested, or removed from their sidebar
+controls. Gmail's built-in labels and categories are visible too, with search
+views for All Mail, Snoozed, and Purchases. Gmail Drafts appear separately.
+See [Gmail labels](../email-calendar/#gmail-labels).
+
+**Ask the Assistant about the email you're viewing**
+Normal chat beside Mail now carries the selected email or draft as context.
+Ask about its contents, request a reply draft, trash it, or move it to a named
+label or folder. Retries keep the original selection and account permissions
+still apply. Replies are saved for review unless you ask to send them.
+
+---
+
+## 2026-10-18
+
+**A full Mail workspace**
+Mail now opens as a workspace with account and folder navigation, a message
+list, and a conversation reader. Compose rich-text messages with To/Cc/Bcc,
+attachments, reply-all and forwarding; drafts save to your OE profile and
+can be edited by an email agent in the adjacent assistant conversation.
+Gmail, Microsoft and IMAP use their existing connections. Provider errors,
+draft conflicts and uncertain send outcomes stay visible. See
+[Mail workspace](../email-calendar/#mail-workspace) for capabilities and the
+current provider limits.
+
+**Microsoft folders in Mail**
+Browse nested Outlook folders, create folders and subfolders, and rename custom
+folders directly in Mail. Move destinations show full folder paths. OE's email
+agent can perform the same folder actions, and its changes appear in the tree.
+
+**IMAP folders in Mail**
+IMAP accounts now have nested navigation, folder and subfolder creation, and
+custom-folder renaming through both Mail and OE's email agent. Server separators,
+folder groups, and flat mailboxes are handled explicitly. Renaming updates child
+paths and saved forward attachment references; message moves show full paths.
+
+---
+
 ## 2026-10-12
 
 **Project connection recovery**

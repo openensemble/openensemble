@@ -56,6 +56,7 @@ import {
   runLlmTurn,
 } from './chat-dispatch/llm-loop.mjs';
 import { trySingletonCompoundBackground } from './chat-dispatch/compound-background.mjs';
+import { resolveMailChatContext } from './lib/mail-chat-context.mjs';
 import {
   tryNewsPrefIntercept,
   tryRenameIntercept,
@@ -475,6 +476,7 @@ function normalizeToolPlan(plan) {
  * @param {Array<object>|null} [opts.attachments]  preferred multi-attachment array — ws-handler/telegram/scheduler/background-tasks/ask_agent all funnel through here
  * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string, leaseToken?: string, maxProviderRequests?: number, verifierAllowedTools?: string[]}|null} [opts.toolPlan]
  * @param {{id?: string, filename?: string, mimeType?: string, source?: string, requestId?: string}|null} [opts.documentRequest]
+ * @param {{accountId?: string, messageId?: string, folder?: string, draftId?: string}|null} [opts.mailContext]
  * @param {'voice-device'|'web'|'telegram'|'desktop-app'|'document-drawer'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
  * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
@@ -513,6 +515,7 @@ export async function handleChatMessage({
   attachments: rawAttachments = null,
   toolPlan: rawToolPlan = null,
   documentRequest: rawDocumentRequest = null,
+  mailContext: rawMailContext = null,
   source = null,
   deviceId = null,
   wakeSlot = null,
@@ -643,6 +646,7 @@ export async function handleChatMessage({
     ? rawToolPlan.leaseToken
     : null;
   const documentRequest = normalizeDocumentRequest(rawDocumentRequest);
+  const mailSelection = await resolveMailChatContext(userId, rawMailContext);
   const documentEventMeta = documentRequest ? { documentRequest, documentTurn: true } : {};
 
   // Entry-edge attachment normalization — the ONE place the wire's two
@@ -1370,7 +1374,7 @@ export async function handleChatMessage({
   // (The follow-up window gate runs much earlier — before the send-time
   // durability write — so silently dropped in-window captures never touch
   // session history. See tryVoiceFollowupGate call above.)
-  const INTERCEPTORS = (documentRequest || _readOnlyTurn) ? [] : [
+  const INTERCEPTORS = (documentRequest || mailSelection.note || _readOnlyTurn) ? [] : [
     // The verifier may not enter any pre-model path outside its authenticated
     // server tool allowlist. Transcription, slash commands, finance extraction,
     // and approval handling all bypass that boundary, so only ordinary turns
@@ -1469,7 +1473,7 @@ export async function handleChatMessage({
   // would spawn a duplicate of itself. A task must never create a task.
   const _schedulerNotePromise = buildSchedulerNote({
     userId, agentId, userText: ctx.userText,
-    skipIntercept: labVerifierTurn || _readOnlyTurn || _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest,
+    skipIntercept: labVerifierTurn || _readOnlyTurn || _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest || !!mailSelection.note,
   });
 
   // Pre-LLM alias learning: if the previous turn ended with a "did you mean X?"
@@ -1511,7 +1515,7 @@ export async function handleChatMessage({
   // foreground, admit one ordinary detached worker before starting a model
   // round. A scheduler match already owns its outcome, so it is never replayed
   // through this path.
-  if (!schedulerNote?.includes('<scheduler_result>')) {
+  if (!mailSelection.note && !schedulerNote?.includes('<scheduler_result>')) {
     let background = null;
     try {
       background = await trySingletonCompoundBackground({
@@ -1557,6 +1561,7 @@ export async function handleChatMessage({
   }
 
   let resolvedNote = schedulerNote;
+  if (mailSelection.note) resolvedNote = [resolvedNote, mailSelection.note].filter(Boolean).join('\n\n');
   const _hints = await _hintsPromise;
   if (_hints) resolvedNote = resolvedNote ? `${resolvedNote}\n${_hints}` : _hints;
   // Capture the assistant's final reply so the learner can scan it for
@@ -1601,6 +1606,7 @@ export async function handleChatMessage({
       attachment: ctx.attachment, attachments: ctx.attachments,
       toolPlan: ctx.toolPlan,
       documentRequest: ctx.documentRequest,
+      mailContext: mailSelection.context,
       schedulerNote: resolvedNote, source, deviceId,
       conversationMode,
       ac, onEvent: wrappedOnEvent, onNotify,

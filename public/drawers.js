@@ -2,6 +2,11 @@
 let activeDrawerId = null;
 
 function toggleDrawer(drawerId, btnId) {
+  if (drawerId === 'drawerInbox' && typeof openMailWorkspace === 'function') return openMailWorkspace();
+  if (typeof mailWorkspaceIsOpen === 'function' && mailWorkspaceIsOpen()) {
+    closeMailWorkspace().then(() => { if (!mailWorkspaceIsOpen()) toggleDrawer(drawerId, btnId); }).catch(error => showToast(error.message));
+    return;
+  }
   const drawer = $(drawerId);
   if (!drawer || drawer.style.display === 'none') return;
   const skillButton = [...document.querySelectorAll('#skillAppGrid .skill-app')]

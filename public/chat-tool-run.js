@@ -543,7 +543,7 @@ function retryFailedAttempt() {
   if (!failedAttempt) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
   const prior = failedAttempt;
-  const { agent, text, attachments, toolPlan, messageId } = prior;
+  const { agent, text, attachments, toolPlan, mailContext, messageId } = prior;
   finishPendingAttempt(prior.attemptId);
   clearFailedAttempt();
   if (agent !== activeAgent) return;
@@ -561,7 +561,7 @@ function retryFailedAttempt() {
   updateSessionWarning();
   lastSentAttempt = registerPendingAttempt({
     agent: activeAgent, text, displayText: sessionEntry.content || text,
-    attachments: list, toolPlan, messageId, attemptId,
+    attachments: list, toolPlan, mailContext, messageId, attemptId,
     userBubbleEl: prior.userBubbleEl, sessionEntry,
   });
   agentStreams[activeAgent] = typeof freshAgentTurnState === 'function'
@@ -571,6 +571,7 @@ function retryFailedAttempt() {
   const payload = { type: 'chat', agent: activeAgent, text, message_id: messageId, attempt_id: attemptId };
   if (list.length) payload.attachments = list;
   if (toolPlan) payload.toolPlan = toolPlan;
+  if (mailContext) payload.mailContext = mailContext;
   ws.send(JSON.stringify(payload));
 }
 function appendNotification(msg) {

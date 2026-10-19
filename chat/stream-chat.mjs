@@ -338,6 +338,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
         userId,
         source: voiceCtx?.source ?? null,
         documentRequest: turnOpts?.documentRequest ?? null,
+        mailContext: turnOpts?.mailContext ?? null,
       })
         .catch(e => { console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message); return null; })
     : null;

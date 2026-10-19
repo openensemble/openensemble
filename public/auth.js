@@ -85,6 +85,7 @@ window.fetch = (url, opts = {}) => {
 let _loginSelectedUser = null;
 
 async function showLoginScreen() {
+  if (typeof resetMailWorkspace === 'function') resetMailWorkspace();
   const screen = $('loginScreen');
   screen.classList.remove('hidden');
   $('loginPwRow').style.display = 'none';

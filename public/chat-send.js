@@ -59,6 +59,7 @@ async function send() {
   }
 
   const toolPlan = selectedToolPlanForSend(text);
+  const mailContext = window.mailWorkspaceChatContext?.() || null;
   // The WHOLE tray goes out with this message. Rebuilt into clean objects so
   // client-only tray bookkeeping (_localKey, _uploading, size) never rides
   // over the wire — server-side shape is chat/providers/_shared.mjs's
@@ -80,7 +81,7 @@ async function send() {
   scrollToBottom(true); // sending always jumps to the bottom, even from scrollback
   // Remember this attempt so it can be cleared/retried if the turn errors.
   lastSentAttempt = registerPendingAttempt({
-    agent: activeAgent, text, displayText, attachments, toolPlan,
+    agent: activeAgent, text, displayText, attachments, toolPlan, mailContext,
     messageId, attemptId, userBubbleEl, sessionEntry,
   });
   agentStreams[activeAgent] = typeof freshAgentTurnState === 'function'
@@ -116,5 +117,6 @@ async function send() {
   const payload = { type: 'chat', agent: activeAgent, text, message_id: messageId, attempt_id: attemptId };
   if (attachments.length) payload.attachments = attachments;
   if (toolPlan) payload.toolPlan = toolPlan;
+  if (mailContext) payload.mailContext = mailContext;
   ws.send(JSON.stringify(payload));
 }

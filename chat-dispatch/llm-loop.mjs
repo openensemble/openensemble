@@ -743,7 +743,7 @@ export function armFollowupForReply({ source, deviceId, conversationMode, reply,
  */
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
-  userText, sessionUserText = userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
+  userText, sessionUserText = userText, attachment, attachments, toolPlan, documentRequest, mailContext, schedulerNote, source, deviceId,
   conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false, readOnlyTurn = false,
   excludeHiddenUserFromModel = false,
@@ -817,7 +817,7 @@ export async function runLlmTurn({
       if (e.type === 'error') { callbackError = e; return; }
       onEvent({ ...e, agent: agentId });
     }, userId ?? 'default', _attachments, schedulerNote, silent, { source, deviceId }, {
-      toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
+      toolPlan, documentRequest, mailContext, hiddenUser, isolatedTaskRun,
       readOnlyTurn, sessionUserText, excludeHiddenUserFromModel,
     })) {
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
