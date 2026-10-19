@@ -27,10 +27,12 @@ export class LoopGuard {
     // spin all 500 iterations — an unbounded-cost turn at cloud pricing.
     this.deadline = Date.now() + maxWallMs;
     this._wallLogged = false;
+    this.exhaustedReason = null;
   }
   /** Call at the top of each while iteration. Returns false → stop. */
   tick() {
     if (Date.now() > this.deadline) {
+      this.exhaustedReason = 'the turn time limit was reached';
       if (!this._wallLogged) {
         this._wallLogged = true;
         console.warn(`[loop-guard] turn wall-clock budget exhausted after ${this.count} tool rounds`);
@@ -40,7 +42,9 @@ export class LoopGuard {
     // maxLoops is the number of provider rounds permitted, not an exclusive
     // upper bound. The previous comparison allowed only maxLoops - 1 rounds,
     // which could discard the final-answer round after the last tool call.
-    return ++this.count <= this.maxLoops;
+    const allowed = ++this.count <= this.maxLoops;
+    if (!allowed) this.exhaustedReason = 'the provider request limit was reached';
+    return allowed;
   }
   /**
    * True during the last provider request allowed by this guard. Providers use

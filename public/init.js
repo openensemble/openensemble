@@ -5,6 +5,7 @@ let _recallIdx = -1;
 let _lastRecallText = null;
 
 async function init() {
+  const authGeneration = _authGeneration;
   // Check for invite URL first
   const inviteToken = window.location.pathname.match(/^\/invite\/([a-f0-9]+)$/)?.[1];
   if (inviteToken) { showInvitePage(inviteToken); return; }
@@ -12,6 +13,7 @@ async function init() {
   // Auth check first. Cookie auth is automatic for same-origin requests.
   const me = await _origFetch('/api/me', { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : null).catch(() => null);
+  if (authGeneration !== _authGeneration || _authSuspended) return;
   if (!me) { showLoginScreen(); return; }
 
   const requestedDashboardEditor = new URLSearchParams(window.location.search).get('dashboard-editor');
@@ -33,7 +35,7 @@ async function init() {
       }
     } catch {}
   }
-  setCurrentUser(me);
+  if (setCurrentUser(me) === false) return;
   $('loginScreen').classList.add('hidden');
   ensureMediaToken().catch(() => {});
 
@@ -292,7 +294,7 @@ async function init() {
   }
 }
 
-function reconnectWS() { init(); }
+function reconnectWS() { location.reload(); }
 
 function showBrowserPairingApproval(requestId) {
   if (!/^[A-Za-z0-9_-]{20,80}$/.test(String(requestId || ''))) {

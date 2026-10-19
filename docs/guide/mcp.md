@@ -12,6 +12,10 @@ permalink: /guide/mcp/
 Model Context Protocol (MCP) connects AI applications to tools. OE supports
 two directions, both configured in **Settings → MCP** for adult accounts.
 
+After updating from an older version, an OAuth connection may need **Authorize**
+again. Credentials saved without the authorization server's identity are cleared
+before reuse. New credentials remain bound to the server that issued them.
+
 | What you want | Use |
 |---|---|
 | Give an OE agent tools from another service | Add an MCP server and assign it to the agent |

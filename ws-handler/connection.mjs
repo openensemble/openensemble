@@ -29,7 +29,7 @@ import { beginTurn, noteTurn, endTurn } from '../lib/voice-turn-journal.mjs';
 import { analyzePcm16 } from '../lib/voice-capture.mjs';
 import { recordScheduledAlarmReceipt, reconcileScheduledDeviceAlarms } from '../lib/scheduled-device-alarms.mjs';
 import { recordLinkEvent } from '../lib/voice-connectivity-journal.mjs';
-import { getSessionMeta, setSessionDeviceId, adoptSession } from '../routes/_helpers/auth-sessions.mjs';
+import { getSessionMeta, setSessionDeviceId, adoptSession, bindSessionSocket, validateSessionSocket } from '../routes/_helpers/auth-sessions.mjs';
 import {
   submitCredential, cancelCredential, cancelPendingCredentialPrompts,
   setCredentialEmitter, getPendingCredentialPrompts,
@@ -248,6 +248,7 @@ export function onConnection(ws, req) {
     // deviceId at creation time. Null for browser sessions.
     ws._deviceId = resolveDeviceId(cookieOrHeaderToken, cookieMeta);
     ws._authenticated = true;
+    if (!bindSessionSocket(ws, cookieOrHeaderToken)) return;
     if (ws._deviceId) closeOlderDeviceSockets(ws);
     if (!enforceWsCap(ws)) return;
   } else {
@@ -382,9 +383,14 @@ export function onConnection(ws, req) {
    try {
     // Binary frames are streaming-STT PCM from a voice device; everything
     // else on this socket is JSON text.
-    if (isBinary) { handleSttBinaryFrame(ws, raw); return; }
+    if (ws._sessionRevoked) return;
+    if (isBinary) {
+      if (ws._authenticated && validateSessionSocket(ws, { touch: true })) handleSttBinaryFrame(ws, raw);
+      return;
+    }
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
+    if (ws._authenticated && !validateSessionSocket(ws, { touch: msg.type !== 'ping' })) return;
 
     // Handle auth message (first message for new-style auth)
     if (msg.type === 'auth') {
@@ -426,6 +432,7 @@ export function onConnection(ws, req) {
       ws._userId = userId;
       ws._deviceId = recoveredDeviceId ?? resolveDeviceId(msg.token, meta);
       ws._authenticated = true;
+      if (!bindSessionSocket(ws, msg.token)) return;
       if (ws._deviceId) closeOlderDeviceSockets(ws);
       if (!enforceWsCap(ws)) return;
       sendInitialData();
@@ -1034,6 +1041,7 @@ export function onConnection(ws, req) {
         const sessionRevision = getChatRevision(ws._userId, agentId);
         const snapshotGeneration = nextSessionSnapshotSeq();
         const messages = await loadSession(key, 60);
+        if (!validateSessionSocket(ws)) return;
         const pendingStream = getStreamBuffer(key);
         const activeStream = getActiveStreamForClient(ws._userId, agentId);
         const activeSnapshotRevision = getChatRevision(ws._userId, agentId);

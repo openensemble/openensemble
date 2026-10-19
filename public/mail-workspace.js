@@ -21,9 +21,9 @@
     if (!response.ok || data.error) throw new Error(data.error || `Mail request failed (${response.status}).`);
     return data;
   }
-  function notice(text, error = false) {
+  function notice(text, error = false, warning = false) {
     const el = $('mailNotice'); if (!el) return;
-    el.textContent = text; el.classList.toggle('error', error); el.hidden = !text;
+    el.textContent = text; el.classList.toggle('error', error); el.classList.toggle('warning', warning); el.hidden = !text;
   }
   function shell() {
     if ($('mailWorkspace')) return;
@@ -49,7 +49,7 @@
       if (event.target.id === 'mailSelectAll') {
         M.selected = event.target.checked ? new Set(visible().map(key)) : new Set(); renderList();
       } else if (event.target.id === 'mailMove') {
-        if (event.target.value) update('move', event.target.value).catch(error => notice(error.message, true));
+        if (event.target.value && M.detail) update('move', event.target.value, M.detail).catch(error => notice(error.message, true));
       } else if (event.target.id === 'mailFiles') uploadFiles(event.target.files).catch(error => notice(error.message, true));
       else if (event.target.closest('#mailComposer')) changed();
     });
@@ -426,7 +426,7 @@
   async function update(action, destination, single) {
     if (M.busy) return;
     const session = M.session;
-    const chosen = single ? [single] : M.selected.size ? M.emails.filter(m => M.selected.has(key(m))) : M.detail ? [M.detail] : [];
+    const chosen = single ? [single] : M.emails.filter(m => M.selected.has(key(m)));
     if (!chosen.length) return;
     M.busy = true; notice('Updating your mailbox…');
     try {
@@ -494,7 +494,8 @@
   async function compose(mode = 'new') {
     if (M.upload) throw new Error('Wait for attachments to finish uploading.');
     if (M.draft) await saveDraft();
-    const detail = M.detail, message = detail?.messages?.find(m => m.id === detail.id) || detail?.messages?.at(-1);
+    const detail = M.detail, message = detail?.messages?.find(m => m.id === detail.id);
+    if (mode !== 'new' && !message) throw new Error('The selected message is unavailable. Reopen it before replying or forwarding.');
     const accountId = mode !== 'new' && detail ? detail.accountId : M.account === 'all' ? M.accounts[0]?.id : M.account;
     if (!accountId) { notice('Connect an email account to start writing.', true); return; }
     M.detailGeneration++;
@@ -672,7 +673,11 @@
     if (cmd === 'read') return read(value);
     if (cmd === 'back') { M.detailGeneration++; M.detail = null; $('mailWorkspace').classList.remove('mail-reading-open'); renderEmpty(); renderList(); return; }
     if (cmd === 'star') { const mail = M.emails.find(m => key(m) === value); return mail && update(mail.starred ? 'unstar' : 'star', null, mail); }
-    if (['archive', 'trash', 'unread', 'restore', 'read-state'].includes(cmd)) return update(cmd === 'read-state' ? 'read' : cmd);
+    if (['archive', 'trash', 'unread', 'restore', 'read-state'].includes(cmd)) {
+      const readerAction = !!event?.target?.closest('.mail-reader-toolbar');
+      if (readerAction && !M.detail) return;
+      return update(cmd === 'read-state' ? 'read' : cmd, null, readerAction ? M.detail : null);
+    }
     if (cmd === 'images') { M.images = true; renderReader(); return; }
     if (cmd === 'compose') return compose();
     if (['reply', 'reply-all', 'forward'].includes(cmd)) return compose(cmd);
@@ -698,7 +703,8 @@
         if (session !== M.session) return;
         if (!result.sent) throw new Error('The provider did not confirm sending.');
         M.draft = null; M.dirty = false; M.detailGeneration++; M.detail = null;
-        renderEmpty('Message submitted', result.result); await load(); notice(result.result);
+        renderEmpty(result.partial ? 'Message partially submitted' : 'Message submitted', result.result);
+        await load(); notice(result.result, false, result.partial === true);
       } catch (error) { if (session === M.session) notice(error.message, true); }
       finally {
         if (session === M.session) {

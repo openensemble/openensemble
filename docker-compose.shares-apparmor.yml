@@ -1,0 +1,4 @@
+services:
+  openensemble:
+    security_opt:
+      - apparmor=openensemble-shares

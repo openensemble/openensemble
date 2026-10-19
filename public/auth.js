@@ -34,13 +34,19 @@ let _mediaTok = null;
 let _mediaTokExpiresAt = 0;
 let _mediaTokPromise = null;
 const MEDIA_REFRESH_SKEW_MS = 60_000; // refresh 1 minute before expiry
+let _authGeneration = 0;
+let _authSuspended = false;
+let _authPageUserId = null;
 
 async function refreshMediaToken() {
   if (_mediaTokPromise) return _mediaTokPromise;
+  if (_authSuspended) return null;
+  const generation = _authGeneration;
   _mediaTokPromise = (async () => {
     const r = await fetch('/api/media-token', { method: 'POST' });
     if (!r.ok) { _mediaTok = null; _mediaTokExpiresAt = 0; return null; }
     const { token, expiresIn } = await r.json();
+    if (generation !== _authGeneration || _authSuspended) return null;
     _mediaTok = token;
     _mediaTokExpiresAt = Date.now() + expiresIn * 1000;
     return token;
@@ -71,10 +77,15 @@ async function ensureMediaToken() {
 // within the page it's already injected into).
 const _origFetch = window.fetch.bind(window);
 window.fetch = (url, opts = {}) => {
+  const generation = _authGeneration;
+  if (_authSuspended && typeof url === 'string' && url.startsWith('/api')) {
+    return Promise.reject(new DOMException('Sign in to continue.', 'AbortError'));
+  }
   if (typeof url === 'string' && url.startsWith('/api') && url !== '/api/login') {
     opts = { ...opts, credentials: opts.credentials ?? 'same-origin' };
   }
   return _origFetch(url, opts).then(r => {
+    if (generation !== _authGeneration) throw new DOMException('The account session changed.', 'AbortError');
     if (r.status === 401 && typeof url === 'string' && url !== '/api/login') {
       showLoginScreen();
     }
@@ -84,8 +95,51 @@ window.fetch = (url, opts = {}) => {
 
 let _loginSelectedUser = null;
 
-async function showLoginScreen() {
+function suspendAccountSession() {
+  if (_authSuspended) return;
+  // Keep this profile's local drafts, then make the old page inert until a
+  // fresh document establishes the next login's complete account state.
+  if (_currentUser) {
+    if (typeof saveDraftForAgent === 'function') saveDraftForAgent(activeAgent);
+    if (typeof saveChatAttachmentDraft === 'function') saveChatAttachmentDraft();
+  }
+  _authSuspended = true;
+  ++_authGeneration;
+  document.body.classList.add('oe-auth-suspended');
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+  document.querySelectorAll('body > :not(#loginScreen)').forEach(element => { element.inert = true; });
+  _currentUser = null;
+  setToken(null);
+  _mediaTokPromise = null;
+  if (ws) {
+    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+    try { ws.close(); } catch {}
+    ws = null;
+  }
+  if (typeof _pingTimer !== 'undefined') clearTimeout(_pingTimer);
+  if (typeof _draftSaveTimer !== 'undefined') clearTimeout(_draftSaveTimer);
+  clearTimeout(window._toolPickerDebounce);
+  sessions = {};
+  for (const key of Object.keys(agentStreams)) delete agentStreams[key];
+  if (typeof pendingAttachments !== 'undefined') pendingAttachments = [];
+  if (typeof pendingSentAttempts !== 'undefined') pendingSentAttempts.clear();
+  if (typeof lastSentAttempt !== 'undefined') lastSentAttempt = null;
+  if (typeof failedAttempt !== 'undefined') failedAttempt = null;
+  if (typeof sessionsLoaded !== 'undefined') sessionsLoaded.clear();
+  streamEl = null; streamBuf = ''; awaitingPermission = false; streaming = false;
+  activeAgent = null;
+  $('input').value = ''; $('input').disabled = true; $('btnSend').disabled = true;
+  $('btnStop').classList.remove('visible');
+  for (const element of Array.from($('messages').children)) if (!element.id) element.remove();
+  if (typeof renderAttachmentTray === 'function') renderAttachmentTray();
   if (typeof resetMailWorkspace === 'function') resetMailWorkspace();
+  if (typeof resetChatAgents === 'function') resetChatAgents();
+  if (typeof closeAllDrawers === 'function') closeAllDrawers();
+  setStatus('offline');
+}
+
+async function showLoginScreen() {
+  suspendAccountSession();
   const screen = $('loginScreen');
   screen.classList.remove('hidden');
   $('loginPwRow').style.display = 'none';
@@ -140,12 +194,8 @@ async function doLogin() {
     });
     const d = await r.json();
     if (!r.ok) { $('loginError').textContent = d.error ?? 'Login failed'; $('loginBtn').disabled = false; return; }
-    setToken(d.token);
-    setCurrentUser(d.user);
-    $('loginScreen').classList.add('hidden');
+    // Never reuse browser state from an expired or different profile.
     $('loginPw').value = '';
-    ensureMediaToken().catch(() => {});
-    // Reconnect WS with new token
     reconnectWS();
   } catch (e) { $('loginError').textContent = e.message; }
   $('loginBtn').disabled = false;
@@ -188,9 +238,7 @@ async function doSetup() {
       body: JSON.stringify({ userId: d.id, password: pw }),
     });
     const ld = await lr.json();
-    setToken(ld.token);
-    setCurrentUser(ld.user ?? d);
-    $('loginScreen').classList.add('hidden');
+    if (!lr.ok) throw new Error(ld.error || 'Could not sign in to the new profile.');
     $('setupBootstrapCredential').value = '';
     $('setupName').value = ''; $('setupPw').value = ''; $('setupPw2').value = '';
     reconnectWS();
@@ -294,6 +342,12 @@ function getCurrentUserId() {
 }
 
 function setCurrentUser(user) {
+  if (user && (_authSuspended || (_authPageUserId && _authPageUserId !== user.id))) {
+    suspendAccountSession();
+    location.reload();
+    return false;
+  }
+  if (user) _authPageUserId = user.id;
   if (_currentUser?.id !== user?.id && typeof resetRoutineAccountState === 'function') resetRoutineAccountState();
   if (_currentUser?.id !== user?.id && typeof resetChatAgents === 'function') resetChatAgents();
   if (_currentUser?.id !== user?.id && typeof resetProjectWork === 'function') resetProjectWork();

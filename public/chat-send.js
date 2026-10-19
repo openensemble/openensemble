@@ -2,6 +2,7 @@
 
 // ── Send ──────────────────────────────────────────────────────────────────────
 async function send() {
+  if (typeof _authSuspended !== 'undefined' && _authSuspended) return;
   let text = $('input').value.trim();
   if (!text && !pendingAttachments.length) return;
   if (/^\/chat(?:\s|$)/i.test(text)) {
@@ -19,10 +20,6 @@ async function send() {
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
   if (pendingAttachments.some(a => a._uploading)) { showToast('Still uploading — one moment'); return; }
 
-  // A fresh send supersedes the local Retry affordance. The failed row itself
-  // stays in durable history; only an explicit Retry reuses its messageId.
-  clearFailedAttempt();
-
   // @-mention redirect: "@<agent> make me a skill" switches the active agent
   // BEFORE we push the user bubble so the message + reply both land in
   // that agent's chat panel. The server's chat-dispatch also handles the
@@ -36,6 +33,10 @@ async function send() {
       const idSuffix = String(a.id || '').split('_').pop().toLowerCase();
       return nameKey === handle || idSuffix === handle;
     });
+    if (target && target.id !== activeAgent && agentStreams[target.id]?.active) {
+      showToast(`${target.name || 'That agent'} is still working. Open its chat to stop it before sending another message.`);
+      return;
+    }
     if (target && target.id !== activeAgent) {
       // This composer text is being SENT (to the mention target), not parked
       // as a draft — empty the input and drop this agent's stored draft
@@ -58,6 +59,8 @@ async function send() {
     }
   }
 
+  // Only an admitted send supersedes the local Retry affordance.
+  clearFailedAttempt();
   const toolPlan = selectedToolPlanForSend(text);
   const mailContext = window.mailWorkspaceChatContext?.() || null;
   // The WHOLE tray goes out with this message. Rebuilt into clean objects so

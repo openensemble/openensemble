@@ -15,7 +15,7 @@
     "@homebridge/ciao": "^1.3.9",
     "@huggingface/transformers": "^3.8.1",
     "@lancedb/lancedb": "^0.27.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "busboy": "^1.6.0",
     "es-module-lexer": "^2.0.0",
     "imapflow": "^1.4.3",

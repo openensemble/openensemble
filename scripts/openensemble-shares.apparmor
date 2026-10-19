@@ -1,0 +1,30 @@
+# Dedicated container policy: ordinary application access with FUSE mounts
+# restricted to OE's temporary share/probe directories. Never loaded globally
+# as docker-default. Container capabilities still constrain these permissions.
+#include <tunables/global>
+profile openensemble-shares flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  network,
+  unix,
+  capability,
+  file,
+  umount,
+  signal (receive) peer=unconfined,
+  signal (send,receive) peer=openensemble-shares,
+  ptrace (trace,read,tracedby,readby) peer=openensemble-shares,
+  mount fstype=(fuse,fuse.*) -> /tmp/oe-shares-*/**,
+  mount fstype=(fuse,fuse.*) -> /tmp/oe-fuse-check-*/mount/,
+  # All other mounts are denied by default; retain sensitive kernel restrictions.
+  deny /proc/* w,
+  deny /proc/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9]*}/** w,
+  deny /proc/sys/[^k]** w,
+  deny /proc/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny /proc/{sysrq-trigger,mem,kmem,kcore} rwklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+}

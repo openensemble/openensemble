@@ -603,7 +603,7 @@ export async function handle(req, res) {
     } catch (error) {
       if (!res.headersSent) safeError(res, error);
       else if (!res.writableEnded) res.destroy(error);
-    } finally { bundle?.cleanup(); }
+    } finally { await bundle?.cleanup(); }
     return true;
   }
 

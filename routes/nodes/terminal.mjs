@@ -19,7 +19,8 @@ import { randomBytes } from 'crypto';
 import {
   getNode, isNodeConnected, sendPtyMessage, registerPtyCallback, unregisterPtyCallback,
 } from '../../skills/nodes/node-registry.mjs';
-import { consumeTicket, createTicket, getUser, requireAuth, readBody } from '../_helpers.mjs';
+import { consumeTicket, createTicket, getUser, requireAuth, getAuthToken, readBody } from '../_helpers.mjs';
+import { bindSessionSocket, validateSessionSocket } from '../_helpers/auth-sessions.mjs';
 
 function escHtmlAttr(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -60,10 +61,12 @@ export function initTerminalWss() {
     ws._ptyId = ptyId;
     ws._nodeId = canonicalNodeId;
     ws._userId = userId;
+    if (!bindSessionSocket(ws, consumed.sessionToken)) return;
 
     // Register callback to relay PTY output from node agent → browser
     registerPtyCallback(ptyId, canonicalNodeId, userId, (msg) => {
       if (ws.readyState !== ws.OPEN) return;
+      if (!validateSessionSocket(ws)) return;
       if (msg.type === 'pty_output') {
         ws.send(msg.data); // send raw terminal data to xterm.js
       } else if (msg.type === 'pty_exit') {
@@ -81,6 +84,7 @@ export function initTerminalWss() {
     let ptyStarted = false;
 
     ws.on('message', (raw) => {
+      if (!validateSessionSocket(ws, { touch: true })) return;
       const data = raw.toString();
 
       // Try to parse as JSON (control messages)
@@ -154,7 +158,7 @@ export async function handleTerminalTicket(req, res) {
     return true;
   }
   const scope = body.transport === 'websocket' ? 'terminal-ws' : 'terminal-page';
-  const { token, expiresIn } = createTicket(userId, scope, { nodeId });
+  const { token, expiresIn } = createTicket(userId, scope, { nodeId }, undefined, getAuthToken(req));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ticket: token, expiresIn, scope }));
   return true;
@@ -180,7 +184,7 @@ export function handleTerminalPage(req, res, url) {
   const node = getNode(nodeId, userId);
   if (!node) { res.writeHead(404); res.end('Node not found'); return true; }
   const autoCmd = url.searchParams.get('cmd') || '';
-  const { token: wsTicket } = createTicket(userId, 'terminal-ws', { nodeId });
+  const { token: wsTicket } = createTicket(userId, 'terminal-ws', { nodeId }, undefined, consumed.sessionToken);
   const html = `<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">

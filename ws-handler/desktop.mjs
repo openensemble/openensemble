@@ -5,7 +5,7 @@
 
 import { WebSocketServer } from 'ws';
 import { log } from '../logger.mjs';
-import { getSessionMeta } from '../routes/_helpers/auth-sessions.mjs';
+import { getSessionMeta, bindSessionSocket, validateSessionSocket } from '../routes/_helpers/auth-sessions.mjs';
 import { registerDesktop, dropDesktop, handleDesktopResult, updateDesktopStatus } from '../lib/desktop-bus.mjs';
 
 export function initDesktopWss({
@@ -24,6 +24,8 @@ export function initDesktopWss({
       let msg;
       try { msg = JSON.parse(raw); } catch { return; }
       if (!msg || typeof msg !== 'object') return;
+      if (ws._sessionRevoked) return;
+      if (ws._authenticated && !validateSessionSocket(ws, { touch: msg.type !== 'ping' && msg.type !== 'status' })) return;
 
       if (!ws._authenticated) {
         if (msg.type !== 'auth' || typeof msg.token !== 'string') {
@@ -39,6 +41,7 @@ export function initDesktopWss({
         }
         ws._authenticated = true;
         ws._userId = meta.userId;
+        if (!bindSessionSocket(ws, msg.token)) return;
         try {
           const clientId = registerDesktop(ws, {
             userId: meta.userId,

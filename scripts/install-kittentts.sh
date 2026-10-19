@@ -24,12 +24,12 @@
 #   2 — missing prerequisite (python3, python3-venv, systemd, etc.)
 #
 # Env overrides (all optional):
-#   OE_HOME            default $HOME/.openensemble
+#   OE_HOME            default the installation containing this script
 #   KITTENTTS_PORT     default 5153
 
 set -eu
 
-OE_HOME="${OE_HOME:-$HOME/.openensemble}"
+OE_HOME="${OE_HOME:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 VENV="$OE_HOME/runtime/kittentts-venv"
 MODEL_DIR="$OE_HOME/models/tts/kittentts"
 PORT="${KITTENTTS_PORT:-5153}"
@@ -48,21 +48,17 @@ fail()  { echo "[kittentts-install] FAIL: $*" >&2; exit "${2:-1}"; }
 
 # ── prerequisites ─────────────────────────────────────────────────────────────
 step "Checking dependencies..."
-command -v python3 >/dev/null   || fail "python3 not found" 2
+bash "$OE_HOME/scripts/ensure-python-venv.sh" || fail "Python virtual-environment setup failed; see above." 2
 command -v wget    >/dev/null || command -v curl >/dev/null \
                                 || fail "wget or curl required for model download" 2
 command -v systemctl >/dev/null || fail "systemctl not found (need systemd-user)" 2
-python3 -c 'import venv' 2>/dev/null \
-                                || fail "python3 'venv' module missing — run: sudo apt install -y python3-full" 2
-python3 -c 'import ensurepip' 2>/dev/null \
-                                || fail "python3 'ensurepip' module missing — run: sudo apt install -y python3-full" 2
 systemctl --user list-units --no-pager >/dev/null 2>&1 \
                                 || fail "systemd --user not running — see install.sh user_manager_ready check" 2
 
 [ -f "$SERVER_SCRIPT" ] || fail "kittentts-server.py not found at $SERVER_SCRIPT (corrupt install dir?)" 2
 
 # ── venv + pip install ────────────────────────────────────────────────────────
-if [ ! -x "$VENV/bin/python" ]; then
+if [ ! -x "$VENV/bin/pip" ] || ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
   step "Creating venv at $VENV..."
   mkdir -p "$(dirname "$VENV")"
   python3 -m venv "$VENV"

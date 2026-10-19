@@ -5,8 +5,7 @@
  * emit Qwen-style `<|tool_call|>json{...}<|/tool_call|>` text blocks, both of
  * which are detected and looped back with results.
  *
- * If the model exits the loop without text output but called tools, we
- * synthesize a short "Done. (tool names)" message so the session ends cleanly.
+ * A tool result alone does not prove the requested workflow was completed.
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
@@ -356,11 +355,14 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
   if (!assistantContent) {
     if (toolCallsMade.length > 0) {
-      // Model finished all tool work but hit the loop cap without sending a text reply.
-      // Synthesize a minimal completion message so the session ends cleanly.
-      const uniqueTools = [...new Set(toolCallsMade)];
-      assistantContent = `Done. (${uniqueTools.join(', ')})`;
-      yield { type: 'token', text: assistantContent };
+      if (ollamaInputTokens || ollamaOutputTokens) {
+        yield { type: '__usage', inputTokens: ollamaInputTokens, outputTokens: ollamaOutputTokens, provider: agent.provider || 'ollama', model: agent.model };
+      }
+      yield {
+        type: 'error', code: 'incomplete_response', retryable: false,
+        message: `Ollama: work is incomplete because ${guard.exhaustedReason || 'the model did not produce a final answer'}. Completed tool results were retained; remaining actions were not confirmed.`,
+      };
+      return;
     } else {
       yield { type: 'error', message: 'No response from model.' };
       return;

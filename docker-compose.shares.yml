@@ -1,0 +1,7 @@
+# Applied by scripts/start-docker.sh after host FUSE/AppArmor preparation.
+services:
+  openensemble:
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN

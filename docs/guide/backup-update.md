@@ -11,7 +11,9 @@ permalink: /guide/backup-update/
 
 ## Backups
 
-OpenEnsemble is fully backed by files on disk — `users/`, `config.json`, `messages.json`, `tasks/`, `expenses/`, `roles/`, etc. The Backup tab packs all of them into a single `tar.gz` (or encrypted `.oeb`).
+OpenEnsemble saves account state in files on disk. The Backup tab exports the
+profiles, documents, configuration, and registries listed below into one
+`tar.gz` (or encrypted `.oeb`).
 
 ### Export
 
@@ -23,7 +25,15 @@ OpenEnsemble is fully backed by files on disk — `users/`, `config.json`, `mess
 - Expenses, autolabel rules, sharing manifest
 - Custom skills, custom drawers, custom roles
 
-It does **not** include the bundled GGUF models, your `node_modules/`, or anything in `.git`.
+It does **not** include the bundled GGUF models or the server's installed dependencies.
+
+Code project dependency environments (including `node_modules/`), `.git` history,
+build outputs, caches, and symbolic links
+are also omitted. Reinstall dependencies and rebuild projects after restoring.
+Export verifies that saved files stay unchanged while it copies them. If active
+work keeps changing those files, export asks you to pause that work and retry.
+The copy and archive work runs separately so chat and device connections remain
+responsive during export.
 
 ### Password-protected backups
 

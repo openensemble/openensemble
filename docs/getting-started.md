@@ -34,7 +34,21 @@ The installer:
 4. Writes a default `config.json` (providers all disabled)
 5. Optionally registers a systemd user service so OpenEnsemble comes up at boot
 
-For a clean Docker deployment instead:
+For a Linux Docker Compose deployment with automatic network-share host setup:
+
+```bash
+./scripts/start-docker.sh --build
+docker exec openensemble node scripts/first-run-bootstrap.mjs
+```
+
+Run the launcher on the Docker host. It prepares FUSE, loads OE's dedicated
+AppArmor profile when needed, and passes the FUSE device and capability to OE.
+It may request the host's sudo password. The image includes the SMB/NFS clients;
+the runtime mount check still verifies that the host permits access. This policy
+does not enable nested coder sandboxing. Docker Desktop, rootless Docker, and
+hosts with custom security policies may need administrator configuration.
+
+For a basic Docker deployment without network-share host setup instead:
 
 ```bash
 docker build -t openensemble .

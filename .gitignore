@@ -37,6 +37,7 @@ gmail-credentials.json
 /threads.json
 /active-sessions.json
 /background-task-journal.json
+/background-task-journal.json.d/
 /mcp-access-tokens.json
 /browser-pairing.json
 /nodes.json
@@ -120,6 +121,8 @@ skills/temp/
 
 # --- Build artifacts ---
 public/styles.css
+__pycache__/
+*.pyc
 
 # --- Installer-generated (path-baked, varies per install dir) ---
 /start.sh

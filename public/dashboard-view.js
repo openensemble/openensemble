@@ -172,6 +172,7 @@ const app = {
   provisionalLayout: false,
   navigationPending: false,
   pollTimer: null,
+  entityRefresh: null,
   widgetPollTimer: null,
   dragCardId: null,
   weather: new Map(),
@@ -1330,6 +1331,7 @@ async function loadApp() {
   try {
     app.dashboardRoute = dashboardRouteFromLocation();
     const dashboardData = await api('/api/dashboards');
+    if (generation !== app.layoutGeneration) return;
     setDashboardCatalog(dashboardData);
     const requestedSlug = app.dashboardRoute.slug || 'home';
     const selectedDashboard = app.dashboards.find(item => item.slug === requestedSlug);
@@ -1359,10 +1361,12 @@ async function loadApp() {
     const layoutRequest = api(dashboardLayoutApiPath(app.dashboardSlug));
     const widgetCatalogRequest = loadWidgetCatalog();
     const statusRequest = api('/api/dashboard-runtime/status').then(status => {
+      if (generation !== app.layoutGeneration) return null;
       app.status = app.entitiesUnavailable ? { ...status, connected: false } : status;
       if (app.layout) renderStatus();
       return status;
     }).catch(error => {
+      if (generation !== app.layoutGeneration) return null;
       app.status = {
         ...app.status,
         connected: false,
@@ -1372,6 +1376,7 @@ async function loadApp() {
       return null;
     });
     const entityRequest = api('/api/dashboard-runtime/entities').then(data => {
+      if (generation !== app.layoutGeneration) return null;
       app.entitiesLoaded = true;
       app.entitiesUnavailable = false;
       setEntities(data.entities);
@@ -1382,6 +1387,7 @@ async function loadApp() {
       }
       return data;
     }).catch(error => {
+      if (generation !== app.layoutGeneration) return null;
       app.entitiesUnavailable = true;
       app.status = {
         ...app.status,
@@ -1396,6 +1402,7 @@ async function loadApp() {
       return null;
     });
     const catalogRequest = api('/api/dashboard-runtime/catalog').then(data => {
+      if (generation !== app.layoutGeneration) return null;
       app.catalogLoaded = true;
       setCatalog(data);
       if (app.layout) {
@@ -1410,10 +1417,15 @@ async function loadApp() {
       return data;
     }).catch(() => null);
     const weatherRequest = api('/api/dashboard-runtime/weather').then(data => {
+      if (generation !== app.layoutGeneration) return null;
       setWeatherData(data);
       if (app.layout) renderSections();
       return data;
     }).catch(() => null);
+    const initialRefresh = Promise.all([statusRequest, entityRequest, catalogRequest, weatherRequest]).finally(() => {
+      if (app.entityRefresh === initialRefresh) app.entityRefresh = null;
+    });
+    app.entityRefresh = initialRefresh;
 
     const layoutData = await layoutRequest;
     if (!layoutData.layout && !app.entitiesLoaded) await entityRequest;
@@ -1439,6 +1451,7 @@ async function loadApp() {
     void Promise.all([statusRequest, catalogRequest, weatherRequest, widgetCatalogRequest]);
     if (!OE_EDITOR_MODE && dashboardOrientation() !== app.layoutOrientation) void switchDashboardOrientation(dashboardOrientation());
   } catch (error) {
+    if (generation !== app.layoutGeneration) return;
     if (error.status === 401) return;
     $('#hero').hidden = true;
     $('#summaryGrid').hidden = true;
@@ -1471,9 +1484,21 @@ async function refreshDashboard(showFeedback = false) {
   }
 }
 
-async function refreshEntities(showFeedback = false) {
+function refreshEntities(showFeedback = false) {
+  if (document.hidden && !showFeedback) return Promise.resolve();
+  if (app.entityRefresh) return app.entityRefresh;
+  const generation = app.layoutGeneration;
+  const pending = fetchEntityRefresh(showFeedback, generation).finally(() => {
+    if (app.entityRefresh === pending) app.entityRefresh = null;
+  });
+  app.entityRefresh = pending;
+  return pending;
+}
+
+async function fetchEntityRefresh(showFeedback, generation) {
   try {
     const status = await api('/api/dashboard-runtime/status');
+    if (generation !== app.layoutGeneration) return;
     app.status = status;
     if (status.canView !== true) {
       app.entitiesLoaded = false;
@@ -1500,6 +1525,7 @@ async function refreshEntities(showFeedback = false) {
       weatherRequest,
       catalogRequest,
     ]);
+    if (generation !== app.layoutGeneration) return;
     app.entitiesLoaded = true;
     app.entitiesUnavailable = false;
     setEntities(data.entities);
@@ -1520,6 +1546,7 @@ async function refreshEntities(showFeedback = false) {
     renderSections();
     if (showFeedback) toast('Your home is up to date', 'check');
   } catch (error) {
+    if (generation !== app.layoutGeneration) return;
     app.entitiesUnavailable = true;
     const denied = error.status === 403;
     app.status = {
@@ -2586,6 +2613,60 @@ function sortedFocusEntities(entities) {
   return [...entities].sort((a, b) => Number(!a.available) - Number(!b.available) || priority(a) - priority(b) || a.name.localeCompare(b.name));
 }
 
+// Preserve keyed cards, focused controls, and unchanged subtrees across polls.
+// Dashboard actions are delegated, so updating markup does not need rebinding.
+function patchDashboardMarkup(root, markup, preservedIds = []) {
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  const preserved = new Set(preservedIds);
+  const key = node => {
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    for (const attr of ['id', 'data-card-id', 'data-section-id', 'data-focus-id', 'data-focus-group', 'data-group-entity']) {
+      if (node.hasAttribute(attr)) return `${node.nodeName}:${attr}:${node.getAttribute(attr)}`;
+    }
+    return null;
+  };
+  function patchNode(current, next) {
+    if (current.nodeType !== Node.ELEMENT_NODE) {
+      if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+      return;
+    }
+    if (current.isEqualNode(next) && !current.matches('input,select,textarea') && !current.querySelector('input,select,textarea')) return;
+    const editing = current === document.activeElement || current.closest('select') === document.activeElement;
+    for (const attr of [...current.attributes]) {
+      if (editing && ['value', 'checked', 'selected'].includes(attr.name)) continue;
+      if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+    }
+    for (const attr of next.attributes) {
+      if (editing && ['value', 'checked', 'selected'].includes(attr.name)) continue;
+      if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+    }
+    if (!preserved.has(current.id)) patchChildren(current, next);
+    if (!editing && ['INPUT', 'TEXTAREA', 'SELECT'].includes(current.tagName)) {
+      if (current.value !== next.value) current.value = next.value;
+      if (current.tagName === 'INPUT' && current.checked !== next.checked) current.checked = next.checked;
+    }
+  }
+  function patchChildren(current, next) {
+    const keyed = new Map([...current.childNodes].map(node => [key(node), node]).filter(([id]) => id));
+    let cursor = current.firstChild;
+    for (const child of [...next.childNodes]) {
+      const id = key(child);
+      let match = id ? keyed.get(id) : cursor && !key(cursor) ? cursor : null;
+      if (!match || match.nodeType !== child.nodeType || match.nodeName !== child.nodeName || match.namespaceURI !== child.namespaceURI) {
+        match = child.cloneNode(true);
+        current.insertBefore(match, cursor);
+      } else {
+        if (match !== cursor) current.insertBefore(match, cursor);
+        patchNode(match, child);
+      }
+      cursor = match.nextSibling;
+    }
+    while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
+  }
+  patchChildren(root, template.content);
+}
+
 function renderFocusGrid() {
   const grid = $('#focusGrid');
   if (!grid) return;
@@ -2593,17 +2674,17 @@ function renderFocusGrid() {
   const mode = app.focusMode;
   const items = focusItems(mode).filter(item => !query || `${item.name} ${item.meta} ${item.entities.map(entity => `${entity.name} ${entity.entityId}`).join(' ')}`.toLowerCase().includes(query));
   if (!items.length) {
-    grid.innerHTML = `<div class="focus-empty">${ico('search')}<strong>No ${mode} match</strong><span>${query ? 'Try another search.' : app.editing ? 'All items are hidden. Use Dashboard settings to reset the layout.' : `Home Assistant has no ${mode} to show yet.`}</span></div>`;
+    patchDashboardMarkup(grid, `<div class="focus-empty">${ico('search')}<strong>No ${mode} match</strong><span>${query ? 'Try another search.' : app.editing ? 'All items are hidden. Use Dashboard settings to reset the layout.' : `Home Assistant has no ${mode} to show yet.`}</span></div>`);
     return;
   }
-  grid.innerHTML = items.map((item, index) => {
+  patchDashboardMarkup(grid, items.map((item, index) => {
     const on = item.entities.filter(isOn).length;
     const available = item.entities.filter(entity => entity.available).length;
     const icons = sortedFocusEntities(item.entities).slice(0, 4);
     const summary = item.entities.length ? `${available}/${item.entities.length} online${on ? ` · ${on} active` : ''}` : 'No entities';
     const editActions = app.editing ? `<div class="focus-tile-actions"><button data-action="move-focus" data-mode="${mode}" data-id="${escapeHtml(item.id)}" data-direction="-1" aria-label="Move ${escapeHtml(item.name)} earlier"${index === 0 ? ' disabled' : ''}>${ico('chevron-left')}</button><button data-action="move-focus" data-mode="${mode}" data-id="${escapeHtml(item.id)}" data-direction="1" aria-label="Move ${escapeHtml(item.name)} later"${index === items.length - 1 ? ' disabled' : ''}>${ico('chevron-right')}</button><button class="focus-hide-button" data-action="toggle-focus-hidden" data-mode="${mode}" data-id="${escapeHtml(item.id)}">${item.hidden ? 'Show' : 'Hide'}</button></div>` : '';
-    return `<article class="focus-tile${item.hidden ? ' focus-hidden' : ''}"><button class="focus-tile-main" data-action="focus-item" data-id="${escapeHtml(item.id)}"><span class="focus-tile-top"><span class="focus-tile-icon">${ico(item.icon)}</span><span class="focus-arrow">${ico('chevron-right')}</span></span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.meta)}</small><span class="focus-entity-icons">${icons.map(entity => `<i title="${escapeHtml(entity.name)}">${ico(entityIcon(entity))}</i>`).join('')}${item.entities.length > 4 ? `<em>+${item.entities.length - 4}</em>` : ''}</span><span class="focus-tile-summary">${escapeHtml(summary)}</span></button>${editActions}</article>`;
-  }).join('');
+    return `<article data-focus-id="${escapeHtml(item.id)}" class="focus-tile${item.hidden ? ' focus-hidden' : ''}"><button class="focus-tile-main" data-action="focus-item" data-id="${escapeHtml(item.id)}"><span class="focus-tile-top"><span class="focus-tile-icon">${ico(item.icon)}</span><span class="focus-arrow">${ico('chevron-right')}</span></span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.meta)}</small><span class="focus-entity-icons">${icons.map(entity => `<i title="${escapeHtml(entity.name)}">${ico(entityIcon(entity))}</i>`).join('')}${item.entities.length > 4 ? `<em>+${item.entities.length - 4}</em>` : ''}</span><span class="focus-tile-summary">${escapeHtml(summary)}</span></button>${editActions}</article>`;
+  }).join(''));
 }
 
 function renderFocusResults() {
@@ -2619,11 +2700,11 @@ function renderFocusResults() {
     ['Sensors & details', 'activity', readings],
   ].filter(([, , list]) => list.length);
   if (!groups.length) {
-    root.innerHTML = `<div class="focus-empty">${ico('search')}<strong>No entities to show</strong><span>${query ? 'Try another search or show every entity.' : 'This selection has no current Home Assistant entities.'}</span></div>`;
+    patchDashboardMarkup(root, `<div class="focus-empty">${ico('search')}<strong>No entities to show</strong><span>${query ? 'Try another search or show every entity.' : 'This selection has no current Home Assistant entities.'}</span></div>`);
     return;
   }
   const showHeaders = dashboardChrome().showSectionHeaders || app.editing;
-  root.innerHTML = groups.map(([title, icon, list]) => `<section class="section focus-section" aria-label="${escapeHtml(title)}">${showHeaders ? `<header class="section-head"><span class="section-icon">${ico(icon)}</span><h2 class="section-title">${title}</h2><span class="section-count">${list.length}</span></header>` : ''}<div class="device-grid">${list.map(entity => renderCard(focusCardFor(entity))).join('')}</div></section>`).join('');
+  patchDashboardMarkup(root, groups.map(([title, icon, list]) => `<section data-focus-group="${escapeHtml(title)}" class="section focus-section" aria-label="${escapeHtml(title)}">${showHeaders ? `<header class="section-head"><span class="section-icon">${ico(icon)}</span><h2 class="section-title">${title}</h2><span class="section-count">${list.length}</span></header>` : ''}<div class="device-grid">${list.map(entity => renderCard(focusCardFor(entity))).join('')}</div></section>`).join(''));
 }
 
 function renderFocusView() {
@@ -2634,13 +2715,13 @@ function renderFocusView() {
     : 'Browse physical Home Assistant devices and all of the entities each device exposes.';
   $('#sections').className = `sections focus-sections${app.editing ? ' editing' : ''}`;
   if (!app.focusId) {
-    $('#sections').innerHTML = `<section class="focus-page"><header class="focus-page-head"><div><span class="focus-kicker">Home Assistant ${plural.toLowerCase()}</span><h2>${plural}</h2><p>${description}</p></div><label class="focus-search">${ico('search')}<input id="focusSearch" value="${escapeHtml(app.focusQuery)}" placeholder="Search ${plural.toLowerCase()} or entities" autocomplete="off"></label></header>${app.editing ? `<div class="customize-note">${ico('sliders')}Reorder or hide ${plural.toLowerCase()} here. Open one, then tap any card to choose its control style.</div>` : ''}<div class="focus-grid" id="focusGrid"></div></section>`;
+    patchDashboardMarkup($('#sections'), `<section class="focus-page"><header class="focus-page-head"><div><span class="focus-kicker">Home Assistant ${plural.toLowerCase()}</span><h2>${plural}</h2><p>${description}</p></div><label class="focus-search">${ico('search')}<input id="focusSearch" value="${escapeHtml(app.focusQuery)}" placeholder="Search ${plural.toLowerCase()} or entities" autocomplete="off"></label></header>${app.editing ? `<div class="customize-note">${ico('sliders')}Reorder or hide ${plural.toLowerCase()} here. Open one, then tap any card to choose its control style.</div>` : ''}<div class="focus-grid" id="focusGrid"></div></section>`, ['focusGrid', 'focusResults']);
     renderFocusGrid();
     return;
   }
   const name = focusItemName(mode, app.focusId);
   const entityCount = entitiesForFocus(mode, app.focusId).length;
-  $('#sections').innerHTML = `<section class="focus-page"><header class="focus-detail-head"><button class="focus-back" data-action="focus-back">${ico('chevron-left')}All ${plural.toLowerCase()}</button><div class="focus-detail-title"><span class="focus-kicker">${mode === 'rooms' ? 'Room focus' : 'Device focus'}</span><h2>${escapeHtml(name)}</h2><p>${entityCount} Home Assistant entit${entityCount === 1 ? 'y' : 'ies'}</p></div><div class="focus-detail-tools"><label class="focus-search compact-search">${ico('search')}<input id="focusSearch" value="${escapeHtml(app.focusQuery)}" placeholder="Filter entities" autocomplete="off"></label><button class="button ghost${app.focusShowAll ? ' editing' : ''}" data-action="focus-show-all">${app.focusShowAll ? 'Hide diagnostics' : 'All entities'}</button></div></header>${app.editing ? `<div class="customize-note">${ico('sliders')}Tap any card to change its slider, graphic, size, name, or color. This style is shared across Rooms and Devices, but not the pinned Overview card.</div>` : ''}<div class="focus-results" id="focusResults"></div></section>`;
+  patchDashboardMarkup($('#sections'), `<section class="focus-page"><header class="focus-detail-head"><button class="focus-back" data-action="focus-back">${ico('chevron-left')}All ${plural.toLowerCase()}</button><div class="focus-detail-title"><span class="focus-kicker">${mode === 'rooms' ? 'Room focus' : 'Device focus'}</span><h2>${escapeHtml(name)}</h2><p>${entityCount} Home Assistant entit${entityCount === 1 ? 'y' : 'ies'}</p></div><div class="focus-detail-tools"><label class="focus-search compact-search">${ico('search')}<input id="focusSearch" value="${escapeHtml(app.focusQuery)}" placeholder="Filter entities" autocomplete="off"></label><button class="button ghost${app.focusShowAll ? ' editing' : ''}" data-action="focus-show-all">${app.focusShowAll ? 'Hide diagnostics' : 'All entities'}</button></div></header>${app.editing ? `<div class="customize-note">${ico('sliders')}Tap any card to change its slider, graphic, size, name, or color. This style is shared across Rooms and Devices, but not the pinned Overview card.</div>` : ''}<div class="focus-results" id="focusResults"></div></section>`, ['focusGrid', 'focusResults']);
   renderFocusResults();
 }
 
@@ -2657,19 +2738,19 @@ function renderSections() {
     const emptyCanvas = OE_EDITOR_MODE && app.editing
       ? `<div class="empty-dashboard-canvas"><span>${ico('folder-plus')}</span><h2>Start with a section</h2><p>Sections organize cards and widgets into any layout you want.</p><button class="button primary" data-action="create-empty-section">${ico('plus')}New section</button></div>`
       : '';
-    $('#sections').innerHTML = customizeHint + emptyCanvas;
+    patchDashboardMarkup($('#sections'), customizeHint + emptyCanvas);
     renderExpandedCard();
     return;
   }
   const showHeaders = dashboardChrome().showSectionHeaders || app.editing;
-  $('#sections').innerHTML = customizeHint + visible.map(section => {
+  patchDashboardMarkup($('#sections'), customizeHint + visible.map(section => {
     const collapsed = showHeaders && section.collapsed;
     const header = showHeaders
       ? `<header class="section-head"><span class="section-icon">${ico(section.title.toLowerCase().includes('security') ? 'shield' : section.title.toLowerCase().includes('scene') ? 'sparkles' : 'grid')}</span><h2 class="section-title">${escapeHtml(section.title)}</h2><span class="section-count">${section.cards.length}</span><div class="section-actions"><button class="section-button" data-action="move-section" data-id="${escapeHtml(section.id)}" data-direction="-1" title="Move up" aria-label="Move ${escapeHtml(section.title)} up">${ico('chevron-up')}</button><button class="section-button" data-action="move-section" data-id="${escapeHtml(section.id)}" data-direction="1" title="Move down" aria-label="Move ${escapeHtml(section.title)} down">${ico('chevron-down')}</button><button class="section-button" data-action="edit-section" data-id="${escapeHtml(section.id)}" title="Edit section" aria-label="Edit ${escapeHtml(section.title)} section">${ico('pencil')}</button></div><button class="section-button section-collapse" data-action="collapse" data-id="${escapeHtml(section.id)}" title="${section.collapsed ? 'Expand' : 'Collapse'}" aria-label="${section.collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(section.title)}">${ico(section.collapsed ? 'chevron-down' : 'chevron-up')}</button></header>`
       : '';
     const cards = collapsed ? '' : `<div class="device-grid" data-drop-section="${escapeHtml(section.id)}">${section.cards.length ? section.cards.map(renderCard).join('') : `<div class="section-empty">${ico('plus')}${app.editing ? 'Drop a card here' : 'No cards in this section'}</div>`}</div>`;
     return `<section class="section" data-section-id="${escapeHtml(section.id)}" aria-label="${escapeHtml(section.title)}" style="--accent:var(--${section.accent})">${header}${cards}</section>`;
-  }).join('');
+  }).join(''));
   renderExpandedCard();
 }
 
@@ -3123,7 +3204,7 @@ function renderExpandedCard(force = false) {
   };
   $('#deviceDialogTitle').textContent = title;
   $('#deviceDialogState').textContent = stateLabel(entity);
-  container.innerHTML = renderCard(expanded);
+  patchDashboardMarkup(container, renderCard(expanded));
   if (restoreFocus) {
     const peers = $$(focusable, container).filter(item => (
       item.tagName === restoreFocus.tagName
@@ -5228,7 +5309,10 @@ window.addEventListener('beforeunload', event => {
 });
 window.addEventListener('hashchange', closeCameraViewer);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) void refreshWidgets();
+  if (!document.hidden && app.layout) {
+    void refreshEntities();
+    void refreshWidgets();
+  }
 });
 matchMedia('(min-width: 961px)').addEventListener('change', event => { if (event.matches) closeMobileMenu(); });
 

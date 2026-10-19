@@ -39,6 +39,7 @@ tools/
 **/*.key
 /tls/
 /config.json
+/config/
 /gmail-credentials.json
 /microsoft-credentials.json
 /gcal-token.json
@@ -67,6 +68,7 @@ tools/
 /threads.json
 /active-sessions.json
 /background-task-journal.json
+/background-task-journal.json.d/
 /mcp-access-tokens.json
 /browser-pairing.json
 /nodes.json

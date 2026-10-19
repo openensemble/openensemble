@@ -12,56 +12,19 @@
  * workspace root — symlink tricks can't escape the user's folder.
  */
 
-import { spawn, execSync } from 'child_process';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-import crypto from 'crypto';
+import fs from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { requireAuth, safeError } from './_helpers.mjs';
-
-// The download endpoint shells out to `zip`. Detect it up front so fresh-install
-// boxes don't silently serve 0-byte archives when the binary is missing.
-const ZIP_BIN = (() => {
-  try {
-    const p = execSync('command -v zip', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return p || null;
-  } catch { return null; }
-})();
-if (!ZIP_BIN) {
-  console.warn('[coder] zip binary not found — code project downloads will fail. Install with: sudo apt install zip');
-}
+import { createProjectArchive } from '../lib/project-archive.mjs';
+export { ARCHIVE_SKIP } from '../lib/project-archive.mjs';
 import {
   listUserProjects,
   resolveUserProjectDir,
   deleteUserProject,
 } from '../skills/coder/execute.mjs';
 
-// Segments the zip archive should skip so downloaded projects carry only
-// source + small artifacts — no node_modules, virtualenvs, or build output
-// bloating the archive.
-export const ARCHIVE_SKIP = [
-  'node_modules', '.git', '.venv', 'venv', '__pycache__', '.next',
-  'dist', 'build', '.cache', '.turbo', '.parcel-cache', '.pytest_cache',
-  '.run',
-];
-
-// 500MB hard cap on archive size — kills the zip process if the download
-// exceeds this. Matches the node push_tar precedent so users can't blow up
-// server memory or client bandwidth with a runaway download.
-const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024;
-
 function decodeProjectName(encoded) {
   try { return decodeURIComponent(encoded); } catch { return encoded; }
-}
-
-// Zip exclude flags are relative to the source dir; `zip -r - . -x 'node_modules/*'`
-// matches top-level node_modules and any nested node_modules.
-function buildZipExcludes() {
-  const args = [];
-  for (const seg of ARCHIVE_SKIP) {
-    args.push('-x', `${seg}/*`, '-x', `*/${seg}/*`);
-  }
-  return args;
 }
 
 export async function handle(req, res) {
@@ -87,104 +50,30 @@ export async function handle(req, res) {
   // ── GET /api/coder/projects/:name/download ── stream a zip to the browser
   if (isDownload && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
-    let projectDir;
+    const controller = new AbortController();
+    const cancel = () => { if (!res.writableEnded) controller.abort(); };
+    res.on('close', cancel);
+    let bundle;
     try {
-      projectDir = resolveUserProjectDir(userId, name).dir;
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e?.message || 'Invalid project' }));
-      return true;
-    }
-
-    if (!ZIP_BIN) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Server is missing the `zip` binary. Install with: sudo apt install zip' }));
-      return true;
-    }
-
-    const safeFileName = name.replace(/[^a-zA-Z0-9._-]/g, '_') + '.zip';
-    // Archive to a tmp file first so we can send a real Content-Length — the
-    // browser then shows actual file size and progress instead of "Unknown".
-    // Streaming straight from zip stdout is simpler but gives up both. Code
-    // projects are small (MAX_DOWNLOAD_BYTES=500MB cap), so the tmp file is
-    // short-lived and cheap.
-    const tmpPath = path.join(os.tmpdir(), `oe-coder-${crypto.randomBytes(8).toString('hex')}.zip`);
-    const zipArgs = ['-r', '-q', tmpPath, '.', ...buildZipExcludes()];
-    const child = spawn(ZIP_BIN, zipArgs, { cwd: projectDir });
-
-    let clientClosed = false;
-    req.on('close', () => {
-      clientClosed = true;
-      if (!child.killed) { try { child.kill('SIGTERM'); } catch {} }
-    });
-
-    child.stderr.on('data', buf => {
-      const s = buf.toString();
-      if (s.trim()) console.warn(`[coder] zip stderr: ${s.trim()}`);
-    });
-
-    child.on('error', err => {
-      console.error('[coder] zip spawn error:', err);
-      fs.promises.unlink(tmpPath).catch(() => {});
-      if (res.headersSent) return;
-      const msg = err?.code === 'ENOENT'
-        ? 'Server is missing the `zip` binary. Install with: sudo apt install zip'
-        : `Archive failed: ${err?.message || err}`;
-      try {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: msg }));
-      } catch {}
-    });
-
-    child.on('close', code => {
-      if (clientClosed) { fs.promises.unlink(tmpPath).catch(() => {}); return; }
-      if (code !== 0) {
-        fs.promises.unlink(tmpPath).catch(() => {});
-        if (!res.headersSent) {
-          try {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `zip exited with code ${code}` }));
-          } catch {}
-        }
-        return;
-      }
-
-      let size;
-      try { size = fs.statSync(tmpPath).size; }
-      catch (e) {
-        fs.promises.unlink(tmpPath).catch(() => {});
-        if (!res.headersSent) {
-          try {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'archive stat failed' }));
-          } catch {}
-        }
-        return;
-      }
-      if (size > MAX_DOWNLOAD_BYTES) {
-        fs.promises.unlink(tmpPath).catch(() => {});
-        console.warn(`[coder] download size cap hit for ${userId}/${name} @ ${size} bytes`);
-        if (!res.headersSent) {
-          try {
-            res.writeHead(413, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `archive exceeds ${MAX_DOWNLOAD_BYTES} byte cap` }));
-          } catch {}
-        }
-        return;
-      }
-
+      const project = resolveUserProjectDir(userId, name);
+      bundle = await createProjectArchive(project.dir, { identity: project.identity, signal: controller.signal });
+      const size = (await fs.promises.stat(bundle.file)).size;
+      const safeName = name.replace(/[^a-zA-Z0-9._-]/g, '_') + '.zip';
       res.writeHead(200, {
-        'Content-Type': 'application/zip',
-        'Content-Length': size,
-        'Content-Disposition': `attachment; filename="${safeFileName}"`,
-        'Cache-Control': 'no-store',
+        'Content-Type': 'application/zip', 'Content-Length': size,
+        'Content-Disposition': `attachment; filename="${safeName}"`,
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
       });
-      const stream = fs.createReadStream(tmpPath);
-      stream.pipe(res);
-      const cleanup = () => { fs.promises.unlink(tmpPath).catch(() => {}); };
-      stream.on('close', cleanup);
-      stream.on('error', err => { console.warn('[coder] stream error:', err?.message || err); cleanup(); });
-    });
+      await pipeline(fs.createReadStream(bundle.file), res, { signal: controller.signal });
+    } catch (error) {
+      if (!res.headersSent && !res.destroyed) {
+        res.writeHead(error.code === 'ENOENT' ? 503 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: error.code === 'ENOENT' ? 'Project downloads require Python 3 on the server.' : error.message }));
+      } else if (!res.writableEnded) res.destroy();
+    } finally {
+      res.off('close', cancel);
+      await bundle?.cleanup();
+    }
     return true;
   }
 

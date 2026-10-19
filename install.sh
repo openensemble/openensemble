@@ -86,6 +86,17 @@ ensure_build_tools() {
   command -v fuser    &>/dev/null || need+=(psmisc)
   command -v ffmpeg   &>/dev/null || need+=(ffmpeg)
   command -v openssl  &>/dev/null || need+=(openssl)
+  command -v curl     &>/dev/null || need+=(curl)
+  local share_packages=()
+  if command -v apt-get &>/dev/null; then
+    command -v cc &>/dev/null || need+=(gcc)
+    command -v dpkg-architecture &>/dev/null || need+=(dpkg-dev)
+    command -v flock &>/dev/null || need+=(util-linux)
+    if ! command -v fusermount3 &>/dev/null && ! command -v fusermount &>/dev/null; then
+      need+=(fuse3)
+      share_packages+=(fuse3)
+    fi
+  fi
   [[ ${#need[@]} -eq 0 ]] && return 0
 
   warn "Missing build/runtime tools: ${need[*]}"
@@ -113,12 +124,12 @@ ensure_build_tools() {
   # the official meta-package that always includes the matching
   # version-specific venv + ensurepip + pip; works on Debian 11+, Ubuntu
   # 22.04+. RPM/Arch/Alpine ship `python -m venv` as part of base python.
-  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 python3-full zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
-  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
-  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
-  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
-  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep psmisc ffmpeg openssl
-  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep psmisc ffmpeg openssl
+  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 python3-full zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl curl dpkg-dev util-linux "${share_packages[@]}"
+  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl curl
+  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl curl
+  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl curl
+  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep psmisc ffmpeg openssl curl
+  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep psmisc ffmpeg openssl curl
   else
     error "No supported package manager found. Install build-essential, python3, python3-full (or python3 + python3-venv + python3-pip), zip, bubblewrap, git, poppler-utils, ripgrep, psmisc, and ffmpeg manually and re-run."
     exit 1
@@ -389,6 +400,21 @@ fi
 # ─── Install Dependencies ─────────────────────────────────────────────────────
 header "Installing Dependencies"
 ensure_build_tools
+# A present python3 does not imply Debian's separately packaged venv/pip exists.
+bash "$INSTALL_DIR/scripts/ensure-python-venv.sh"
+info "Preparing FUSE for network shares..."
+if ! bash "$INSTALL_DIR/scripts/setup-share-fuse.sh"; then
+  warn "Network-share host setup needs attention. Ask OE to check and set up network-share support after installation."
+fi
+if command -v apt-get &>/dev/null; then
+  info "Installing network-share clients..."
+  bash "$INSTALL_DIR/scripts/install-share-tools.sh"
+  if [[ ! -c /dev/fuse ]]; then
+    warn "Network-share tools are installed. Ask OE to configure the paired container host to expose FUSE."
+  fi
+else
+  warn "Automatic network-share client installation currently supports Debian, Ubuntu, and Mint. Other hosts need rclone, fuse-nfs, showmount, and FUSE."
+fi
 info "Running npm install (this may take a minute)..."
 cd "$INSTALL_DIR"
 

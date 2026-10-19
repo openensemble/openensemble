@@ -5,13 +5,24 @@ async function shareSettingsRequest(action, body) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   } : undefined);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Share operation failed.');
+  if (!response.ok) throw new Error(data.setup?.message || data.error || 'Share operation failed.');
   return data;
 }
 
 async function loadNetworkShares() {
   const list = $('networkSharesList');
   if (!list) return;
+  // Check host support independently so a failed NAS does not hide setup help.
+  let support = $('networkShareSupport');
+  if (!support) {
+    support = document.createElement('p'); support.id = 'networkShareSupport';
+    support.className = 'network-share-note'; support.setAttribute('role', 'status');
+    list.before(support);
+  }
+  shareSettingsRequest('setup').then(result => {
+    support.textContent = result.ready ? '' : result.message;
+    support.hidden = result.ready;
+  }).catch(() => { support.textContent = 'Could not check network-share support. Ask OE to check its setup.'; support.hidden = false; });
   try {
     const { shares } = await shareSettingsRequest('');
     list.innerHTML = shares.length ? shares.map(share => `

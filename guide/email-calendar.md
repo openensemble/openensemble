@@ -164,6 +164,9 @@ submission leaves a protected draft: check the provider's Sent folder before
 creating another message, because the original might already have been accepted.
 Microsoft acceptance does not itself confirm delivery to the recipient. SMTP
 submission saves a Sent copy when the IMAP server advertises that folder.
+If SMTP accepts some recipients and rejects others, Mail shows the rejected
+addresses and consumes the draft. Any follow-up should address only those
+rejected recipients, to avoid sending duplicates to recipients already accepted.
 The workspace accepts up to 15 attachments, totaling 20 MB; Microsoft sending
 currently has a 3 MB attachment limit. Uploaded files remain in your OE Files
 even if you later discard the draft.

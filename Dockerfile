@@ -7,8 +7,8 @@ FROM node:22-slim
 # normalizes remote TTS audio for voice devices; openssl creates the
 # first-run HTTPS certificate at container startup (never during image build).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ poppler-utils zip bubblewrap ffmpeg openssl git ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+    python3 python3-venv make g++ poppler-utils zip bubblewrap ffmpeg openssl git ripgrep \
+    curl dpkg-dev util-linux fuse3
 
 WORKDIR /app
 
@@ -21,7 +21,9 @@ RUN npm ci --omit=dev --ignore-scripts
 
 # Copy application
 COPY . .
-RUN mkdir -p /opt/openensemble-plugins \
+RUN bash scripts/install-share-tools.sh \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/openensemble-plugins \
     && cp -a plugins/markets plugins/news /opt/openensemble-plugins/ \
     && node scripts/fetch-voice-firmware.mjs --check \
     && npm rebuild --omit=dev && node scripts/fetch-models.mjs \

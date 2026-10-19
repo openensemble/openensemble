@@ -173,10 +173,7 @@ async function showInvitePage(token) {
         });
         const d = await r.json();
         if (!r.ok) { errEl.textContent = d.error ?? 'Failed to create profile'; return; }
-        setToken(d.token);
-        setCurrentUser(d.user);
         history.replaceState({}, '', '/');
-        screen.classList.add('hidden');
         reconnectWS();
       } catch (e) { errEl.textContent = e.message; }
     });

@@ -345,6 +345,7 @@ function projectAgentStreamState(agent) {
 }
 
 function connect() {
+  if (typeof _authSuspended !== 'undefined' && _authSuspended) return;
   if (typeof setChatAgentsConnected === 'function') setChatAgentsConnected(false);
   _connectionGeneration++;
   // Tear down any prior socket first. Signup/login/invite flows can call init()
@@ -534,6 +535,7 @@ function reloadDocumentSession(agentId) {
 
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
+  if (typeof _authSuspended !== 'undefined' && _authSuspended) return;
   if (msg.type === 'project_deleted') {
     handleProjectSpaceDeleted(msg.projectId);
     return;
@@ -1102,10 +1104,9 @@ function handleServerMessage(msg) {
       // attempt.
       if (msg.message === 'Unauthorized') {
         setToken(null);
-        // Null the user so ws.onclose stops reconnecting — otherwise each
+        // Suspending the account stops reconnecting — otherwise each
         // reconnect re-auths, gets Unauthorized, and re-shows the login screen
         // (re-fetching users + wiping any half-typed password) every 1–15s.
-        _currentUser = null;
         showLoginScreen();
         break;
       }
@@ -1504,9 +1505,8 @@ function handleServerMessage(msg) {
     case 'session_expired':
       // Server clears the cookie via Set-Cookie on the next API hit; nothing
       // to do client-side beyond returning the user to the login screen.
-      // Null the user first so ws.onclose stops the reconnect loop (which would
-      // otherwise re-show the login screen and reset the selection every 1–15s).
-      _currentUser = null;
+      // Suspending the account stops the reconnect loop and preserves the
+      // old profile's drafts before clearing its in-memory state.
       showToast('Your session has expired. Please sign in again.');
       showLoginScreen();
       break;

@@ -596,6 +596,8 @@ const httpServer = http.createServer(async (req, res) => {
       // Chat attachments (audio/video for transcription, large images, etc.)
       // — enforced at 500 MB by the route-level busboy parser.
       (req.method === 'POST' && req.url === '/api/chat-upload') ||
+      // Desktop sync streams to disk and checks its own 500 MiB limit.
+      (req.method === 'PUT' && _pathname === '/api/desktop-sync/file') ||
       // Ambient-library MP3 uploads — enforced at 40 MB by the route-level
       // handler in routes/devices.mjs.
       (req.method === 'POST' && req.url.startsWith('/api/devices/ambient-library/'));

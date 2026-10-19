@@ -8,6 +8,26 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-10-19
 
+**Reliability and performance fixes**
+Signing out or revoking a session now closes its authenticated connections, and
+signing into another profile starts with fresh browser state. Project downloads
+skip symbolic links; backups include shared conversations and sharing settings,
+exclude generated project dependencies, and copy files without blocking chat.
+
+Mail reader actions apply to the message being viewed. Long Microsoft
+conversations retain the selected reply target, IMAP connections stay open while
+busy, and partial SMTP delivery reports rejected recipients. Short-lived read
+caches reduce repeated Gmail requests and IMAP mailbox searches.
+
+Scheduled failures are counted without losing concurrent results. Interrupted
+Ollama responses and truncated Anthropic responses are reported as incomplete.
+Background checkpoints update one job at a time while retaining durable restart
+recovery. Mail, flashing tools, and charts load when opened; dashboard polling
+pauses in hidden tabs and preserves unchanged controls.
+
+MCP OAuth credentials now retain their issuing server. Older connections may
+need **Authorize** again in **Settings → MCP**. See [MCP connections](mcp.md).
+
 **Choose what removing a share means**
 Chat now asks whether to remove a connection from OE while keeping all files,
 permanently delete the files and server share, or ignore the request and change

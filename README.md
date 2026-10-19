@@ -29,6 +29,11 @@ internal reasoning and retrieval; your assistant still needs a chat provider.
 Node.js **22.12 or newer**, and the build/media/sandbox tools checked by the
 installer. macOS is a local-development option with different feature support.
 The installer can install missing dependencies and a systemd user service.
+It prepares Python virtual-environment support for optional voice engines and,
+on Debian-family systems, the SMB/NFS share clients. Voice engines and their
+models install when selected. Code-project ZIP downloads support Python 3.7+.
+OE can check and repair network-share/FUSE setup through its administrator
+tools, including paired Docker Compose and Proxmox container hosts.
 Shallow clones support normal in-app updates.
 
 [Installation and Docker](docs/getting-started.md) ·

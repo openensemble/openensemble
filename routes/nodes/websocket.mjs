@@ -15,6 +15,7 @@ import {
   adoptSession, getSessionUserId, getSessionMeta, broadcastToUsers, getUserCoordinatorAgentId, getUser, getClientIp,
 } from '../_helpers.mjs';
 import { appendToSession } from '../../sessions.mjs';
+import { bindSessionSocket, validateSessionSocket } from '../_helpers/auth-sessions.mjs';
 
 let _nodeWss = null;
 
@@ -77,11 +78,13 @@ export function initNodeWss() {
     ws._authenticated = false;
     ws._alive = true;
     ws._nodeId = null;
+    if (userId && !bindSessionSocket(ws, token)) return;
 
     // WS-level keepalive
     ws.on('pong', () => { ws._alive = true; });
 
     ws.on('message', (raw) => {
+      if (ws._sessionRevoked || ws._userId && !validateSessionSocket(ws, { touch: true })) return;
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
 

@@ -113,7 +113,7 @@ export async function handle(req, res) {
 
   if (req.url === '/api/media-token' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const { token, expiresIn } = createMediaToken(authId);
+    const { token, expiresIn } = createMediaToken(authId, getAuthToken(req));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ token, expiresIn }));
     return true;

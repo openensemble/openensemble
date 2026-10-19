@@ -302,6 +302,8 @@ export function updateTask(id, patch, ownerId = null) {
     if (i === -1) return;
     const previous = { ...tasks[i] };
     Object.assign(tasks[i], rest);
+    if (rest.enabled === true || rest.consecutiveFailures === 0) delete tasks[i].scheduledOutcomeState;
+    else if (rest.enabled === false && tasks[i].scheduledOutcomeState) tasks[i].scheduledOutcomeState.disabled = false;
     if (alarmFields.some(key => key in rest && rest[key] !== previous[key])) {
       tasks[i].deviceAlarmRevision = (Number(previous.deviceAlarmRevision) || 0) + 1;
       return { previous, fresh: { ...tasks[i] } };
@@ -313,6 +315,60 @@ export function updateTask(id, patch, ownerId = null) {
     // Device-only patches also need reconciliation; nextRunAt/anchor writes
     // deliberately bypass this path so arming cannot recursively re-arm.
     if (_schedulerRunning && (previous.alarm || previous.voiceTimer || fresh.alarm || fresh.voiceTimer)) scheduleNewTask(fresh);
+  });
+}
+
+// Order automatic outcomes by their occurrence, not by provider completion.
+// Keeping the latest five is sufficient for the five-failure circuit breaker.
+export function recordScheduledTaskOutcome(taskId, outcome, ownerId) {
+  return modifyTaskById(taskId, tasks => {
+    const task = tasks.find(item => item.id === taskId);
+    if (!task) return;
+    const state = task.scheduledOutcomeState || {
+      baselineFailures: Number(task.consecutiveFailures) || 0, recent: [], disabled: false,
+    };
+    if (state.recent.some(item => item.runId === outcome.runId)) return;
+    const row = {
+      runId: outcome.runId,
+      startedAt: Number.isFinite(outcome.startedAt) ? outcome.startedAt : Date.now(),
+      completedAt: new Date().toISOString(),
+      succeeded: outcome.succeeded === true,
+      output: String(outcome.output || '').trim().slice(0, 280),
+      error: outcome.lastError || 'unknown',
+    };
+    const compare = (a, b) => a.startedAt - b.startedAt || a.runId.localeCompare(b.runId);
+    if (state.recent.length >= MAX_CONSECUTIVE_FAILURES && compare(row, state.recent[0]) < 0) return;
+    state.recent.push(row);
+    state.recent.sort(compare);
+    while (state.recent.length > MAX_CONSECUTIVE_FAILURES) {
+      const oldest = state.recent.shift();
+      state.baselineFailures = oldest.succeeded ? 0 : Math.min(MAX_CONSECUTIVE_FAILURES, state.baselineFailures + 1);
+    }
+    let failures = state.baselineFailures;
+    for (const item of state.recent) failures = item.succeeded ? 0 : failures + 1;
+    failures = Math.min(MAX_CONSECUTIVE_FAILURES, failures);
+    const latest = state.recent.at(-1);
+    Object.assign(task, {
+      scheduledOutcomeState: state,
+      consecutiveFailures: failures,
+      lastRun: latest.completedAt,
+      lastFinalizedRunId: latest.runId,
+      lastError: latest.succeeded ? null : latest.error,
+      ...(latest.succeeded ? { lastOutput: latest.output } : {}),
+    });
+    const reenable = failures < MAX_CONSECUTIVE_FAILURES && state.disabled;
+    if (failures >= MAX_CONSECUTIVE_FAILURES) {
+      state.disabled = state.disabled || task.enabled === true;
+      task.enabled = false;
+      task.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${latest.error}`;
+    } else if (reenable) {
+      state.disabled = false;
+      task.enabled = true;
+      task.disabledReason = null;
+    }
+    return reenable ? { ...task } : null;
+  }, ownerId).then(reenabled => {
+    if (reenabled && _schedulerRunning) scheduleNewTask(reenabled);
   });
 }
 
@@ -632,9 +688,11 @@ async function runTaskInProject(task, broadcast, opts = {}) {
         ...(manual ? { manual: true } : {}),
       });
       if (task.repeat === 'once' && !manual) await removeTask(task.id, task.ownerId, { completed: true });
-      else await updateTask(task.id, {
+      else if (manual) await updateTask(task.id, {
         lastRun: new Date().toISOString(), lastOutput: output, lastError: null,
-        ...(!manual && task.consecutiveFailures ? { consecutiveFailures: 0 } : {}),
+      }, task.ownerId);
+      else await recordScheduledTaskOutcome(task.id, {
+        runId: scheduledRunRootId, startedAt, succeeded: true, output,
       }, task.ownerId);
       return;
     }
@@ -834,17 +892,9 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       } else if (task.repeat === 'once') {
         await removeTask(task.id, task.ownerId);
       } else {
-        const patch = {
-          lastRun: new Date().toISOString(),
-          lastError: errMsg,
-          consecutiveFailures: (Number(task.consecutiveFailures) || 0) + 1,
-        };
-        if (patch.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          patch.enabled = false;
-          patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${errMsg}`;
-          log.warn('scheduler', 'task auto-disabled (threw)', { taskId: task.id, label: task.label, streak: patch.consecutiveFailures, err: errMsg });
-        }
-        await updateTask(task.id, patch, task.ownerId);
+        await recordScheduledTaskOutcome(task.id, {
+          runId: scheduledRunRootId, startedAt, succeeded: false, lastError: errMsg,
+        }, task.ownerId);
       }
     } catch (stampErr) {
       console.warn('[scheduler] Failed to stamp task failure after throw:', stampErr?.message || stampErr);
@@ -934,28 +984,10 @@ async function finalizeScheduledTask(task, {
     // One-shot tasks vanish after firing.
     await removeTask(task.id, task.ownerId, { completed: succeeded });
   } else {
-    const patch = { lastRun: new Date().toISOString(), ...(runId ? { lastFinalizedRunId: runId } : {}) };
-    // Cross-fire failure tracking. Per-fire retry (MAX_ATTEMPTS) handles
-    // transient blips; this counter handles the broken-forever case — a cron
-    // task whose handler can never succeed shouldn't keep burning tokens every
-    // cycle. Resets to 0 on any successful fire.
-    const prevStreak = Number(task.consecutiveFailures) || 0;
-    if (!succeeded) {
-      patch.lastError = lastError || 'unknown';
-      patch.consecutiveFailures = prevStreak + 1;
-      if (patch.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        patch.enabled = false;
-        patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
-        log.warn('scheduler', 'task auto-disabled', { taskId: task.id, label: task.label, streak: patch.consecutiveFailures, lastError });
-      }
-    } else {
-      patch.lastError = null; // clear stale error on next success
-      if (prevStreak) patch.consecutiveFailures = 0;
-      // Capture the final reply as lastOutput so the tasks drawer can show what
-      // happened, with the full saved result available in the ledger.
-      patch.lastOutput = (output || '').trim().slice(0, 280);
-    }
-    await updateTask(task.id, patch, task.ownerId);
+    await recordScheduledTaskOutcome(task.id, {
+      runId: runId || `completed_${Date.now()}_${randomUUID()}`,
+      startedAt, succeeded, output, lastError,
+    }, task.ownerId);
   }
 
   if (broadcast) broadcast({ type: 'task_ledger_updated', ownerId: task.ownerId, taskId: task.id });

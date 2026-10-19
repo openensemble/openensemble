@@ -5,6 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { createHash, randomUUID } from 'node:crypto';
 import { BASE_DIR } from '../lib/paths.mjs';
 import { withFileLockSync } from '../lib/file-lock.mjs';
 import { resolveWriteTargetSync } from '../lib/write-target.mjs';
@@ -23,68 +24,170 @@ import { activeTasks } from './state.mjs';
 // consumed: the recent rings (check_workers), the watcher chip (UI), and the
 // owning chat session (the coordinator's next turn).
 export const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
-const JOURNAL_LOCK_PATH = `${JOURNAL_PATH}.lock`;
-const JOURNAL_VERSION = 1;
+const JOURNAL_VERSION = 2;
 
 export function _plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
     && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
 
-function _journalReadUnlocked() {
+export function journalEntriesDirectory() {
+  return `${resolveWriteTargetSync(JOURNAL_PATH)}.d`;
+}
+
+function readIndex() {
   let parsed;
   try { parsed = JSON.parse(fs.readFileSync(JOURNAL_PATH, 'utf8')); }
   catch (error) {
-    if (error?.code === 'ENOENT') return {};
+    if (error?.code === 'ENOENT') return { version: JOURNAL_VERSION, entries: {} };
     throw new Error(`background task journal is unreadable: ${error?.message || error}`);
   }
-  // Read the pre-versioned object written by older candidates, then migrate it
-  // on the next successful mutation. Every other shape fails closed.
-  if (_plainObject(parsed) && parsed.version === JOURNAL_VERSION && _plainObject(parsed.entries)) {
-    return parsed.entries;
+  if (_plainObject(parsed) && _plainObject(parsed.entries) && [1, JOURNAL_VERSION].includes(parsed.version)) {
+    if (parsed.version === JOURNAL_VERSION) {
+      for (const pointer of Object.values(parsed.entries)) {
+        if (!_plainObject(pointer) || typeof pointer.file !== 'string'
+            || !/^[a-f0-9]{64}-[a-f0-9-]{36}\.json$/.test(pointer.file)) {
+          throw new Error('background task journal has an invalid entry pointer');
+        }
+      }
+    }
+    return parsed;
   }
-  if (_plainObject(parsed) && !Object.prototype.hasOwnProperty.call(parsed, 'version')) return parsed;
+  if (_plainObject(parsed) && !Object.hasOwn(parsed, 'version')) return { version: 1, entries: parsed };
   throw new Error('background task journal has an invalid shape');
 }
 
-function _journalSaveUnlocked(entries) {
-  if (!_plainObject(entries)) throw new Error('background task journal entries must be an object');
-  const target = resolveWriteTargetSync(JOURNAL_PATH);
-  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+function readEntry(index, taskId) {
+  if (!Object.hasOwn(index.entries, taskId)) return undefined;
+  if (index.version !== JOURNAL_VERSION) return index.entries[taskId];
+  const file = path.join(journalEntriesDirectory(), index.entries[taskId].file);
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) { throw new Error(`background task journal entry ${taskId} is unreadable: ${error?.message || error}`); }
+  if (!_plainObject(saved) || saved.taskId !== taskId || !_plainObject(saved.entry)) {
+    throw new Error(`background task journal entry ${taskId} has an invalid shape`);
+  }
+  return saved.entry;
+}
+
+function readEntries(index) {
+  return Object.fromEntries(Object.keys(index.entries).map(id => [id, readEntry(index, id)]));
+}
+
+function syncDirectory(dir) {
+  let fd;
+  try {
+    fd = fs.openSync(dir, 'r');
+    fs.fsyncSync(fd);
+  } catch (error) {
+    if (!['EINVAL', 'ENOTSUP', 'EISDIR', 'EPERM'].includes(error?.code)) throw error;
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
+function atomicDurableWrite(target, value) {
+  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    const fd = fs.openSync(tmp, 'w', 0o600);
-    try {
-      fs.writeFileSync(fd, JSON.stringify({ version: JOURNAL_VERSION, entries }, null, 2));
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
+    const fd = fs.openSync(tmp, 'wx', 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(value)); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
     fs.renameSync(tmp, target);
-    try {
-      const dirFd = fs.openSync(path.dirname(target), 'r');
-      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-    } catch { /* directory fsync is unavailable on some platforms */ }
-    return true;
-  } catch (e) {
+    syncDirectory(path.dirname(target));
+  } finally {
     try { fs.rmSync(tmp, { force: true }); } catch {}
-    console.warn('[background-tasks] journal write failed:', e.message);
+  }
+}
+
+// Membership changes and multi-job updates prepare fresh entry versions.
+// The manifest is their single commit point, including during migration.
+function commitEntries(index, changes) {
+  const dir = journalEntriesDirectory();
+  const pointers = index.version === JOURNAL_VERSION ? { ...index.entries } : {};
+  const pending = index.version === JOURNAL_VERSION ? changes
+    : new Map([...Object.entries(index.entries), ...changes]);
+  const superseded = [];
+  for (const [taskId, entry] of pending) {
+    if (pointers[taskId]) superseded.push(pointers[taskId].file);
+    if (entry === undefined) { delete pointers[taskId]; continue; }
+    if (!_plainObject(entry)) throw new Error('background task journal entries must be objects');
+    const file = `${createHash('sha256').update(taskId).digest('hex')}-${randomUUID()}.json`;
+    atomicDurableWrite(path.join(dir, file), { taskId, entry });
+    Object.defineProperty(pointers, taskId, { value: { file }, enumerable: true, configurable: true, writable: true });
+  }
+  atomicDurableWrite(resolveWriteTargetSync(JOURNAL_PATH), { version: JOURNAL_VERSION, entries: pointers });
+  // Cleanup is after the durable commit. Leftovers from an interrupted write
+  // are harmless and are reclaimed by the next full snapshot mutation.
+  for (const file of superseded) {
+    try { fs.unlinkSync(path.join(dir, file)); } catch {}
+  }
+  return true;
+}
+
+function reclaimOrphans(index) {
+  const dir = journalEntriesDirectory();
+  const referenced = new Set(Object.values(index.entries).map(pointer => pointer.file));
+  try {
+    for (const file of fs.readdirSync(dir)) {
+      if (/^[a-f0-9]{64}-[a-f0-9-]{36}\.json$/.test(file) && !referenced.has(file)) {
+        try { fs.unlinkSync(path.join(dir, file)); } catch {}
+      }
+    }
+  } catch {}
+}
+
+function locked(fn) {
+  return withFileLockSync(`${resolveWriteTargetSync(JOURNAL_PATH)}.lock`, fn, { timeoutMs: 5_000 });
+}
+
+export function _journalSnapshot() {
+  return locked(() => readEntries(readIndex()));
+}
+
+export function _journalReadEntry(taskId) {
+  return locked(() => readEntry(readIndex(), taskId));
+}
+
+export function _journalMutateEntry(taskId, mutator) {
+  try {
+    return locked(() => {
+      const index = readIndex();
+      const entries = { [taskId]: readEntry(index, taskId) };
+      const result = mutator(entries);
+      if (result === false) return false;
+      if (index.version === JOURNAL_VERSION && Object.hasOwn(index.entries, taskId)
+          && entries[taskId] !== undefined) {
+        if (!_plainObject(entries[taskId])) throw new Error('background task journal entries must be objects');
+        // A single existing job commits at its own atomic file replacement.
+        // Readers and multi-job transactions hold this same lock, so the
+        // manifest need not be rewritten on every action start/result.
+        atomicDurableWrite(path.join(journalEntriesDirectory(), index.entries[taskId].file), {
+          taskId, entry: entries[taskId],
+        });
+      } else commitEntries(index, new Map([[taskId, entries[taskId]]]));
+      return result ?? true;
+    });
+  } catch (error) {
+    console.warn('[background-tasks] journal mutation refused:', error?.message || error);
     return false;
   }
 }
 
-export function _journalSnapshot() {
-  return withFileLockSync(JOURNAL_LOCK_PATH, () => _journalReadUnlocked(), { timeoutMs: 5_000 });
-}
-
 export function _journalMutate(mutator) {
   try {
-    return withFileLockSync(JOURNAL_LOCK_PATH, () => {
-      const entries = _journalReadUnlocked();
+    return locked(() => {
+      const index = readIndex();
+      const entries = readEntries(index);
+      const before = new Map(Object.entries(entries).map(([id, entry]) => [id, JSON.stringify(entry)]));
       const result = mutator(entries);
-      if (!_journalSaveUnlocked(entries)) return false;
+      if (result === false) return false;
+      const changes = new Map();
+      for (const id of new Set([...before.keys(), ...Object.keys(entries)])) {
+        if (before.get(id) !== JSON.stringify(entries[id])) changes.set(id, entries[id]);
+      }
+      if (changes.size || index.version !== JOURNAL_VERSION) commitEntries(index, changes);
+      reclaimOrphans(readIndex());
       return result ?? true;
-    }, { timeoutMs: 5_000 });
+    });
   } catch (error) {
     console.warn('[background-tasks] journal mutation refused:', error?.message || error);
     return false;
@@ -94,7 +197,7 @@ export function _journalMutate(mutator) {
 export function _journalAdd(taskId) {
   const rec = activeTasks.get(taskId);
   if (!rec) return false;
-  return _journalMutate(entries => { entries[taskId] = {
+  return _journalMutateEntry(taskId, entries => { entries[taskId] = {
     ...entries[taskId],
     // Runtime-model refreshes must not overwrite newer tool checkpoints.
     ...(rec.checkpoint && !entries[taskId]?.checkpoint ? { checkpoint: rec.checkpoint } : {}),
@@ -141,16 +244,16 @@ export function _journalAdd(taskId) {
 }
 
 export function _journalRemove(taskId) {
-  return _journalMutate(entries => {
-    if (!(taskId in entries)) return true;
+  return _journalMutateEntry(taskId, entries => {
+    if (!entries[taskId]) return true;
     delete entries[taskId];
     return true;
   });
 }
 
 export function _journalMarkCompletion(taskId, completion) {
-  return _journalMutate(entries => {
-    if (!(taskId in entries)) return false;
+  return _journalMutateEntry(taskId, entries => {
+    if (!entries[taskId]) return false;
     entries[taskId] = {
       ...entries[taskId],
       completion: {

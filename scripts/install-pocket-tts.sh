@@ -21,13 +21,13 @@
 # Exit codes: 0 ok (responding on PORT) | 1 generic | 2 missing prereq
 #
 # Env overrides (optional):
-#   OE_HOME            default $HOME/.openensemble
+#   OE_HOME            default the installation containing this script
 #   POCKET_TTS_PORT    default 5155
 #   POCKET_TTS_MIRROR  default openensemble/pocket-tts
 
 set -eu
 
-OE_HOME="${OE_HOME:-$HOME/.openensemble}"
+OE_HOME="${OE_HOME:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 VENV="$OE_HOME/runtime/pocket-tts-venv"
 MODEL_DIR="$OE_HOME/models/tts/pocket-tts"
 HF_CACHE="$MODEL_DIR/hf"
@@ -43,16 +43,14 @@ fail()  { echo "[pocket-tts-install] FAIL: $*" >&2; exit "${2:-1}"; }
 
 # ── prerequisites ─────────────────────────────────────────────────────────────
 step "Checking dependencies..."
-command -v python3 >/dev/null    || fail "python3 not found" 2
+bash "$OE_HOME/scripts/ensure-python-venv.sh" || fail "Python virtual-environment setup failed; see above." 2
 command -v systemctl >/dev/null  || fail "systemctl not found (need systemd-user)" 2
-python3 -c 'import venv'      2>/dev/null || fail "python3 'venv' missing — sudo apt install -y python3-full" 2
-python3 -c 'import ensurepip' 2>/dev/null || fail "python3 'ensurepip' missing — sudo apt install -y python3-full" 2
 systemctl --user list-units --no-pager >/dev/null 2>&1 \
                                  || fail "systemd --user not running" 2
 [ -f "$SERVER_SCRIPT" ] || fail "pocket-tts-server.py not found at $SERVER_SCRIPT" 2
 
 # ── venv + pip ────────────────────────────────────────────────────────────────
-if [ ! -x "$VENV/bin/python" ]; then
+if [ ! -x "$VENV/bin/pip" ] || ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
   step "Creating venv at $VENV..."
   mkdir -p "$(dirname "$VENV")"
   python3 -m venv "$VENV"

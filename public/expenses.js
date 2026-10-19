@@ -338,8 +338,12 @@ function setExpChartPeriod(period) {
   renderExpChart();
 }
 
-function renderExpChart() {
+async function renderExpChart() {
   if (!_expChartData) return;
+  const generation = _authGeneration;
+  try { if (typeof Chart === 'undefined') await loadOptionalScript('/vendor/chart.umd.min.js'); }
+  catch (error) { showToast(error.message); return; }
+  if (generation !== _authGeneration || _authSuspended || !_expChartData) return;
   const { byMonth, allTxns, year, curMonth } = _expChartData;
   const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -431,7 +435,12 @@ function expChartHighlight(idx) {
 }
 
 let _expTimeChart = null;
-function renderExpTimeChart(labels, values) {
+let _expTimeChartRender = 0;
+async function renderExpTimeChart(labels, values) {
+  const render = ++_expTimeChartRender, generation = _authGeneration;
+  try { if (typeof Chart === 'undefined' && labels.length) await loadOptionalScript('/vendor/chart.umd.min.js'); }
+  catch (error) { showToast(error.message); return; }
+  if (render !== _expTimeChartRender || generation !== _authGeneration || _authSuspended) return;
   const canvas = document.getElementById('expTimeChart');
   if (!canvas) return;
   if (_expTimeChart) { _expTimeChart.destroy(); _expTimeChart = null; }

@@ -258,6 +258,18 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       console.log(`[anthropic] cache: mode=${tierMode} created=${cacheCreated} read=${cacheRead} uncached=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
     }
 
+    // Refuse incomplete tool arguments and preserve the partial draft as
+    // evidence. Retry ownership above this adapter guards completed effects.
+    if (!sawTerminal && !stopReason) {
+      if (totalInputTokens || totalOutputTokens) {
+        yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens,
+          cachedTokens: totalCacheRead, cacheCreatedTokens: totalCacheCreated, provider: 'anthropic', model: agent.model };
+      }
+      yield { type: 'error', code: 'incomplete_response', retryable: true, content: textContent,
+        message: 'Anthropic: the response was interrupted before its completion marker. The partial response does not confirm completion.' };
+      return;
+    }
+
     if (finalRound && (toolUseBlocks.size > 0 || serverToolUseObserved)) {
       if (textContent.trim()) yield { type: 'replace', text: '' };
       if (totalInputTokens || totalOutputTokens) {
@@ -382,15 +394,6 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       continue;
     }
 
-    // The turn is complete if we saw the `message_stop` envelope OR a
-    // `message_delta` carrying a real `stop_reason` (the actual completion
-    // signal — message_stop is just the closing envelope, and a stream can end
-    // right after stop_reason). Only warn when NEITHER arrived, i.e. the SSE
-    // stream truly ended mid-turn, so the truncated text isn't silently treated
-    // as a complete reply.
-    if (!sawTerminal && !stopReason) {
-      yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
-    }
     if (finalRound && !textContent.trim()) {
       if (totalInputTokens || totalOutputTokens) {
         yield {

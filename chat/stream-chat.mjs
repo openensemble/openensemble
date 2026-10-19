@@ -1674,12 +1674,11 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   };
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);
-    // consumeProvider returns empty content on the error path, so without
-    // providerError here the trace records the bare placeholder and the real
-    // reason (rate limit, 5xx, malformed tool call) is lost for good.
+    // Keep the provider failure separate from any preserved partial draft so
+    // the trace records both the evidence and why the turn failed.
     const baseTraceError = turnOpts?.documentRequest
       ? (compactDocumentFallback(assistantContent) || providerError || 'Provider turn errored')
-      : (assistantContent || providerError || 'Provider turn errored');
+      : (providerError || assistantContent || 'Provider turn errored');
     const identityDurabilityWarning = toolIdentityDurabilityWarning(toolIdentityAnomalies);
     const traceError = identityDurabilityWarning
       ? `${baseTraceError} ${identityDurabilityWarning}`

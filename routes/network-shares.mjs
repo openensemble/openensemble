@@ -1,6 +1,7 @@
 import { requireAuth, readBody, getUserRole } from './_helpers.mjs';
 import { isSkillRuntimeEnabledForUser } from '../roles.mjs';
 import { networkShares } from '../lib/network-shares.mjs';
+import { networkShareSetupStatus } from '../lib/network-share-setup.mjs';
 
 export async function handle(req, res) {
   const url = req.url.split('?')[0];
@@ -14,6 +15,7 @@ export async function handle(req, res) {
   }
   try {
     if (url === '/api/network-shares' && req.method === 'GET') send(200, { shares: await networkShares.list(userId) });
+    else if (url === '/api/network-shares/setup' && req.method === 'GET') send(200, await networkShareSetupStatus());
     else if (req.method === 'POST') {
       let body;
       try { body = JSON.parse(await readBody(req)); } catch { send(400, { error: 'Invalid request body.' }); return true; }
@@ -30,7 +32,8 @@ export async function handle(req, res) {
   } catch (e) {
     const code = e.code || 'SHARE_ERROR';
     const message = e.code ? e.message : 'The share operation failed.';
-    send(code === 'NOT_FOUND' ? 404 : code === 'INVALID' ? 400 : 409, { error: message, code });
+    const setup = code === 'DEPENDENCY' ? await networkShareSetupStatus().catch(() => undefined) : undefined;
+    send(code === 'NOT_FOUND' ? 404 : code === 'INVALID' ? 400 : 409, { error: message, code, setup });
   }
   return true;
 }

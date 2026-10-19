@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { currentTaskContext } from '../lib/task-proxy-context.mjs';
 import { getProcessIdentity } from '../lib/file-lock.mjs';
 import { stableAgentRef } from '../lib/agent-ref.mjs';
-import { _journalMutate, _journalSnapshot } from './journal.mjs';
+import { _journalMutateEntry, _journalReadEntry } from './journal.mjs';
 import { activeTasks } from './state.mjs';
 
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -32,7 +32,7 @@ export function taskCheckpoint(agent, task, { userId, note = null, disabledReaso
 export function changeCheckpoint(taskId, userId, change) {
   let result;
   let failure;
-  const ok = _journalMutate(entries => {
+  const ok = _journalMutateEntry(taskId, entries => {
     const entry = entries[taskId];
     if (!entry || entry.userId !== userId || !entry.checkpoint || entry.completion) return false;
     try { result = change(entry.checkpoint, entry); }
@@ -123,7 +123,7 @@ export function checkpointNote(cp) {
 }
 
 export function getJobCheckpoint(userId, id) {
-  const entry = _journalSnapshot()[id];
+  const entry = _journalReadEntry(id);
   if (!entry || entry.userId !== userId || !entry.checkpoint) return null;
   return entry;
 }

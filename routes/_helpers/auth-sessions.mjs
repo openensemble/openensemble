@@ -40,6 +40,63 @@ export async function verifyPassword(pw, stored) {
 
 // ── Session tokens ───────────────────────────────────────────────────────────
 const sessions = new Map();
+const sessionSockets = new Map();
+const socketSessions = new WeakMap();
+
+function detachSessionSocket(ws) {
+  const token = socketSessions.get(ws);
+  socketSessions.delete(ws);
+  const sockets = sessionSockets.get(token);
+  sockets?.delete(ws);
+  if (!sockets?.size) sessionSockets.delete(token);
+}
+
+function rejectSessionSocket(ws) {
+  detachSessionSocket(ws);
+  ws._authenticated = false;
+  ws._sessionRevoked = true;
+  try { ws.close(4001, 'Session expired or revoked'); } catch {}
+  const timer = setTimeout(() => { try { ws.terminate?.(); } catch {} }, 1000);
+  timer.unref?.();
+}
+
+function forgetSession(token) {
+  const removed = sessions.delete(token);
+  for (const ws of [...(sessionSockets.get(token) || [])]) rejectSessionSocket(ws);
+  return removed;
+}
+
+/** Bind browser, desktop, node and terminal sockets to their source session. */
+export function bindSessionSocket(ws, token) {
+  if (!token || getSessionUserId(token, { touch: false }) !== ws._userId) {
+    rejectSessionSocket(ws);
+    return false;
+  }
+  detachSessionSocket(ws);
+  socketSessions.set(ws, token);
+  if (!sessionSockets.has(token)) sessionSockets.set(token, new Set());
+  sessionSockets.get(token).add(ws);
+  ws.once('close', () => detachSessionSocket(ws));
+  ws.once('error', () => { if (!ws._sessionRevoked) rejectSessionSocket(ws); });
+  return true;
+}
+
+export function validateSessionSocket(ws, { touch = false } = {}) {
+  const token = socketSessions.get(ws);
+  if (ws._sessionRevoked || !token || getSessionUserId(token, { touch }) !== ws._userId) {
+    if (!ws._sessionRevoked) rejectSessionSocket(ws);
+    return false;
+  }
+  return true;
+}
+
+// Passive checks close idle/expired connections without keeping sessions alive.
+// Explicit revocations close them synchronously through forgetSession().
+setInterval(() => {
+  for (const sockets of sessionSockets.values()) {
+    for (const ws of [...sockets]) validateSessionSocket(ws);
+  }
+}, 15000).unref?.();
 
 function sessionCreatedAt(s) {
   return s.createdAt ?? (s.expires - 7 * 24 * 60 * 60 * 1000);
@@ -62,7 +119,7 @@ function shouldPruneSession(s, now = Date.now()) {
 setInterval(() => {
   const now = Date.now();
   let removed = 0;
-  for (const [token, s] of sessions) if (shouldPruneSession(s, now)) { sessions.delete(token); removed++; }
+  for (const [token, s] of sessions) if (shouldPruneSession(s, now)) { forgetSession(token); removed++; }
   if (removed) persistSessions();
 }, 60 * 60_000).unref?.();
 
@@ -185,7 +242,7 @@ export function getSessionMeta(token) {
   return { userId, kind: s.kind || 'browser', deviceId: s.deviceId || null, createdAt: s.createdAt || null };
 }
 
-export function getSessionUserId(token) {
+export function getSessionUserId(token, { touch = true } = {}) {
   if (!token) return null;
   const s = sessions.get(token);
   if (!s) return null;
@@ -198,10 +255,11 @@ export function getSessionUserId(token) {
   if (isPersistentDeviceKind(s.kind)) {
     const hardCap = sessionHardCap(s);
     if (now >= hardCap) {
-      sessions.delete(token); persistSessions();
+      forgetSession(token); persistSessions();
       console.log(`[sessions] ${s.kind} session hit 90-day hard cap, revoking. User must re-pair.`);
       return null;
     }
+    if (!touch) return s.userId;
     s.lastActivity = now;
     s.expires = Math.min(now + 7 * 24 * 60 * 60 * 1000, hardCap);
     // Persist only when the expiry has advanced meaningfully SINCE WE LAST
@@ -218,17 +276,17 @@ export function getSessionUserId(token) {
     }
     return s.userId;
   }
-  if (s.expires < now) { sessions.delete(token); persistSessions(); return null; }
+  if (s.expires < now) { forgetSession(token); persistSessions(); return null; }
   try {
     const cfg = loadConfig();
     const idleHours = cfg.sessionExpiryHours ?? 0;
     if (idleHours > 0 && s.lastActivity) {
       if ((now - s.lastActivity) > idleHours * 3600000) {
-        sessions.delete(token); persistSessions(); return null;
+        forgetSession(token); persistSessions(); return null;
       }
     }
   } catch (e) { console.warn('[sessions] Idle check error:', e.message); }
-  s.lastActivity = now;
+  if (touch) s.lastActivity = now;
   return s.userId;
 }
 
@@ -254,11 +312,11 @@ export function getSessionForTests(token) {
 }
 
 export function clearSessionStoreForTests() {
-  sessions.clear();
+  for (const token of sessions.keys()) forgetSession(token);
   persistSessions();
 }
 
-export function deleteSession(token) { sessions.delete(token); persistSessions(); }
+export function deleteSession(token) { forgetSession(token); persistSessions(); }
 /**
  * Clear all browser sessions for a user. Persistent-device sessions (nodes,
  * voice devices) are preserved — they represent long-lived hardware
@@ -268,7 +326,7 @@ export function deleteSession(token) { sessions.delete(token); persistSessions()
  */
 export function clearUserSessions(userId) {
   for (const [token, s] of sessions) {
-    if (s.userId === userId && !isPersistentDeviceKind(s.kind)) sessions.delete(token);
+    if (s.userId === userId && !isPersistentDeviceKind(s.kind)) forgetSession(token);
   }
   persistSessions();
 }
@@ -283,7 +341,7 @@ export function clearUserNodeSessions(userId) {
   let removed = 0;
   for (const [token, s] of sessions) {
     if (s.userId === userId && s.kind === 'node') {
-      sessions.delete(token);
+      forgetSession(token);
       removed++;
     }
   }
@@ -301,7 +359,7 @@ export function clearUserVoiceDeviceSessions(userId) {
   let removed = 0;
   for (const [token, s] of sessions) {
     if (s.userId === userId && s.kind === 'voice-device') {
-      sessions.delete(token);
+      forgetSession(token);
       removed++;
     }
   }
@@ -315,7 +373,7 @@ export function clearUserVoiceDeviceSessions(userId) {
  */
 export function deleteSessionByToken(token) {
   if (!token || !sessions.has(token)) return false;
-  sessions.delete(token);
+  forgetSession(token);
   persistSessions();
   return true;
 }
@@ -328,7 +386,7 @@ export function deleteSessionByToken(token) {
 export function clearUserSessionsExcept(userId, exceptToken) {
   let removed = 0;
   for (const [token, s] of sessions) {
-    if (s.userId === userId && token !== exceptToken && !isPersistentDeviceKind(s.kind)) { sessions.delete(token); removed++; }
+    if (s.userId === userId && token !== exceptToken && !isPersistentDeviceKind(s.kind)) { forgetSession(token); removed++; }
   }
   persistSessions();
   return removed;
@@ -378,7 +436,7 @@ export function getUserNodeSessionTokens(userId) {
 export function revokeSessionByPrefix(userId, prefix) {
   for (const [token, s] of sessions) {
     if (s.userId === userId && token.startsWith(prefix)) {
-      sessions.delete(token);
+      forgetSession(token);
       persistSessions();
       return true;
     }
@@ -488,9 +546,9 @@ setInterval(() => {
   for (const [k, v] of mediaTokens) if (v.expires < now) mediaTokens.delete(k);
 }, 60_000).unref?.();
 
-export function createMediaToken(userId) {
+export function createMediaToken(userId, sessionToken = null) {
   const token = randomBytes(24).toString('hex');
-  mediaTokens.set(token, { userId, expires: Date.now() + MEDIA_TOKEN_TTL_MS });
+  mediaTokens.set(token, { userId, sessionToken, expires: Date.now() + MEDIA_TOKEN_TTL_MS });
   return { token, expiresIn: MEDIA_TOKEN_TTL_MS / 1000 };
 }
 
@@ -499,6 +557,9 @@ export function consumeMediaToken(token) {
   const entry = mediaTokens.get(token);
   if (!entry) return null;
   if (entry.expires < Date.now()) { mediaTokens.delete(token); return null; }
+  if (entry.sessionToken && getSessionUserId(entry.sessionToken, { touch: false }) !== entry.userId) {
+    mediaTokens.delete(token); return null;
+  }
   return entry.userId;
 }
 
@@ -516,9 +577,9 @@ setInterval(() => {
   for (const [k, v] of ticketTokens) if (v.expires < now) ticketTokens.delete(k);
 }, 60_000).unref?.();
 
-export function createTicket(userId, scope, meta = {}, ttlMs = TICKET_TTL_MS) {
+export function createTicket(userId, scope, meta = {}, ttlMs = TICKET_TTL_MS, sessionToken = null) {
   const token = randomBytes(24).toString('hex');
-  ticketTokens.set(token, { userId, scope, meta, expires: Date.now() + ttlMs });
+  ticketTokens.set(token, { userId, scope, meta, sessionToken, expires: Date.now() + ttlMs });
   return { token, expiresIn: Math.round(ttlMs / 1000) };
 }
 
@@ -529,7 +590,8 @@ export function consumeTicket(token, scope) {
   ticketTokens.delete(token); // single-use
   if (entry.expires < Date.now()) return null;
   if (entry.scope !== scope) return null;
-  return { userId: entry.userId, meta: entry.meta };
+  if (entry.sessionToken && getSessionUserId(entry.sessionToken, { touch: false }) !== entry.userId) return null;
+  return { userId: entry.userId, meta: entry.meta, sessionToken: entry.sessionToken };
 }
 
 export function requireAuth(req, res, { allowMediaToken = true } = {}) {

@@ -178,14 +178,53 @@ credentials, not the remote share's contents.
 
 ### Host setup and troubleshooting
 
-The initial implementation uses Linux FUSE, rclone's SMB client, and fuse-nfs.
-On Debian, Ubuntu, or Mint, an administrator can prepare the OE installation
-with `scripts/install-share-tools.sh`. It downloads architecture-matched client
-packages and builds a pinned fuse-nfs client under OE's ignored `bin/` directory,
-without installing system packages or changing existing mounts. The host needs
-FUSE (`/dev/fuse` and `fusermount3` or `fusermount`), a C compiler, Debian package
-tools, and curl. Container deployments must expose FUSE. Other Linux
-distributions can provide rclone, fuse-nfs, and showmount on the service PATH.
+Network shares use Linux FUSE, rclone's SMB client, and fuse-nfs. On Debian,
+Ubuntu, or Mint, `install.sh` installs the host prerequisites and prepares the
+share clients automatically. Existing installations also install missing
+clients on the first discovery or connection attempt. Concurrent requests wait
+for the same installation. On a normal Linux host, the installer also loads the
+FUSE kernel module if needed. Container hosts must grant device access outside
+the guest.
+
+Ask **“Check network-share support”** to check dependencies and mount/unmount a
+temporary local test folder. This does not contact your NAS or read your files.
+Settings → Network Shares also shows missing setup. FUSE failures are reported
+separately from SMB login and NFS export errors.
+
+An owner/admin can ask **“Set up network-share support”** to repair the local
+installation. OE installs missing prerequisites, prepares clients, and runs the
+mount test again. If sudo needs a password, enter it only in OE's protected
+form. Ordinary account users can check support and ask an administrator to fix it.
+
+For **Docker Compose or Proxmox LXC**, pair the Linux host as a node with full
+access and give OE the exact container name/ID. OE verifies the running
+container's identity before configuring it. Proxmox setup merges `fuse=1`
+without discarding existing feature flags. Docker setup requires the original
+Compose files, checks ports and mounts against the running container, pins its
+current image and environment, verifies that OE's config/profiles/restart
+checkpoint are on persistent volumes, and stages a private configuration on
+the host. Edited Compose settings must be reconciled before automatic recreation.
+It passes `/dev/fuse`, adds `SYS_ADMIN`, and uses an OE AppArmor policy restricted
+to FUSE mounts in OE's temporary share directories where AppArmor is enabled.
+Existing custom security policies and unsupported runtimes require their
+administrator; OE does not disable those protections.
+
+OE reports when the container needs restarting/recreating. A protected
+**RESTART** confirmation saves the conversation and schedules that operation on
+the host; OE checks support again when it returns. A prepared configuration is
+not reported as a successful mount. Host receipts and the staged Docker config
+are under `/var/lib/openensemble-share-setup/`; keep using the returned staged
+Compose configuration when managing that deployment, or merge its FUSE settings
+into the original Compose files. It contains the effective environment and is
+readable only by root. Proxmox documents FUSE limitations with freezer-based
+snapshot/suspend backups; use a compatible backup mode or host-mounted shares.
+
+The client installer, `scripts/install-share-tools.sh`, downloads
+architecture-matched packages and builds a pinned fuse-nfs client under OE's
+ignored `bin/` directory. It preserves existing mounts and skips clients that
+are already ready. An administrator can also re-run `install.sh` to repair host
+prerequisites. Other Linux distributions can provide rclone, fuse-nfs, and
+showmount on the service PATH.
 
 For **access denied**, check the SMB login/domain or the NFS export's host and
 UID/GID rules. For **unavailable**, check the address, firewall, and server.

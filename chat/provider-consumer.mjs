@@ -468,6 +468,7 @@ export async function* consumeProvider(providerGen, {
     }
     if (event.type === 'error') {
       errored = true;
+      if (typeof event.content === 'string') assistantContent = event.content;
       // Keep WHY the turn died. Without this the caller only knows `errored`
       // and every failure is logged and traced as the placeholder "Provider
       // turn errored", which leaves a rate limit, a 500, and a malformed tool
@@ -501,6 +502,6 @@ export async function* consumeProvider(providerGen, {
     }
   }
   return errored
-    ? { assistantContent: '', errored: true, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
+    ? { assistantContent, errored: true, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
     : { assistantContent, errored: false, providerError: null, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages };
 }
