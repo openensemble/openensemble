@@ -59,6 +59,11 @@ const TRANSIENT_STREAM_ERROR_CODES = new Set([
 const MAX_TRANSIENT_STREAM_RETRIES = 2;
 const TRANSIENT_STREAM_RETRY_BASE_MS = 1_000;
 
+// Provider-native continuation state belongs only to this in-flight generator,
+// never to persisted chat messages, UI events, or another provider's history.
+const responsesOutputItems = Symbol('responsesOutputItems');
+const CONTINUATION_ITEM_TYPES = new Set(['reasoning', 'web_search_call', 'message', 'function_call']);
+
 const labRequestsByTurn = new WeakMap();
 const LAB_MAX_OBSERVED_OUTPUT_TOKENS_PER_RESPONSE = 4_096;
 const LAB_DEFAULT_PROVIDER_REQUEST_CAP = 4;
@@ -83,6 +88,10 @@ export function toResponsesInput(messages) {
   //   { role: 'tool', tool_call_id, content: string }
   const items = [];
   for (const m of messages) {
+    if (Array.isArray(m[responsesOutputItems])) {
+      items.push(...m[responsesOutputItems]);
+      continue;
+    }
     if (m.role === 'system') {
       // Merged into top-level `instructions`; skip here.
       continue;
@@ -546,6 +555,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       store:        false,
       stream:       true,
     };
+    if (isCodex) body.include = ['reasoning.encrypted_content'];
     if (process.env.OPENENSEMBLE_LAB === '1' && !labCodexRelay) {
       // Public Responses-compatible providers accept this request-side cap.
       // ChatGPT's internal Codex endpoint does not; the relay bounds transport
@@ -762,6 +772,17 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     }
 
     let textContent  = '';
+    const completedOutputItems = new Map();
+    const rememberCompletedOutput = (item, outputIndex) => {
+      if (!isCodex || !CONTINUATION_ITEM_TYPES.has(item?.type)) return;
+      const key = item.id ?? outputIndex;
+      if (key == null) return;
+      const prior = completedOutputItems.get(key);
+      completedOutputItems.set(key, {
+        index: Number.isInteger(outputIndex) ? outputIndex : (prior?.index ?? completedOutputItems.size),
+        item: { ...prior?.item, ...item },
+      });
+    };
     const finalAnswerMessages = new Map();
     const rememberFinalAnswer = (item, outputIndex) => {
       if (item?.type !== 'message' || item.phase !== 'final_answer') return;
@@ -914,6 +935,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       }
       if (t === 'response.output_item.done') {
         const item = ev.item ?? {};
+        rememberCompletedOutput(item, ev.output_index);
         rememberFinalAnswer(item, ev.output_index);
         if (item.type === 'function_call') {
           const callId = item.call_id ?? item.id;
@@ -967,6 +989,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         completionCount++;
         loopCompletionCount++;
         for (const [outputIndex, item] of (ev.response?.output ?? []).entries()) {
+          rememberCompletedOutput(item, outputIndex);
           rememberFinalAnswer(item, outputIndex);
           if (item?.type === 'image_generation_call') {
             const image = recordGeneratedImage(item, `response-output:${outputIndex}`);
@@ -1173,14 +1196,36 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         }
       }
 
-      if (deferredConsumers.size) {
-        const assistantToolCalls = blocks.map(({ block }) => ({
-          id: block.id,
-          type: 'function',
-          function: { name: block.name, arguments: block.argsJson },
-        }));
+      const assistantToolCalls = blocks.map(({ block }) => ({
+        id: block.id, type: 'function',
+        function: { name: block.name, arguments: block.argsJson },
+      }));
+      if (isCodex) {
+        // store:false cannot recover discarded reasoning or hosted-search
+        // state by response ID. Replay completed output in provider order,
+        // including message phases, before adding our function results.
+        // Only the validated function calls below may enter this continuation.
+        const validatedCalls = new Map(blocks.map(({ block }) => [block.id, block]));
+        const representedCalls = new Set();
+        const output = [...completedOutputItems.values()].sort((a, b) => a.index - b.index)
+          .flatMap(({ item }) => {
+            if (item.type !== 'function_call') return [item];
+            const block = validatedCalls.get(item.call_id ?? item.id);
+            if (!block || representedCalls.has(block.id)) return [];
+            representedCalls.add(block.id);
+            return [{ ...item, call_id: block.id, name: block.name, arguments: block.argsJson }];
+          });
+        for (const { block } of blocks) {
+          if (!representedCalls.has(block.id)) output.push({
+            type: 'function_call', call_id: block.id, name: block.name, arguments: block.argsJson,
+          });
+        }
+        working.push({ [responsesOutputItems]: output });
+      } else {
         working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
+      }
 
+      if (deferredConsumers.size) {
         for (const { block, toolArgs } of blocks) {
           if (!deferredConsumers.has(block.id)) {
             yield { type: 'tool_call', name: block.name, args: toolArgs, toolCallId: block.id };
@@ -1250,8 +1295,6 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
           return { block, toolArgs, result: text, _notify, _images, events };
         }));
-        const assistantToolCalls = results.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
-        working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
         for (const { block, toolArgs, result, _notify, events } of results) {
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id };
@@ -1279,8 +1322,6 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       }
 
-      const assistantToolCalls = blocks.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
-      working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
       const seqResults = [];
       const _imagesByBlockId = new Map();
       // Terminal handoff: a tool (ask_agent's forward pipeline) may signal that
