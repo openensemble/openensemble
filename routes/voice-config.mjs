@@ -97,9 +97,23 @@ export async function handle(req, res) {
         if (a && typeof a === 'object') a.ownerUserId = userId;
       }
     }
-    const saved = writeVoiceConfig(userId, assignments, {
-      userExists: (id) => !!getUser(id),
-    });
+    let saved;
+    try {
+      saved = writeVoiceConfig(userId, assignments, {
+        userExists: (id) => !!getUser(id),
+      });
+    } catch (error) {
+      if (error?.code === 'duplicate_wake_word') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: error.message,
+          code: error.code,
+          slots: error.slots,
+        }));
+        return true;
+      }
+      throw error;
+    }
     // SAVE ONLY — no auto-push. The device gets changes when the user clicks
     // Push (POST /api/voice-config/push below).
     res.writeHead(200, { 'Content-Type': 'application/json' });

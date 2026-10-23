@@ -1296,6 +1296,9 @@ function renderVoiceConfigPanel(roster, deviceCount) {
   const assignedSlots = Array.from({ length: MAX_SLOTS }, (_, n) => n)
     .filter(n => (assignments[n] ?? assignments[String(n)])?.ownerUserId);
   const assignedUserIds = new Set(assignedSlots.map(n => (assignments[n] ?? assignments[String(n)]).ownerUserId));
+  const usedWakewordIds = new Set(assignedSlots
+    .map(n => (assignments[n] ?? assignments[String(n)])?.wakewordId)
+    .filter(Boolean));
 
   const slotBlocks = assignedSlots.map(slotIdx => {
     const a = assignments[slotIdx] ?? assignments[String(slotIdx)];
@@ -1393,7 +1396,9 @@ function renderVoiceConfigPanel(roster, deviceCount) {
     }
     const curWw = a?.wakewordId || '';
     const wwOpts = ['<option value="">(no wake word — pick one)</option>']
-      .concat(_wakewordLibrary.map(w => `<option value="${escHtml(w.id)}" ${w.id === curWw ? 'selected' : ''}>${escHtml(wakewordDisplayName(w))}</option>`))
+      .concat(_wakewordLibrary
+        .filter(w => w.id === curWw || !usedWakewordIds.has(w.id))
+        .map(w => `<option value="${escHtml(w.id)}" ${w.id === curWw ? 'selected' : ''}>${escHtml(wakewordDisplayName(w))}</option>`))
       .join('');
     const wwEntry = curWw ? _wakewordLibrary.find(w => w.id === curWw) : null;
     const defaultCutoff = wwEntry?.probability_cutoff;
@@ -1594,9 +1599,8 @@ window.renameDevice = function (id, ev) {
   if (v) patchDevice(id, { name: v });
 };
 // Save the current _voiceConfig.slot_assignments back to the server.
-// PUT /api/voice-config fans out wake-word OTA pushes to every device
-// paired to the user. Returns the new server-side config (with bumped
-// version) so we keep _voiceConfig in lockstep.
+// Returns true on success and keeps _voiceConfig in lockstep with the saved
+// server-side version. Saving and device pushes are deliberately separate.
 async function saveVoiceConfig() {
   try {
     const r = await fetch('/api/voice-config', {
@@ -1604,14 +1608,16 @@ async function saveVoiceConfig() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ slot_assignments: _voiceConfig.slot_assignments }),
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
     _voiceConfig = data.config;
     // Save only — no push here (decoupled). Stay silent on success: saves fire
     // on every field change, and a toast per keystroke is noise. The Push
     // button is where the user gets explicit "reached the device" feedback.
+    return true;
   } catch (e) {
     showDeviceToast(`Save failed: ${e.message}`, { variant: 'error' });
+    return false;
   }
 }
 
@@ -1779,6 +1785,18 @@ window.setSlotWakeword = function (slot, ev) {
   // Re-selecting the same option still fires `change` — skip the PUT (and
   // its OTA push) to avoid pointless flash writes when nothing changed.
   if ((existing.wakewordId ?? null) === next) return;
+  if (next) {
+    const duplicate = Object.entries(_voiceConfig.slot_assignments || {})
+      .find(([otherSlot, assignment]) => Number(otherSlot) !== Number(slot)
+        && assignment?.wakewordId === next);
+    if (duplicate) {
+      showDeviceToast(
+        `That wake word is already assigned to slot ${Number(duplicate[0])}. Choose another wake word.`,
+        { variant: 'error' });
+      ev.target.value = existing.wakewordId || '';
+      return;
+    }
+  }
   // Switching wake words drops BOTH the cutoff and avg-cutoff overrides — the
   // new word has its own manifest default (the UI re-displays cutoff from the
   // new manifest automatically) and the server-side avg gate goes back to off.
@@ -1806,7 +1824,7 @@ window.setSlotProbability = function (slot, ev) {
 // server-side; THIS is the only thing that OTAs the device. Saves any pending
 // edit first so the push reflects what's on screen.
 window.pushVoiceConfig = async function () {
-  await saveVoiceConfig();
+  if (!await saveVoiceConfig()) return;
   try {
     const r = await fetch('/api/voice-config/push', { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
