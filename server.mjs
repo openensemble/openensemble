@@ -1084,11 +1084,14 @@ function _detectLanIp() {
   }
   return 'localhost';
 }
+const shareStartupController = new AbortController();
+let shareStartupPromise = Promise.resolve();
 httpServer.listen(PORT, '0.0.0.0', () => {
   const lanIp = _detectLanIp();
   console.log(`\n🎵 OpenEnsemble running at http://${lanIp}:${PORT}\n`);
   if (!ISOLATED_LAB_RUNTIME) {
-    void restoreNetworkSharesAtStartup({
+    shareStartupPromise = restoreNetworkSharesAtStartup({
+      signal: shareStartupController.signal,
       canRestore: userId => loadUsers().some(user => user.id === userId && ['owner', 'admin', 'user'].includes(user.role))
         && isSkillRuntimeEnabledForUser('network_shares', userId),
       onResult: (userId, result) => console.log('[network-shares] startup', userId, result.id || '', result.connected ? 'connected' : result.code),
@@ -1410,6 +1413,7 @@ let _shuttingDown = false;
 async function shutdown(signal) {
   if (_shuttingDown) return;
   _shuttingDown = true;
+  shareStartupController.abort();
   console.log(`\n[shutdown] ${signal} received — shutting down gracefully…`);
   log.info('shutdown', 'Received signal', { signal });
 
@@ -1444,6 +1448,7 @@ async function shutdown(signal) {
   }, 15000);
   forceTimer.unref();
 
+  await shareStartupPromise;
   await stopShareMounts();
   await new Promise(r => setTimeout(r, 500));
 

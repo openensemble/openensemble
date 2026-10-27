@@ -15,6 +15,14 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-27
+
+**Reconnect shares after a slow server startup**
+[Saved network shares](../documents/#network-shares-smb-and-nfs) now wait 30
+seconds before connecting at startup and retry temporary connection failures
+with increasing delays. Shares you disconnect or forget stay off, and rejected
+logins are not retried automatically.
+
 ## 2026-10-19
 
 **Find, review, and continue your work**

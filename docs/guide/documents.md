@@ -169,12 +169,17 @@ automatic mounting. **Forget** removes the OE connection and any saved login
 unused by other shares on that server. Both preserve the server share and all
 files. Opening or connecting a saved share again enables automatic mounting.
 
-Connected shares **mount automatically when OE starts**, including after a
-server reboot, using their saved encrypted login. An unavailable server or
-rejected login does not block OE startup or erase connection settings. Retry
-Connect when the server is available; a changed SMB login can be replaced in
-the protected form. Backups contain connection settings and encrypted
-credentials, not the remote share's contents.
+Connected shares **mount automatically 30 seconds after OE starts**, including
+after a server reboot, using their saved encrypted login. If a server is
+unavailable or a connection times out, OE retries after another 30, 60, 120,
+and 240 seconds. These waits do not block OE startup. Disconnecting or
+forgetting a share cancels its remaining retries. Rejected logins and other
+configuration errors need attention instead of automatic retries.
+
+Connection failures do not erase saved settings. Use **Connect** to try again
+after the startup retries finish; a changed SMB login can be replaced in the
+protected form. Backups contain connection settings and encrypted credentials,
+not the remote share's contents.
 
 ### Host setup and troubleshooting
 
