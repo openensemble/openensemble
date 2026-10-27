@@ -17,8 +17,10 @@ import {
 } from '../../lib/voice-deps.mjs';
 import { log } from '../../logger.mjs';
 import { PIPER_VOICE_CATALOG } from './speech.mjs';
+import { tryHandleLocalSttInstall } from './local-stt-install.mjs';
 
 export async function tryHandleProviderInstall(req, res) {
+  if (await tryHandleLocalSttInstall(req, res)) return true;
   const pinServiceGpu = async (...args) => (await import('../config.mjs')).pinServiceGpu(...args);
 
     // POST /api/provider-config/install-piper
@@ -127,7 +129,7 @@ export async function tryHandleProviderInstall(req, res) {
     // voice-deps cache is invalidated on success so the next
     // /api/provider-config GET reflects the change immediately.
     {
-      const uninstallMatch = req.url.match(/^\/api\/provider-config\/uninstall-(piper|kittentts|faster-whisper|pocket-tts)$/);
+      const uninstallMatch = req.url.match(/^\/api\/provider-config\/uninstall-(piper|kittentts|pocket-tts)$/);
       if (uninstallMatch && req.method === 'POST') {
         const authId = requirePrivileged(req, res);
         if (!authId) return true;
@@ -158,97 +160,6 @@ export async function tryHandleProviderInstall(req, res) {
         });
         return true;
       }
-    }
-
-    // POST /api/provider-config/install-faster-whisper  body: { profile: "cpu" | "cuda" }
-    // Same SSE shape as install-piper/install-kittentts. profile picks the
-    // installer's FW_DEVICE env: cpu = distil-large-v3 int8, cuda =
-    // large-v3-turbo float16 (needs NVIDIA driver — the script bails early
-    // if nvidia-smi isn't present so the failure is visible in the SSE log).
-    if (req.url === '/api/provider-config/install-faster-whisper' && req.method === 'POST') {
-      const authId = requirePrivileged(req, res);
-      if (!authId) return true;
-
-      const cfg = loadConfig();
-      const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
-                                      '..', '..', 'scripts', 'install-faster-whisper.sh');
-      if (!fs.existsSync(scriptPath)) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `install-faster-whisper.sh not found at ${scriptPath}` }));
-        return true;
-      }
-
-      let profile = 'cpu';
-      try {
-        const raw = await readBody(req);
-        if (raw) {
-          const body = JSON.parse(raw);
-          if (body?.profile === 'cuda' || body?.profile === 'cpu') profile = body.profile;
-          else if (body?.profile != null) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `profile must be "cpu" or "cuda", got ${body.profile}` }));
-            return true;
-          }
-        }
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `bad request body: ${e.message}` }));
-        return true;
-      }
-
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-
-      const child = spawn('/usr/bin/env', ['bash', scriptPath], {
-        env: {
-          ...process.env, HOME: os.homedir(), FW_DEVICE: profile,
-          // Honor a previously-chosen GPU pin so reinstalling/switching profiles
-          // doesn't silently move STT back onto the default GPU.
-          ...(profile === 'cuda' && Number.isInteger(cfg.integrations?.faster_whisper?.gpuId)
-            ? { FW_GPU_ID: String(cfg.integrations.faster_whisper.gpuId) } : {}),
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      const send = (event, data) => {
-        try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
-      };
-      send('start', { script: scriptPath, profile });
-
-      const onLine = (kind) => (chunk) => {
-        const lines = chunk.toString('utf8').split(/\r?\n/);
-        for (const line of lines) {
-          if (line) send('log', { kind, line });
-        }
-      };
-      child.stdout.on('data', onLine('stdout'));
-      child.stderr.on('data', onLine('stderr'));
-
-      child.on('exit', (code, signal) => {
-        if (code === 0) {
-          invalidateVoiceDepsCache();
-          // Persist which profile is installed so /api/provider-config can
-          // surface it in the UI without re-probing the systemd unit file.
-          modifyConfig(cfg => {
-            cfg.integrations ??= {};
-            cfg.integrations.faster_whisper ??= {};
-            cfg.integrations.faster_whisper.installed = true;
-            cfg.integrations.faster_whisper.profile = profile;
-          });
-        }
-        send('done', { code, signal: signal ?? null, ok: code === 0 });
-        try { res.end(); } catch {}
-      });
-      child.on('error', (err) => {
-        send('done', { code: -1, error: err.message, ok: false });
-        try { res.end(); } catch {}
-      });
-      req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
-      return true;
     }
 
     // POST /api/provider-config/install-kittentts

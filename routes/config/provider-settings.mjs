@@ -23,6 +23,8 @@ import {
 } from '../../lib/voice-deps.mjs';
 import { OPENAI_COMPAT_PROVIDERS, getCompatKey, getGrokKey, getAnthropicKey, getFireworksKey, getOpenRouterKey } from '../../chat/providers/_shared.mjs';
 import { log } from '../../logger.mjs';
+import { LOCAL_STT, localSttProvider, localSttInstalled, probeLocalStt, selectLocalStt, withSttOperation, previousSttToUninstall } from '../../lib/local-stt.mjs';
+import { uninstallPreviousLocalStt } from './local-stt-install.mjs';
 import { checkOllamaCloudKey, resolveOllamaKey } from '../../lib/ollama-cloud.mjs';
 import { refreshProviderFeeds, providerFeedStatus } from '../../lib/provider-update-feeds.mjs';
 import { listProviderUpdateResults, providerUpdateMessage } from '../../lib/provider-update-status.mjs';
@@ -95,6 +97,12 @@ export async function tryHandleProviderSettings(req, res) {
         probeFasterWhisperAvailable(cfg),
         probeFfmpegAvailable(),
       ]);
+      const localSttProviders = await Promise.all(Object.values(LOCAL_STT).map(async provider => ({
+        id: provider.id, label: provider.label, profiles: provider.profiles,
+        installed: localSttInstalled(provider), available: await probeLocalStt(provider),
+        profile: cfg.integrations?.[provider.key]?.profile ?? null,
+        gpuId: cfg.integrations?.[provider.key]?.gpuId ?? null,
+      })));
       const ollamaKey = resolveOllamaKey(cfg);
       const ollamaConnection = cfg.enabledProviders?.ollama === false
         ? { ok: false, code: 'disabled', message: 'Ollama Cloud is disabled.' }
@@ -128,10 +136,12 @@ export async function tryHandleProviderSettings(req, res) {
         ttsProvider:  cfg.ttsProvider ?? 'openai',
         // sttMode controls where /api/stt sends audio. 'remote' uses
         // sttApiUrl + sttApiKey (the default OpenAI-compat path). 'local'
-        // forces 127.0.0.1:5154 (the Faster-Whisper service) regardless of
+        // routes to the selected local speech service regardless of
         // the URL field, so users can keep their remote credentials saved
         // while flipping between local and remote without losing either.
         sttMode:      cfg.sttMode === 'local' ? 'local' : 'remote',
+        sttLocalProvider: localSttProvider(cfg).id,
+        localSttProviders,
         piperLengthScale: Number.isFinite(cfg.piperLengthScale) ? cfg.piperLengthScale : 1.1,
         piperAvailable,
         kittenttsAvailable,
@@ -181,6 +191,12 @@ export async function tryHandleProviderSettings(req, res) {
     if (req.method === 'POST') {
       try {
         const body = JSON.parse(await readBody(req));
+        if (body.sttMode !== undefined && !['local', 'remote'].includes(body.sttMode)) throw new Error('Invalid STT mode.');
+        if (body.sttLocalProvider !== undefined && !Object.hasOwn(LOCAL_STT, body.sttLocalProvider)) throw new Error('Unknown local STT provider.');
+        if (body.sttGpuProvider !== undefined && !Object.hasOwn(LOCAL_STT, body.sttGpuProvider)) throw new Error('Unknown STT GPU provider.');
+        const changesStt = body.sttMode !== undefined || body.sttLocalProvider !== undefined;
+        if (body.uninstallPreviousStt != null && !changesStt) throw new Error('Choose the replacement speech model before uninstalling the previous one.');
+        let sttCleanup = {};
         // Validate admin-writable provider URLs *before* the modifyConfig
         // transaction so a bad value 400s loudly instead of half-writing.
         // (POST is already gated to requirePrivileged at the dispatch above.)
@@ -234,9 +250,11 @@ export async function tryHandleProviderSettings(req, res) {
             return true;
           }
         }
-        // Set inside the modifyConfig closure when sttMode actually flips, so
-        // the systemd side-effect below only runs on a real transition.
-        let fwServiceAction = null; // 'stop' (→ remote) | 'start' (→ local)
+        if (body.sttGpuId !== undefined && body.sttGpuId !== null) {
+          const gpus = await listNvidiaGpus();
+          if (!Number.isInteger(body.sttGpuId) || !gpus.some(g => g.index === body.sttGpuId)) throw new Error('STT GPU must be a detected GPU index or null.');
+        }
+        let sttGpuPin;
         // Set when the STT GPU pin changes, applied (unit rewrite + restart)
         // after the config save. undefined = unchanged; null = clear pin.
         let fwGpuPinToApply;
@@ -244,7 +262,7 @@ export async function tryHandleProviderSettings(req, res) {
         // "one local TTS service at a time": stop the others, start the selected
         // one. undefined = ttsProvider not in this request → leave services alone.
         let ttsProviderToApply;
-        await modifyConfig(cfg => {
+        const persist = () => modifyConfig(cfg => {
           if (body.anthropicApiKey)   cfg.anthropicApiKey   = body.anthropicApiKey;
           if (body.fireworksApiKey)   cfg.fireworksApiKey   = body.fireworksApiKey;
           if (body.grokApiKey)        cfg.grokApiKey        = body.grokApiKey;
@@ -310,16 +328,14 @@ export async function tryHandleProviderSettings(req, res) {
           if (body.sttApiKey)                      cfg.sttApiKey   = body.sttApiKey;
           if (body.sttApiUrl   !== undefined)      cfg.sttApiUrl   = body.sttApiUrl;
           if (body.sttModel    !== undefined)      cfg.sttModel    = body.sttModel;
-          if (body.sttMode === 'remote' || body.sttMode === 'local') {
-            // Stop the local Faster-Whisper systemd unit when switching to a
-            // remote STT API (it'd otherwise keep holding GPU/VRAM for nothing);
-            // restart it when switching back to local. Only when it's actually
-            // installed — we stop, never uninstall, so the swap back is instant.
-            const prevMode = cfg.sttMode === 'local' ? 'local' : 'remote';
-            if (body.sttMode !== prevMode && cfg.integrations?.faster_whisper?.installed === true) {
-              fwServiceAction = body.sttMode === 'remote' ? 'stop' : 'start';
-            }
-            cfg.sttMode = body.sttMode;
+          if (body.sttMode !== undefined) cfg.sttMode = body.sttMode;
+          if (body.sttLocalProvider !== undefined) cfg.sttLocalProvider = body.sttLocalProvider;
+          if (body.sttGpuId !== undefined) {
+            const provider = body.sttGpuProvider ? LOCAL_STT[body.sttGpuProvider] : localSttProvider(cfg);
+            cfg.integrations ??= {};
+            cfg.integrations[provider.key] ??= {};
+            cfg.integrations[provider.key].gpuId = body.sttGpuId;
+            sttGpuPin = { provider, gpuId: body.sttGpuId };
           }
           // Pin (or clear) which GPU the local STT service runs on. Accepts a
           // non-negative integer (GPU index) or null (clear). Only applied when
@@ -343,31 +359,23 @@ export async function tryHandleProviderSettings(req, res) {
             if (body.msTenant !== undefined) cfg.msTenant       = body.msTenant;
           }
         });
-        // Apply the Faster-Whisper service transition AFTER the config save.
-        // `--now` does stop+disable / start+enable in one call, so the choice
-        // also survives reboots (no point auto-starting whisper on boot while
-        // the user is on a remote API). Non-fatal: log on failure; never block
-        // the config save on a systemd hiccup.
-        if (fwServiceAction) {
-          const verb = fwServiceAction === 'stop' ? 'disable' : 'enable';
-          const child = spawn('systemctl', ['--user', verb, '--now', 'faster-whisper.service'], {
-            env: { ...process.env, HOME: os.homedir() },
-            stdio: 'ignore',
+        if (changesStt || body.sttGpuId !== undefined || body.fasterWhisperGpuId !== undefined) {
+          await withSttOperation(async () => {
+            const previous = loadConfig();
+            const next = { ...previous, ...(body.sttMode !== undefined ? { sttMode: body.sttMode } : {}),
+              ...(body.sttLocalProvider !== undefined ? { sttLocalProvider: body.sttLocalProvider } : {}) };
+            const removePrevious = previousSttToUninstall(previous, next, body.uninstallPreviousStt);
+            if (changesStt) await selectLocalStt(previous, next, persist);
+            else await persist();
+            if (sttGpuPin && localSttInstalled(sttGpuPin.provider)) {
+              const result = await pinServiceGpu(sttGpuPin.provider.unit, sttGpuPin.gpuId);
+              if (!result.ok) throw new Error(`Could not apply STT GPU: ${result.reason}`);
+            }
+            if (fwGpuPinToApply !== undefined) await pinServiceGpu('faster-whisper.service', fwGpuPinToApply);
+            sttCleanup = await uninstallPreviousLocalStt(removePrevious);
+            invalidateVoiceDepsCache();
           });
-          child.on('error', (e) => log.warn('config', 'faster-whisper service control failed', { action: fwServiceAction, error: e.message }));
-          child.on('exit', (code) => {
-            if (code === 0) { invalidateVoiceDepsCache(); log.info('config', `faster-whisper ${fwServiceAction === 'stop' ? 'stopped (switched to remote STT)' : 'started (switched to local STT)'}`); }
-            else log.warn('config', 'faster-whisper service control non-zero exit', { action: fwServiceAction, code });
-          });
-        }
-        // Apply the GPU pin (rewrite unit + restart if running). Skipped when we
-        // also just toggled the service on/off above — that path already wrote
-        // CUDA env via the installer/enable and a double restart is pointless.
-        if (fwGpuPinToApply !== undefined && !fwServiceAction) {
-          pinServiceGpu('faster-whisper.service', fwGpuPinToApply)
-            .then(r => { if (!r.ok) log.warn('config', 'STT GPU pin failed', r); })
-            .catch(e => log.warn('config', 'STT GPU pin error', { error: e.message }));
-        }
+        } else await persist();
         // One-local-TTS-at-a-time. Installers no longer auto-start their service;
         // selecting + saving a provider is what starts it. Here we stop+disable
         // every local TTS unit except the selected, then start+enable the
@@ -407,8 +415,8 @@ export async function tryHandleProviderSettings(req, res) {
           }
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+        res.end(JSON.stringify({ ok: true, ...sttCleanup }));
+      } catch (e) { res.writeHead(e.status || 400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
       return true;
     }
   }

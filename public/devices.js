@@ -405,7 +405,7 @@ function renderVoiceHealthPanel() {
     : 'no paired devices';
   const sttDetail = _sttInfo
     ? (_sttInfo.mode === 'local'
-      ? `local Whisper ${_sttInfo.localAvailable ? 'running' : 'not reachable'}`
+      ? `local ${_sttInfo.providerLabel || 'Whisper'} ${_sttInfo.localAvailable ? 'running' : 'not reachable'}`
       : `remote ${_sttInfo.remoteConfigured ? 'configured' : 'missing key or URL'}`)
     : 'status unavailable';
   const ttsDetail = _ttsAvailable
@@ -418,8 +418,8 @@ function renderVoiceHealthPanel() {
   const hints = [];
   if (_sttInfo && !sttOk) {
     hints.push(_sttInfo.mode === 'local'
-      ? 'STT is set to local, but Faster-Whisper is not reachable on 127.0.0.1:5154.'
-      : 'STT is set to remote, but the Whisper URL or API key is missing.');
+      ? `STT is set to local, but ${_sttInfo.providerLabel || 'the speech service'} is not reachable.`
+      : 'STT is set to remote, but the transcription URL or API key is missing.');
   }
   if (_ttsAvailable && !ttsOk) {
     hints.push('TTS is not ready, so a successful chat turn may still produce no spoken reply.');
@@ -435,7 +435,7 @@ function renderVoiceHealthPanel() {
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px">
         ${chip('Devices', total > 0 && online > 0, deviceDetail)}
-        ${chip('STT', sttOk, sttDetail)}
+        ${chip('STT', sttOk, escHtml(sttDetail))}
         ${chip('TTS', ttsOk, ttsDetail)}
         ${chip('Firmware', !outdated && !unknownFw, fwDetail)}
       </div>

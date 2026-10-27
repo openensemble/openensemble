@@ -32,6 +32,7 @@ import {
   invalidateVoiceDepsCache,
 } from '../../lib/voice-deps.mjs';
 import { log } from '../../logger.mjs';
+import { localSttProvider, localSttUrl, localSttInstalled, probeLocalStt } from '../../lib/local-stt.mjs';
 
 // Live ffmpeg processes for ambient streams keyed by marker. Lets the
 // /api/tts handler reattach a new HTTP response to an existing ffmpeg
@@ -135,7 +136,8 @@ export async function tryHandleSpeechRoutes(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
     const mode = cfg.sttMode === 'local' ? 'local' : 'remote';
-    const localAvailable = await probeFasterWhisperAvailable(cfg);
+    const localProvider = localSttProvider(cfg);
+    const localAvailable = await probeLocalStt(localProvider);
     const remoteConfigured = !!(cfg.sttApiUrl && cfg.sttApiKey);
     const available = mode === 'local' ? localAvailable : remoteConfigured;
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -144,10 +146,12 @@ export async function tryHandleSpeechRoutes(req, res) {
       available,
       localAvailable,
       remoteConfigured,
-      installed: cfg.integrations?.faster_whisper?.installed === true,
-      profile: cfg.integrations?.faster_whisper?.profile ?? null,
-      apiUrl: mode === 'remote' ? (cfg.sttApiUrl ?? '') : 'http://127.0.0.1:5154/v1/audio/transcriptions',
-      model: cfg.sttModel || (mode === 'local' ? 'large-v3-turbo' : 'whisper-1'),
+      provider: localProvider.id,
+      providerLabel: localProvider.label,
+      installed: localSttInstalled(localProvider),
+      profile: cfg.integrations?.[localProvider.key]?.profile ?? null,
+      apiUrl: mode === 'remote' ? (cfg.sttApiUrl ?? '') : localSttUrl(localProvider),
+      model: mode === 'local' ? localProvider.model : (cfg.sttModel || 'whisper-1'),
       language: cfg.sttLanguage || 'en',
       keySet: !!cfg.sttApiKey,
     }));

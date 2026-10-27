@@ -1366,7 +1366,7 @@ async function loadProviderConfig() {
       }
     }
 
-    // STT mode dropdown — Remote API vs Local Faster-Whisper. Mode is
+    // STT mode dropdown — Remote API vs a local speech model. Mode is
     // persisted as cfg.sttMode; remote URL/Key/Model and local install
     // state live independently so the user can switch between them
     // without losing the other's settings.
@@ -1377,55 +1377,10 @@ async function loadProviderConfig() {
     if (remoteFields) remoteFields.style.display = sttModeSel?.value === 'remote' ? '' : 'none';
     if (localFields)  localFields.style.display  = sttModeSel?.value === 'local'  ? '' : 'none';
 
-    // Faster-Whisper sub-state inside the Local section. Picker is ALWAYS
-    // visible so the user can switch profiles even after install; when FW
-    // is installed we pre-select the current profile + relabel the install
-    // button to "Switch profile". Picker stays hidden via CSS until the user
-    // picks an option that differs from what's already running.
-    const fwStatus       = $('providerFwStatus');
-    const fwPicker       = $('providerFwPicker');
-    const fwUninstallBtn = $('providerFwUninstallBtn');
-    const fwProfileSel   = $('providerFwProfile');
-    const fwInstallBtn   = $('providerFwInstallBtn');
-    if (fwStatus) {
-      // Install state comes from the PERSISTED flag (fasterWhisperInstalled),
-      // not the live probe — so a transient probe miss during cold-start /
-      // restart (model load takes up to ~15 s) doesn't claim "not installed"
-      // and prompt a needless reinstall. The probe (fasterWhisperAvailable)
-      // only distinguishes "running now" from "installed but not responding".
-      const fwInstalled = cfg.fasterWhisperInstalled || cfg.fasterWhisperAvailable;
-      window._fwInstalledProfile = fwInstalled ? cfg.fasterWhisperProfile : null;
-      if (fwInstalled) {
-        const profile = cfg.fasterWhisperProfile || '?';
-        if (cfg.fasterWhisperAvailable) {
-          fwStatus.textContent = `Faster-Whisper is running on 127.0.0.1:5154 (${profile} profile). Pick a different profile below to switch.`;
-          fwStatus.style.color = 'var(--success, #4caf50)';
-        } else {
-          fwStatus.textContent = `Faster-Whisper is installed (${profile} profile) but not responding yet — it may still be loading the model. Reload in a moment.`;
-          fwStatus.style.color = 'var(--warning, #e0a030)';
-        }
-        if (fwPicker) fwPicker.style.display = 'flex';
-        if (fwUninstallBtn) fwUninstallBtn.style.display = '';
-        // Pre-select the currently-running profile so the user sees its info
-        // card and can compare before switching.
-        if (fwProfileSel && (cfg.fasterWhisperProfile === 'cpu' || cfg.fasterWhisperProfile === 'cuda')) {
-          fwProfileSel.value = cfg.fasterWhisperProfile;
-          window.onFwProfileChange?.();
-        }
-        // Populate + show the GPU pin selector (cuda profile + multi-GPU only).
-        window._populateFwGpuPin?.(cfg);
-      } else {
-        fwStatus.textContent = 'Faster-Whisper is not installed.';
-        fwStatus.style.color = 'var(--muted)';
-        if (fwPicker) fwPicker.style.display = 'flex';
-        if (fwUninstallBtn) fwUninstallBtn.style.display = 'none';
-        // Reset the dropdown so the user picks fresh.
-        if (fwProfileSel) fwProfileSel.value = '';
-        window.onFwProfileChange?.();
-        const gpuWrap = $('providerFwGpuWrap');
-        if (gpuWrap) gpuWrap.style.display = 'none';
-      }
-    }
+    window._localSttConfig = cfg;
+    const localSttSel = $('providerLocalSttProvider');
+    if (localSttSel) localSttSel.value = cfg.sttLocalProvider || 'faster-whisper';
+    window.updateLocalSttFields?.();
 
     // Gate provider <option>s by runtime availability. Every TTS branch
     // shells out to ffmpeg (resample to 16 kHz / encode to MP3), so if
@@ -2305,223 +2260,172 @@ function uninstallKittentts() { return _uninstallLocalTts('kittentts', 'KittenTT
 window.uninstallPiper     = uninstallPiper;
 window.uninstallKittentts = uninstallKittentts;
 
-// Install-Faster-Whisper handler. Same SSE-stream shape as installPiper; the
-// extra wrinkle is the CPU/GPU profile arg from data-args and auto-pointing
-// OE's STT config at the local server when the install succeeds (no API key
-// required — local server ignores the Authorization header but Express's
-// /api/stt insists on one being non-empty, so we send "local").
-async function installFasterWhisper(profile /* 'cpu' | 'cuda' */) {
-  const btn    = document.getElementById('providerFwInstallBtn');
-  const log    = document.getElementById('providerFwLog');
-  const status = document.getElementById('providerFwStatus');
-  if (!log) return;
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Installing…';
-    btn.style.cursor = 'not-allowed';
-    btn.style.background = 'var(--muted)';
-  }
-  log.style.display = '';
-  log.textContent = '';
-  if (status) status.textContent = `Installing Faster-Whisper (${profile})…`;
-
-  let resp;
-  try {
-    resp = await fetch('/api/provider-config/install-faster-whisper', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile }),
-    });
-  } catch (e) {
-    log.textContent += `\n[error] ${e.message}\n`;
-    if (btn) { btn.disabled = false; btn.textContent = 'Save & install'; btn.style.background = 'var(--accent)'; btn.style.cursor = 'pointer'; }
-    return;
-  }
-  if (!resp.ok || !resp.body) {
-    log.textContent += `\n[error] HTTP ${resp.status}\n`;
-    if (btn) { btn.disabled = false; btn.textContent = 'Save & install'; btn.style.background = 'var(--accent)'; btn.style.cursor = 'pointer'; }
-    return;
-  }
-
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let success = false;
-  // Guard against a mid-stream drop rejecting reader.read() (would otherwise
-  // leave the button stuck on "Installing…"); fall through to the failure branch.
-  try {
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const frame = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      let evName = 'message';
-      const dataLines = [];
-      for (const line of frame.split('\n')) {
-        if (line.startsWith('event: ')) evName = line.slice(7).trim();
-        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
-      }
-      let data = {};
-      try { data = JSON.parse(dataLines.join('\n')); } catch {}
-      if (evName === 'log') {
-        log.textContent += data.line + '\n';
-        log.scrollTop = log.scrollHeight;
-      } else if (evName === 'done') {
-        success = !!data.ok;
-        log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
-      }
-    }
-  }
-  } catch (e) {
-    log.textContent += `\n[error] stream interrupted: ${e.message}\n`;
-  }
-
-  if (success) {
-    // Flip OE into Local STT mode. We persist the mode separately from the
-    // remote sttApiUrl/Key/Model so the user's saved API credentials survive
-    // a swap to Local (and back). /api/stt picks based on cfg.sttMode.
-    try {
-      await fetch('/api/provider-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sttMode: 'local' }),
-      });
-    } catch (e) {
-      console.warn('[faster-whisper] sttMode update failed:', e);
-    }
-    if (status) {
-      status.textContent = `Faster-Whisper installed (${profile}). STT is now routing locally.`;
-      status.style.color = 'var(--success, #4caf50)';
-    }
-    showToast?.(`Faster-Whisper installed (${profile})`);
-    loadProviderConfig();
-  } else {
-    if (status) status.textContent = `Faster-Whisper install failed — see log below.`;
-    const pickBtn = document.getElementById('providerFwInstallBtn');
-    if (pickBtn) {
-      pickBtn.disabled = false;
-      pickBtn.textContent = 'Save & install';
-      pickBtn.style.background = 'var(--accent)';
-      pickBtn.style.cursor = 'pointer';
-    }
-  }
+// Local STT models share the install log and selection flow. Browsing a model
+// does not change the active service; Install & use / Use model commits it.
+let localSttBusy = false;
+function localSttChoice() {
+  const id = document.getElementById('providerLocalSttProvider')?.value || 'faster-whisper';
+  return window._localSttConfig?.localSttProviders?.find(p => p.id === id)
+    || { id, label: id, profiles: id === 'photon-ultra' ? ['cuda'] : ['cpu', 'cuda'], installed: false };
 }
-window.installFasterWhisper = installFasterWhisper;
-
-function uninstallFasterWhisper() { return _uninstallLocalTts('faster-whisper', 'Faster-Whisper', 'providerFw'); }
-window.uninstallFasterWhisper = uninstallFasterWhisper;
-
-// STT mode dropdown handler. Toggling between Remote API and Local
-// Faster-Whisper persists the choice immediately so /api/stt routes
-// correctly without waiting for a Save click. Local mode only takes effect
-// for STT when the service is actually running — the route falls back to
-// returning errors if cfg.sttMode='local' but the service is down.
+function localSttSetBusy(busy) {
+  localSttBusy = busy;
+  for (const id of ['providerSttMode', 'providerLocalSttProvider', 'providerLocalSttProfile', 'providerLocalSttGpu', 'providerLocalSttRemovePrevious', 'providerLocalSttInstallBtn', 'providerLocalSttUninstallBtn']) {
+    const el = document.getElementById(id); if (el) el.disabled = busy;
+  }
+  const uninstall = document.getElementById('providerLocalSttUninstallBtn');
+  if (uninstall && !busy) uninstall.disabled = window._localSttConfig?.sttMode === 'local'
+    && window._localSttConfig?.sttLocalProvider === localSttChoice().id;
+}
+window.updateLocalSttFields = function () {
+  const choice = localSttChoice();
+  const profile = document.getElementById('providerLocalSttProfile');
+  if (!profile) return;
+  profile.innerHTML = choice.profiles.map(p => `<option value="${p}">${p === 'cuda' ? 'NVIDIA GPU' : 'CPU'}</option>`).join('');
+  profile.value = choice.profile || (choice.id === 'photon-ultra' ? 'cuda' : 'cpu');
+  const status = document.getElementById('providerLocalSttStatus');
+  const active = window._localSttConfig?.sttMode === 'local' && window._localSttConfig?.sttLocalProvider === choice.id;
+  if (status) status.textContent = choice.installed
+    ? (active ? `${choice.label}: ${choice.available ? 'running' : 'not responding — use the button below to retry starting it'}.` : `${choice.label} is installed. Choose Use model to switch to it.`)
+    : `${choice.label} is not installed.`;
+  const uninstall = document.getElementById('providerLocalSttUninstallBtn');
+  if (uninstall) { uninstall.style.display = choice.installed ? '' : 'none'; uninstall.disabled = active || localSttBusy; uninstall.title = active ? 'Select another provider before uninstalling this model.' : ''; }
+  const previous = window._localSttConfig?.localSttProviders?.find(p => p.id === window._localSttConfig?.sttLocalProvider);
+  const removeWrap = document.getElementById('providerLocalSttRemovePreviousWrap');
+  const remove = document.getElementById('providerLocalSttRemovePrevious');
+  if (remove && removeWrap) {
+    const canRemove = window._localSttConfig?.sttMode === 'local' && previous?.installed && previous.id !== choice.id;
+    removeWrap.style.display = canRemove ? '' : 'none';
+    remove.checked = false;
+    remove.dataset.provider = canRemove ? previous.id : '';
+    document.getElementById('providerLocalSttRemovePreviousLabel').textContent = canRemove ? `Uninstall ${previous.label} after switching` : '';
+  }
+  window.onLocalSttProfileChange();
+};
+window.onLocalSttProfileChange = function () {
+  const choice = localSttChoice();
+  const profile = document.getElementById('providerLocalSttProfile')?.value;
+  const info = document.getElementById('providerLocalSttInfo');
+  const modelInfo = {
+    'faster-whisper': 'Whisper large-v3-turbo with Silero. About 1.6 GB of model weights.',
+    'photon-ultra': 'Parakeet Ultra with Silero. About 1.26 GB of model weights. Designed for GPU use and stronger recognition in background noise.',
+    'photon-redux': 'Parakeet Redux with Silero. About 178 MB of model weights. Smaller download; recognition can be less accurate in background noise.',
+  };
+  if (info) info.textContent = modelInfo[choice.id] + (profile === 'cuda'
+    ? ` NVIDIA drivers${choice.id.startsWith('photon-') ? ' and an Ampere or newer GPU' : ''} required. Allow several additional GB for the runtime and about 3 GB of free GPU memory.`
+    : ' CPU speed depends on your hardware. Runtime packages require additional disk space.') + ' Linux with systemd user services is required. Models download during installation; transcription runs locally.';
+  const installedProfile = choice.installed && profile === choice.profile;
+  const active = window._localSttConfig?.sttMode === 'local' && window._localSttConfig?.sttLocalProvider === choice.id;
+  const btn = document.getElementById('providerLocalSttInstallBtn');
+  if (btn) {
+    btn.textContent = installedProfile ? (active && choice.available ? 'Running' : 'Use model') : 'Install & use';
+    btn.disabled = localSttBusy || (installedProfile && active && choice.available);
+  }
+  window.populateLocalSttGpu();
+};
+window.populateLocalSttGpu = async function () {
+  const choice = localSttChoice();
+  const wrap = document.getElementById('providerLocalSttGpuWrap');
+  const sel = document.getElementById('providerLocalSttGpu');
+  if (!wrap || !sel) return;
+  wrap.style.display = 'none';
+  if (document.getElementById('providerLocalSttProfile')?.value !== 'cuda') return;
+  try {
+    const response = await fetch('/api/hardware/gpus');
+    const { gpus = [] } = await response.json();
+    if (localSttChoice().id !== choice.id || document.getElementById('providerLocalSttProfile')?.value !== 'cuda' || gpus.length < 2) return;
+    sel.innerHTML = '<option value="">Auto (GPU 0)</option>' + gpus.map(g => `<option value="${escHtml(g.index)}">GPU ${escHtml(g.index)}: ${escHtml(g.name)}</option>`).join('');
+    sel.value = Number.isInteger(choice.gpuId) ? String(choice.gpuId) : '';
+    sel.disabled = localSttBusy;
+    wrap.style.display = '';
+  } catch {}
+};
+async function saveLocalSttSelection(body) {
+  const response = await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+window.onLocalSttGpuChange = async function () {
+  const choice = localSttChoice();
+  const raw = document.getElementById('providerLocalSttGpu')?.value;
+  const gpuId = raw === '' ? null : Number(raw);
+  localSttSetBusy(true);
+  try {
+    await saveLocalSttSelection({ sttGpuProvider: choice.id, sttGpuId: gpuId });
+    choice.gpuId = gpuId;
+    showToast?.('STT GPU saved. A running service is restarted.');
+  } catch (error) { showToast?.(error.message); }
+  finally { localSttSetBusy(false); window.onLocalSttProfileChange(); }
+};
 window.updateSttModeFields = async function () {
   const mode = document.getElementById('providerSttMode')?.value || 'remote';
-  const remoteFields = document.getElementById('providerSttFields_remote');
-  const localFields  = document.getElementById('providerSttFields_local');
-  if (remoteFields) remoteFields.style.display = mode === 'remote' ? '' : 'none';
-  if (localFields)  localFields.style.display  = mode === 'local'  ? '' : 'none';
+  document.getElementById('providerSttFields_remote').style.display = mode === 'remote' ? '' : 'none';
+  document.getElementById('providerSttFields_local').style.display = mode === 'local' ? '' : 'none';
+  // Opening the local choices before installing does not discard a working API.
+  if (mode === 'local') return;
+  localSttSetBusy(true);
+  try { await saveLocalSttSelection({ sttMode: 'remote' }); await loadProviderConfig(); }
+  catch (error) { showToast?.(error.message); await loadProviderConfig(); }
+  finally { localSttSetBusy(false); window.updateLocalSttFields(); }
+};
+window.installLocalStt = async function () {
+  if (localSttBusy) return;
+  const choice = localSttChoice();
+  const profile = document.getElementById('providerLocalSttProfile')?.value;
+  const log = document.getElementById('providerLocalSttLog');
+  const status = document.getElementById('providerLocalSttStatus');
+  const remove = document.getElementById('providerLocalSttRemovePrevious');
+  const uninstallPreviousStt = remove?.checked && remove.dataset.provider ? remove.dataset.provider : undefined;
+  let warning = '';
+  localSttSetBusy(true);
+  log.style.display = ''; log.textContent = '';
+  status.textContent = `Preparing ${choice.label}…`;
   try {
-    await fetch('/api/provider-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sttMode: mode }),
-    });
-  } catch (e) {
-    showToast?.(`Failed to save STT mode: ${e.message}`);
-  }
+    if (choice.installed && choice.profile === profile) {
+      const result = await saveLocalSttSelection({ sttMode: 'local', sttLocalProvider: choice.id, uninstallPreviousStt });
+      warning = result.warning || '';
+      if (result.uninstalledPreviousStt) log.textContent += 'Previous speech model uninstalled. Cached downloads were kept.\n';
+    } else {
+      const response = await fetch('/api/provider-config/install-local-stt', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: choice.id, profile, uninstallPreviousStt }),
+      });
+      if (!response.ok || !response.body) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      const reader = response.body.getReader(), decoder = new TextDecoder();
+      let buffer = '', success = false, failure = 'Installation did not finish. Retry to resume.';
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let split;
+        while ((split = buffer.indexOf('\n\n')) >= 0) {
+          const frame = buffer.slice(0, split); buffer = buffer.slice(split + 2);
+          const event = frame.split('\n').find(line => line.startsWith('event: '))?.slice(7);
+          const payload = frame.split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice(6)).join('\n');
+          if (!payload) continue; // Installer heartbeat.
+          const data = JSON.parse(payload);
+          if (event === 'log') { log.textContent += data.line + '\n'; log.scrollTop = log.scrollHeight; }
+          if (event === 'done') { success = data.ok === true; warning = data.warning || ''; if (data.error) failure = data.error; }
+        }
+      }
+      if (!success) throw new Error(failure);
+    }
+    await loadProviderConfig();
+    if (warning) { status.textContent = warning; log.textContent += `\n[warning] ${warning}\n`; }
+    showToast?.(warning || `${choice.label} is running`);
+  } catch (error) { status.textContent = error.message; log.textContent += `\n[error] ${error.message}\n`; }
+  finally { localSttSetBusy(false); window.onLocalSttProfileChange(); }
 };
-
-// Profile dropdown inside the Local section. Toggles the matching info
-// card, relabels the install button based on the current install state
-// (Install / Switch / Already running), and disables it when there's
-// nothing to do.
-window.onFwProfileChange = function () {
-  const profile = document.getElementById('providerFwProfile')?.value || '';
-  const cpuInfo = document.getElementById('providerFwInfoCpu');
-  const gpuInfo = document.getElementById('providerFwInfoGpu');
-  const btn     = document.getElementById('providerFwInstallBtn');
-  if (cpuInfo) cpuInfo.style.display = profile === 'cpu'  ? '' : 'none';
-  if (gpuInfo) gpuInfo.style.display = profile === 'cuda' ? '' : 'none';
-  if (!btn) return;
-  const installed = window._fwInstalledProfile || null; // set by loadProviderConfig
-  if (profile && installed && profile === installed) {
-    btn.textContent = 'Already running';
-    btn.disabled = true;
-    btn.style.background = 'var(--muted)';
-    btn.style.cursor = 'not-allowed';
-  } else if (profile === 'cpu' || profile === 'cuda') {
-    btn.textContent = installed
-      ? `Switch to ${profile === 'cpu' ? 'CPU' : 'GPU'}`
-      : 'Save & install';
-    btn.disabled = false;
-    btn.style.background = 'var(--accent)';
-    btn.style.cursor = 'pointer';
-  } else {
-    btn.textContent = 'Save & install';
-    btn.disabled = true;
-    btn.style.background = 'var(--muted)';
-    btn.style.cursor = 'not-allowed';
-  }
-};
-
-// Save&install handler — reads profile dropdown and hands off to the
-// existing installFasterWhisper (which streams SSE log into providerFwLog).
-window.installFwFromPicker = function () {
-  const profile = document.getElementById('providerFwProfile')?.value;
-  if (profile !== 'cpu' && profile !== 'cuda') return;
-  return window.installFasterWhisper(profile);
-};
-
-// Populate the "pin STT to a GPU" selector. Only meaningful on the cuda profile
-// with more than one NVIDIA GPU — otherwise the wrapper stays hidden. Called by
-// loadProviderConfig with the provider-config payload (for the current pin).
-window._populateFwGpuPin = async function (cfg) {
-  const wrap = document.getElementById('providerFwGpuWrap');
-  const sel  = document.getElementById('providerFwGpuPin');
-  if (!wrap || !sel) return;
-  // Only the GPU profile can be pinned to a device.
-  if (cfg?.fasterWhisperProfile !== 'cuda') { wrap.style.display = 'none'; return; }
-  let gpus = [];
+window.uninstallLocalStt = async function () {
+  const choice = localSttChoice();
+  if (localSttBusy || !confirm(`Uninstall ${choice.label}? Cached model downloads are kept for reinstalling.`)) return;
+  localSttSetBusy(true);
   try {
-    const r = await fetch('/api/hardware/gpus').then(x => x.json());
-    gpus = Array.isArray(r?.gpus) ? r.gpus : [];
-  } catch { gpus = []; }
-  // No selector for single-GPU (or no-GPU) boxes — nothing to choose.
-  if (gpus.length < 2) { wrap.style.display = 'none'; return; }
-  const current = Number.isInteger(cfg?.fasterWhisperGpuId) ? cfg.fasterWhisperGpuId : '';
-  const fmtFree = g => (g.memFreeMiB != null ? ` — ${(g.memFreeMiB / 1024).toFixed(1)} GB free` : '');
-  sel.innerHTML =
-    `<option value="">Auto (CUDA default — usually GPU 0)</option>` +
-    gpus.map(g => `<option value="${escHtml(g.index)}">GPU ${escHtml(g.index)}: ${escHtml(g.name)}${fmtFree(g)}</option>`).join('');
-  sel.value = current === '' ? '' : String(current);
-  wrap.style.display = 'flex';
-};
-
-// Persist the chosen GPU pin. Server rewrites the systemd unit + restarts STT.
-window.onFwGpuPinChange = async function () {
-  const sel = document.getElementById('providerFwGpuPin');
-  const status = document.getElementById('providerFwGpuStatus');
-  if (!sel) return;
-  const raw = sel.value;
-  const gpuId = raw === '' ? null : Number(raw);
-  if (status) status.textContent = 'Applying… restarting STT service.';
-  try {
-    const res = await fetch('/api/provider-config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fasterWhisperGpuId: gpuId }),
-    });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || `HTTP ${res.status}`);
-    showToast(gpuId === null ? 'STT GPU set to auto' : `STT pinned to GPU ${gpuId}`);
-    if (status) status.textContent = 'Pin Faster-Whisper to a specific GPU. Changing this restarts the STT service (~15 s).';
-  } catch (e) {
-    showToast(`Failed to set STT GPU: ${e.message}`);
-    if (status) status.textContent = `Failed: ${e.message}`;
-  }
+    const response = await fetch('/api/provider-config/uninstall-local-stt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: choice.id }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Uninstall failed.');
+    await loadProviderConfig();
+  } catch (error) { showToast?.(error.message); }
+  finally { localSttSetBusy(false); window.updateLocalSttFields(); }
 };
 
 async function saveProviderTts() {

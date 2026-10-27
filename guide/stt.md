@@ -1,7 +1,7 @@
 # Speech-to-text
 
 Speech-to-text (STT) converts a voice recording into the text your assistant
-reads. Choose either local Faster-Whisper or an OpenAI-compatible transcription
+reads. Choose a local speech model or an OpenAI-compatible transcription
 service. This setting is shared by the installation's voice devices.
 
 ## What you need
@@ -11,19 +11,63 @@ For local installation, use a Linux host with systemd user services. The
 single-container Docker setup does not support the local installer; use a
 separate transcription service instead.
 
-## Local Faster-Whisper
+## Local speech models
 
-1. Enable **Speech-to-Text** and select **Local — Faster-Whisper**.
-2. If it is not installed, choose **CPU** or **GPU**. The GPU profile requires
-   an NVIDIA GPU and driver; use CPU for other hardware.
-3. Review the disk and memory estimates shown for that profile.
-4. Choose **Save & install** and wait for the progress panel to finish.
+1. Enable **Speech-to-Text** and select **Local — runs on this server**.
+2. Choose **Faster-Whisper large-v3-turbo**, **Photon Ultra + Silero**, or
+   **Photon Redux + Silero**.
+3. Choose a CPU or NVIDIA GPU profile and review its requirements. Ultra uses
+   the GPU profile. Redux and Whisper also offer CPU profiles. Photon GPU
+   profiles require an NVIDIA Ampere or newer GPU and a compatible driver.
+4. Choose **Install & use** and wait for the progress panel to finish. An
+   already installed profile shows **Use model** instead.
+   To remove the model you currently use, check **Uninstall [previous model]
+   after switching**. This is optional and starts unchecked.
 5. Confirm the service status. On supported multi-GPU systems, **STT GPU**
    lets you select a GPU; changing it restarts the speech service.
 
 The local service runs on the OE server and needs no provider API key. Its
 model is downloaded during installation. Existing remote credentials are kept
 when you change modes, so you can switch back later.
+
+| Model | Model download | Available profiles |
+| --- | --- | --- |
+| Faster-Whisper large-v3-turbo | About 1.6 GB | CPU, NVIDIA GPU |
+| Photon Ultra + Silero | About 1.26 GB | NVIDIA GPU |
+| Photon Redux + Silero | About 178 MB | CPU, NVIDIA GPU |
+
+Runtime packages use additional disk space, particularly the GPU libraries.
+The two Photon models share a runtime when installed with the same profile.
+Redux has smaller weights; that does not imply equally small GPU memory use.
+Ultra is the stronger candidate for recognition in background noise. Test your
+own microphones and short commands before deciding which model to use.
+
+Both Photon options always apply Silero speech detection before transcription.
+If no speech is detected, they return an empty transcript. The detector cannot
+guarantee that every noise recording is rejected or every quiet utterance is
+retained. The installer downloads the model first; the running Photon service
+uses cached files and makes no required cloud requests. Parakeet detects the
+spoken language automatically rather than forcing Whisper's language setting.
+
+Only the selected local STT service is enabled and running. Switching stops and
+disables the other local STT services, starts the selected model, and checks it
+before saving the new selection. A failed switch keeps the previous setting
+and attempts to restore its service. Choosing **Remote API** stops all local
+STT services. Browsing a model in the picker does not switch the active model.
+
+The optional uninstall runs only after the replacement is ready and selected.
+If installation or startup fails, the previous installation is kept. If cleanup
+fails after a successful switch, OE keeps the new model running and shows the
+uninstall error. Downloaded models are kept for reinstallation, and a shared
+Photon runtime is retained while another installed Photon model still uses it.
+
+To uninstall a model, first select another model or Remote API. Uninstall
+removes its service and any Photon runtime no longer used by the other model.
+Cached model downloads are kept for a later reinstall.
+
+Photon installation currently supports Python 3.10–3.13 on Linux with systemd
+user services. Model information: [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra)
+and [Parakeet Redux](https://huggingface.co/moondream/parakeet-redux).
 
 ## Remote or separately hosted API
 

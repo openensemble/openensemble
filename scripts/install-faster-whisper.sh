@@ -120,13 +120,13 @@ step "Upgrading pip..."
 if [ "$FW_DEVICE" = "cuda" ]; then
   step "Installing faster-whisper + NVIDIA CUDA runtime libs (~2 GB on disk)..."
   "$VENV/bin/pip" install --quiet \
-    faster-whisper \
+    'faster-whisper==1.2.1' 'av==17.0.1' \
     nvidia-cublas-cu12 nvidia-cudnn-cu12 \
     fastapi "uvicorn[standard]" python-multipart
 else
   step "Installing faster-whisper (CPU only)..."
   "$VENV/bin/pip" install --quiet \
-    faster-whisper \
+    'faster-whisper==1.2.1' 'av==17.0.1' \
     fastapi "uvicorn[standard]" python-multipart
 fi
 
@@ -182,6 +182,11 @@ UNIT
 
 step "Reloading systemd-user daemon..."
 systemctl --user daemon-reload
+
+if [ "${FW_INSTALL_ONLY:-0}" = "1" ]; then
+  step "Installed. OpenEnsemble will start and verify this service when selecting it."
+  exit 0
+fi
 
 step "Enabling + starting $SERVICE_NAME..."
 systemctl --user enable --now "$SERVICE_NAME"

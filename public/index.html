@@ -1284,12 +1284,12 @@
             <div id="providerBody_stt">
               <div class="settings-section-desc" style="margin-bottom:8px">Required for voice devices to transcribe captured speech.</div>
 
-              <!-- Mode selector — Remote API vs Local Faster-Whisper. The
+              <!-- Mode selector — Remote API vs a local speech model. The
                    active mode is persisted as cfg.sttMode so the user's
                    remote credentials survive a switch to Local and back. -->
               <select id="providerSttMode" data-change-action="updateSttModeFields" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
                 <option value="remote">Remote API (OpenAI / Groq / etc. — needs API key)</option>
-                <option value="local">Local — Faster-Whisper large-v3-turbo (no key, runs on this server)</option>
+                <option value="local">Local — runs on this server (no API key)</option>
               </select>
 
               <!-- Remote API fields -->
@@ -1310,49 +1310,34 @@
                 <div id="providerSttStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
               </div>
 
-              <!-- Local Faster-Whisper fields. The picker + info card pair
-                   only renders when Faster-Whisper isn't installed yet; once
-                   it is, only the status line and Uninstall button remain. -->
               <div id="providerSttFields_local" style="display:none">
-                <div id="providerFwStatus" class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:8px">Checking service…</div>
-
-                <div id="providerFwPicker" style="display:none;flex-direction:column;gap:8px;margin-bottom:8px">
-                  <div class="settings-section-desc" style="font-size:11px;color:var(--muted);margin:0">Faster-Whisper isn't installed yet. Pick a profile to install:</div>
-                  <select id="providerFwProfile" data-change-action="onFwProfileChange" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
-                    <option value="">— Select profile —</option>
-                    <option value="cpu">CPU (works on any system)</option>
-                    <option value="cuda">GPU (NVIDIA + driver required)</option>
-                  </select>
-
-                  <!-- CPU info card (toggled by onFwProfileChange) -->
-                  <div id="providerFwInfoCpu" style="display:none;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);line-height:1.5">
-                    <b style="color:var(--text)">CPU profile</b> · <b style="color:var(--text)">Disk:</b> ~810 MB · <b style="color:var(--text)">RAM at runtime:</b> ~2 GB · <b style="color:var(--text)">No GPU required.</b><br>
-                    Speed depends heavily on your CPU. Modern desktop CPUs run ~2-3× faster than realtime on long clips. Older / low-end CPUs (laptops, SBCs) land near realtime. For short voice-device utterances (3-10 sec), per-request overhead dominates either way — expect ~10 sec to transcribe a 3-sec utterance.
-                  </div>
-
-                  <!-- GPU info card (toggled by onFwProfileChange) -->
-                  <div id="providerFwInfoGpu" style="display:none;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);line-height:1.5">
-                    <b style="color:var(--text)">GPU profile</b> · <b style="color:var(--text)">Disk:</b> ~810 MB model + ~2 GB NVIDIA CUDA libs · <b style="color:var(--text)">VRAM at runtime:</b> ~2.5 GB · <b style="color:var(--text)">Requires an NVIDIA GPU + driver</b> (install fails fast if <code>nvidia-smi</code> isn't on PATH).<br>
-                    14-40× faster than realtime depending on GPU. A 3-sec utterance transcribes in ~400 ms. Recommended whenever you have a discrete GPU with ~3 GB free VRAM.<br>
-                    <b style="color:var(--text)">Not supported:</b> AMD GPUs (no ROCm), Intel GPUs (no oneAPI), macOS (no CUDA). Use the CPU profile on those systems.
-                  </div>
-
-                  <button id="providerFwInstallBtn" data-action="installFwFromPicker" type="button" disabled style="background:var(--muted);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:not-allowed;font-weight:600;align-self:flex-start">Save & install</button>
+                <label for="providerLocalSttProvider" style="font-size:11px">Local speech model</label>
+                <select id="providerLocalSttProvider" data-change-action="updateLocalSttFields" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin:4px 0 8px">
+                  <option value="faster-whisper">Faster-Whisper large-v3-turbo</option>
+                  <option value="photon-ultra">Photon Ultra + Silero</option>
+                  <option value="photon-redux">Photon Redux + Silero</option>
+                </select>
+                <div id="providerLocalSttStatus" class="settings-section-desc" style="font-size:11px;margin-bottom:8px">Checking service…</div>
+                <label for="providerLocalSttProfile" style="font-size:11px">Run on</label>
+                <select id="providerLocalSttProfile" data-change-action="onLocalSttProfileChange" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin:4px 0 8px"></select>
+                <div id="providerLocalSttInfo" style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px"></div>
+                <div id="providerLocalSttGpuWrap" style="display:none;margin-bottom:8px">
+                  <label for="providerLocalSttGpu" style="font-size:11px">STT GPU</label>
+                  <select id="providerLocalSttGpu" data-change-action="onLocalSttGpuChange" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px"></select>
                 </div>
-
-                <!-- GPU pin (shown only when installed on the GPU profile and the
-                     box has more than one NVIDIA GPU). Lets users keep STT off a
-                     GPU they want free for e.g. local model training. Populated +
-                     toggled by loadProviderConfig. -->
-                <div id="providerFwGpuWrap" style="display:none;flex-direction:column;gap:4px;margin-bottom:8px">
-                  <label for="providerFwGpuPin" style="font-size:11px;color:var(--text);font-weight:600">STT GPU</label>
-                  <select id="providerFwGpuPin" data-change-action="onFwGpuPinChange" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px"></select>
-                  <div id="providerFwGpuStatus" style="font-size:10px;color:var(--muted);line-height:1.4">Pin Faster-Whisper to a specific GPU. Changing this restarts the STT service (~15 s).</div>
+                <div id="providerLocalSttRemovePreviousWrap" style="display:none;margin-bottom:10px">
+                  <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;cursor:pointer">
+                    <input id="providerLocalSttRemovePrevious" type="checkbox">
+                    <span id="providerLocalSttRemovePreviousLabel"></span>
+                  </label>
+                  <div style="font-size:10px;color:var(--muted);margin:4px 0 0 24px">Removed only after the new model is ready. Downloaded models are kept for faster reinstallation.</div>
                 </div>
-
-                <button id="providerFwUninstallBtn" data-action="uninstallFasterWhisper" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;align-self:flex-start">Uninstall</button>
-
-                <pre id="providerFwLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:240px;overflow:auto;margin:8px 0 0;white-space:pre-wrap"></pre>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button id="providerLocalSttInstallBtn" data-action="installLocalStt" type="button" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Install &amp; use</button>
+                  <button id="providerLocalSttUninstallBtn" data-action="uninstallLocalStt" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Uninstall</button>
+                </div>
+                <div style="font-size:10px;color:var(--muted);margin-top:8px">Only the selected local speech service runs. Switching stops the previous service and frees its memory. Both Photon choices include Silero to reject recordings with no detected speech.</div>
+                <pre id="providerLocalSttLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:240px;overflow:auto;margin:8px 0 0;white-space:pre-wrap"></pre>
               </div>
             </div>
           </div>
