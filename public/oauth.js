@@ -2263,6 +2263,7 @@ window.uninstallKittentts = uninstallKittentts;
 // Local STT models share the install log and selection flow. Browsing a model
 // does not change the active service; Install & use / Use model commits it.
 let localSttBusy = false;
+let localSttProgressLabel = '';
 function localSttChoice() {
   const id = document.getElementById('providerLocalSttProvider')?.value || 'faster-whisper';
   return window._localSttConfig?.localSttProviders?.find(p => p.id === id)
@@ -2285,7 +2286,7 @@ window.updateLocalSttFields = function () {
   profile.value = choice.profile || (choice.id === 'photon-ultra' ? 'cuda' : 'cpu');
   const status = document.getElementById('providerLocalSttStatus');
   const active = window._localSttConfig?.sttMode === 'local' && window._localSttConfig?.sttLocalProvider === choice.id;
-  if (status) status.textContent = choice.installed
+  if (status && !localSttProgressLabel) status.textContent = choice.installed
     ? (active ? `${choice.label}: ${choice.available ? 'running' : 'not responding — use the button below to retry starting it'}.` : `${choice.label} is installed. Choose Use model to switch to it.`)
     : `${choice.label} is not installed.`;
   const uninstall = document.getElementById('providerLocalSttUninstallBtn');
@@ -2311,14 +2312,16 @@ window.onLocalSttProfileChange = function () {
     'photon-ultra': 'Parakeet Ultra with Silero. About 1.26 GB of model weights. Designed for GPU use and stronger recognition in background noise.',
     'photon-redux': 'Parakeet Redux with Silero. About 178 MB of model weights. Smaller download; recognition can be less accurate in background noise.',
   };
-  if (info) info.textContent = modelInfo[choice.id] + (profile === 'cuda'
+  const languageInfo = choice.id.startsWith('photon-')
+    ? ' Supports 25 languages. OpenEnsemble testing currently covers English speech only.' : '';
+  if (info) info.textContent = modelInfo[choice.id] + languageInfo + (profile === 'cuda'
     ? ` NVIDIA drivers${choice.id.startsWith('photon-') ? ' and an Ampere or newer GPU' : ''} required. Allow several additional GB for the runtime and about 3 GB of free GPU memory.`
     : ' CPU speed depends on your hardware. Runtime packages require additional disk space.') + ' Linux with systemd user services is required. Models download during installation; transcription runs locally.';
   const installedProfile = choice.installed && profile === choice.profile;
   const active = window._localSttConfig?.sttMode === 'local' && window._localSttConfig?.sttLocalProvider === choice.id;
   const btn = document.getElementById('providerLocalSttInstallBtn');
   if (btn) {
-    btn.textContent = installedProfile ? (active && choice.available ? 'Running' : 'Use model') : 'Install & use';
+    btn.textContent = localSttProgressLabel || (installedProfile ? (active && choice.available ? 'Running' : 'Use model') : 'Install & use');
     btn.disabled = localSttBusy || (installedProfile && active && choice.available);
   }
   window.populateLocalSttGpu();
@@ -2377,12 +2380,34 @@ window.installLocalStt = async function () {
   const status = document.getElementById('providerLocalSttStatus');
   const remove = document.getElementById('providerLocalSttRemovePrevious');
   const uninstallPreviousStt = remove?.checked && remove.dataset.provider ? remove.dataset.provider : undefined;
+  const installing = !choice.installed || choice.profile !== profile;
+  const previous = window._localSttConfig?.localSttProviders?.find(p => p.id === uninstallPreviousStt);
+  const action = installing ? `Installing ${choice.label}…` : `Switching to ${choice.label}…`;
+  const detail = (installing
+    ? 'Downloading any missing files, starting the model, and checking that it is ready. Installation can take several minutes.'
+    : 'Stopping the previous speech service, loading the selected model, and checking that it is ready.')
+    + (previous ? ` ${previous.label} will be uninstalled after the new model is ready.` : '');
+  const button = document.getElementById('providerLocalSttInstallBtn');
+  const progress = document.getElementById('providerLocalSttProgress');
+  const message = document.getElementById('providerLocalSttProgressMessage');
+  const description = document.getElementById('providerLocalSttProgressDetail');
+  const elapsed = document.getElementById('providerLocalSttProgressElapsed');
+  const startedAt = performance.now();
   let warning = '';
   localSttSetBusy(true);
-  log.style.display = ''; log.textContent = '';
-  status.textContent = `Preparing ${choice.label}…`;
+  localSttProgressLabel = installing ? 'Installing…' : 'Switching…';
+  button.textContent = localSttProgressLabel;
+  button.setAttribute('aria-busy', 'true');
+  log.style.display = ''; log.textContent = `${action}\n${detail}\n`;
+  status.textContent = action;
+  if (message) message.textContent = action;
+  if (description) description.textContent = detail;
+  if (progress) progress.hidden = false;
+  const updateElapsed = () => { if (elapsed) elapsed.textContent = `${Math.floor((performance.now() - startedAt) / 1000)}s elapsed`; };
+  updateElapsed();
+  const timer = setInterval(updateElapsed, 1000);
   try {
-    if (choice.installed && choice.profile === profile) {
+    if (!installing) {
       const result = await saveLocalSttSelection({ sttMode: 'local', sttLocalProvider: choice.id, uninstallPreviousStt });
       warning = result.warning || '';
       if (result.uninstalledPreviousStt) log.textContent += 'Previous speech model uninstalled. Cached downloads were kept.\n';
@@ -2410,10 +2435,19 @@ window.installLocalStt = async function () {
       if (!success) throw new Error(failure);
     }
     await loadProviderConfig();
+    status.textContent = `${choice.label} is running.`;
+    log.textContent += `${choice.label} is running. Completed in ${((performance.now() - startedAt) / 1000).toFixed(1)}s.\n`;
     if (warning) { status.textContent = warning; log.textContent += `\n[warning] ${warning}\n`; }
     showToast?.(warning || `${choice.label} is running`);
-  } catch (error) { status.textContent = error.message; log.textContent += `\n[error] ${error.message}\n`; }
-  finally { localSttSetBusy(false); window.onLocalSttProfileChange(); }
+  } catch (error) { status.textContent = `${installing ? 'Installation' : 'Switch'} failed: ${error.message}`; log.textContent += `\n[error] ${error.message}\n`; }
+  finally {
+    clearInterval(timer);
+    localSttProgressLabel = '';
+    button.removeAttribute('aria-busy');
+    if (progress) progress.hidden = true;
+    localSttSetBusy(false);
+    window.onLocalSttProfileChange();
+  }
 };
 window.uninstallLocalStt = async function () {
   const choice = localSttChoice();

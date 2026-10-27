@@ -1317,7 +1317,7 @@
                   <option value="photon-ultra">Photon Ultra + Silero</option>
                   <option value="photon-redux">Photon Redux + Silero</option>
                 </select>
-                <div id="providerLocalSttStatus" class="settings-section-desc" style="font-size:11px;margin-bottom:8px">Checking service…</div>
+                <div id="providerLocalSttStatus" class="settings-section-desc" role="status" aria-live="polite" style="font-size:11px;margin-bottom:8px">Checking service…</div>
                 <label for="providerLocalSttProfile" style="font-size:11px">Run on</label>
                 <select id="providerLocalSttProfile" data-change-action="onLocalSttProfileChange" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin:4px 0 8px"></select>
                 <div id="providerLocalSttInfo" style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px"></div>
@@ -1335,6 +1335,12 @@
                 <div style="display:flex;gap:8px;align-items:center">
                   <button id="providerLocalSttInstallBtn" data-action="installLocalStt" type="button" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Install &amp; use</button>
                   <button id="providerLocalSttUninstallBtn" data-action="uninstallLocalStt" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Uninstall</button>
+                </div>
+                <div id="providerLocalSttProgress" hidden style="margin-top:8px;padding:10px;background:var(--bg2);border:1px solid var(--accent);border-radius:8px">
+                  <div id="providerLocalSttProgressMessage" role="status" aria-live="polite" style="font-size:12px;font-weight:600"></div>
+                  <progress aria-label="Speech model operation in progress" style="display:block;width:100%;height:6px;margin:8px 0;accent-color:var(--accent)"></progress>
+                  <div id="providerLocalSttProgressDetail" style="font-size:11px;line-height:1.5"></div>
+                  <div id="providerLocalSttProgressElapsed" aria-live="off" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
                 </div>
                 <div style="font-size:10px;color:var(--muted);margin-top:8px">Only the selected local speech service runs. Switching stops the previous service and frees its memory. Both Photon choices include Silero to reject recordings with no detected speech.</div>
                 <pre id="providerLocalSttLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:240px;overflow:auto;margin:8px 0 0;white-space:pre-wrap"></pre>

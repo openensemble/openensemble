@@ -30,6 +30,8 @@ separate transcription service instead.
    profiles require an NVIDIA Ampere or newer GPU and a compatible driver.
 4. Choose **Install & use** and wait for the progress panel to finish. An
    already installed profile shows **Use model** instead.
+   Clicking immediately shows **Installing…** or **Switching…**, with a
+   progress indicator, the operation details, and elapsed time.
    To remove the model you currently use, check **Uninstall [previous model]
    after switching**. This is optional and starts unchecked.
 5. Confirm the service status. On supported multi-GPU systems, **STT GPU**
@@ -51,12 +53,19 @@ Redux has smaller weights; that does not imply equally small GPU memory use.
 Ultra is the stronger candidate for recognition in background noise. Test your
 own microphones and short commands before deciding which model to use.
 
+**Language support:** the [Ultra](https://huggingface.co/moondream/parakeet-ultra)
+and [Redux](https://huggingface.co/moondream/parakeet-redux) model cards list
+**25 supported languages**, including English, Spanish, French, and German.
+**OpenEnsemble's Photon testing currently covers English speech only.** Other
+languages have not yet been validated in OE. Photon infers the spoken language
+from the recording; OE's Whisper language setting does not force Photon to
+transcribe in English.
+
 Both Photon options always apply Silero speech detection before transcription.
 If no speech is detected, they return an empty transcript. The detector cannot
 guarantee that every noise recording is rejected or every quiet utterance is
 retained. The installer downloads the model first; the running Photon service
-uses cached files and makes no required cloud requests. Parakeet detects the
-spoken language automatically rather than forcing Whisper's language setting.
+uses cached files and makes no required cloud requests.
 
 Only the selected local STT service is enabled and running. Switching stops and
 disables the other local STT services, starts the selected model, and checks it
