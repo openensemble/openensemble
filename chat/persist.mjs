@@ -77,13 +77,14 @@ export function buildDesktopFoldersBlock(userId, source) {
   }
   const sandboxes = Array.isArray(active.sandboxes) ? active.sandboxes : [];
   const lines = sandboxes
-    .filter(s => s?.name && s?.path)
-    .map(s => `- ${s.name}: ${s.path}`);
+    .filter(s => s?.name)
+    .map(s => `- ${s.name}${s.path ? `: ${s.path}` : ' (configured on the desktop)'}`);
   return [
     '\n\n## Desktop Local Folders',
     'This turn came from the OpenEnsemble Desktop app. User-visible artifacts should go to the connected desktop sandboxes instead of the server .openensemble user folder.',
     lines.length ? `Available local sandboxes:\n${lines.join('\n')}` : 'No sandbox folder list was reported by the desktop client.',
     'Use desktop_* tools for files, downloads, generated assets, and code output when those tools are available. Prefer images for generated images, videos for generated videos, downloads for downloaded files, documents for documents, research for research outputs, and coder for source code.',
+    'When an image generator returns an images:filename attachment ID and the user asks to save it on their computer, call desktop_save_attachment with that exact attachment_id and sandbox images. Request the desktop tool group if needed. The server transfers the original image bytes; do not search for an export URL, invent base64, or regenerate the image. Only report a local save after the desktop confirms success. The images sandbox is the folder configured in the app, which may differ from Windows Pictures or the Windows Desktop folder.',
   ].join('\n');
 }
 

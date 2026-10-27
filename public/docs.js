@@ -8,6 +8,7 @@ let _docAllDocs      = [];
 let _docShareModalId  = null;
 let _docShareModalSel = new Set();
 let _docSelected     = new Set();
+let _docSelectionAnchor = null;
 let _docBatchBusy    = false;
 let _docBatchStatus  = '';
 let _docListSeq      = 0;
@@ -266,6 +267,7 @@ function _filteredDocs(filter = _docFilter) {
 }
 
 function applyDocFilter(filter) {
+  _docSelectionAnchor = null;
   renderDocList(_filteredDocs(filter), filter);
   _syncDocSelection();
 }
@@ -281,6 +283,8 @@ function _selectedDocs() {
 }
 
 function resetDocAccountState() {
+  _docSelectionAnchor = null;
+  if (typeof resetDesktopSelection === 'function') resetDesktopSelection();
   ++_docListSeq;
   _docSelected.clear();
   _docAllDocs = [];
@@ -293,16 +297,22 @@ function resetDocAccountState() {
   _syncDocSelection();
 }
 
-function toggleDocSelection(key, checked) {
+function toggleDocSelection(key, checked, event) {
   if (_docBatchBusy) return;
   if (!_docAllDocs.some(doc => _docSelectionKey(doc) === key)) return;
-  if (checked) _docSelected.add(key); else _docSelected.delete(key);
+  const visible = _filteredDocs().map(_docSelectionKey);
+  const start = visible.indexOf(_docSelectionAnchor), end = visible.indexOf(key);
+  if (event?.shiftKey && start >= 0 && end >= 0) {
+    for (let i = Math.min(start, end); i <= Math.max(start, end); i++) _docSelected.add(visible[i]);
+  } else if (checked) _docSelected.add(key); else _docSelected.delete(key);
+  _docSelectionAnchor = key;
   _docBatchStatus = '';
   _syncDocSelection();
 }
 
 function selectAllDocs(checked) {
   if (_docBatchBusy) return;
+  _docSelectionAnchor = null;
   for (const doc of _filteredDocs()) {
     const key = _docSelectionKey(doc);
     if (checked) _docSelected.add(key); else _docSelected.delete(key);
@@ -313,6 +323,7 @@ function selectAllDocs(checked) {
 
 function clearDocSelection() {
   if (_docBatchBusy) return;
+  _docSelectionAnchor = null;
   _docSelected.clear();
   _docBatchStatus = '';
   _syncDocSelection();
@@ -333,7 +344,7 @@ function _syncDocSelection() {
   $('docDownloadSelected').disabled = _docBatchBusy || !selected.length;
   $('docDeleteSelected').disabled = _docBatchBusy || !selected.length || hasShared;
   $('docClearSelection').disabled = _docBatchBusy || !selected.length;
-  $('docSelectionHint').textContent = _docBatchStatus || (hasShared ? 'Shared files can be downloaded. Deselect them to delete your own files.' : '');
+  $('docSelectionHint').textContent = _docBatchStatus || (hasShared ? 'Shared files can be downloaded. Deselect them to delete your own files.' : visible.length ? 'Use checkboxes to select files. Shift-click selects a range.' : '');
   bar.setAttribute('aria-busy', String(_docBatchBusy));
   for (const input of $('docList').querySelectorAll('[data-doc-select]')) {
     input.checked = _docSelected.has(input.dataset.docSelect);
@@ -583,7 +594,7 @@ function renderDocList(docs, filter) {
     const selectionKey = escHtml(_docSelectionKey(doc));
     const selectionArgs = escHtml(JSON.stringify([_docSelectionKey(doc), '$checked']));
     return `<div class="doc-card" style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg3);display:flex;flex-direction:column;min-width:0">
-      <label class="doc-card-select"><input type="checkbox" data-doc-select="${selectionKey}" data-change-action="toggleDocSelection" data-change-args="${selectionArgs}" aria-label="Select ${escHtml(doc.filename)}"> Select</label>
+      <label class="doc-card-select"><input type="checkbox" data-doc-select="${selectionKey}" data-action="toggleDocSelection" data-args="${selectionArgs}" aria-label="Select ${escHtml(doc.filename)}"> Select</label>
       ${thumbHtml}
       <div style="padding:7px 9px;flex:1;display:flex;flex-direction:column;gap:4px">
         <div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3" title="${escHtml(doc.filename)}">${escHtml(doc.filename)}</div>
@@ -594,6 +605,14 @@ function renderDocList(docs, filter) {
   }).join('');
 
   list.innerHTML = `<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">${cards}</div>`;
+  for (const card of list.querySelectorAll('.doc-card')) card.addEventListener('click', event => {
+    if (event.target.closest('button, a, input, label, audio, video')) return;
+    const key = card.querySelector('[data-doc-select]').dataset.docSelect;
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      event.preventDefault(); event.stopPropagation();
+      toggleDocSelection(key, !_docSelected.has(key), event);
+    } else _docSelectionAnchor = key;
+  });
 
   // Populate previews after render. Run sequentially so a drawer with many
   // docs (10+ text + research items rendered together) doesn't fan out a burst

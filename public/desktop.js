@@ -1,6 +1,8 @@
 // ── Workspace View ────────────────────────────────────────────────────────────
 let _desktopLoaded = false;
 let _currentDesktopView = 'chat'; // 'chat' or 'desktop'
+let _desktopCategorySeq = 0;
+let _desktopSelection = null;
 
 // Dashboard has two entry points (the main view switcher and the left rail),
 // but one canonical drawer/studio. Keep both view switchers aligned with that
@@ -68,13 +70,46 @@ async function fetchDocCount() {
 }
 
 async function fetchImageCount() {
-  try { const r = await fetch('/api/desktop/images'); const d = await r.json(); return { count: d.length, items: d }; }
-  catch { return { count: 0, items: [] }; }
+  const items = await fetchDesktopMedia('images');
+  return { count: items.length, items };
 }
 
 async function fetchVideoCount() {
-  try { const r = await fetch('/api/desktop/videos'); const d = await r.json(); return { count: d.length, items: d }; }
-  catch { return { count: 0, items: [] }; }
+  const items = await fetchDesktopMedia('videos');
+  return { count: items.length, items };
+}
+
+async function fetchDesktopMedia(type) {
+  const userId = getCurrentUserId();
+  const response = await fetch(`/api/desktop/${type}`);
+  if (!response.ok) throw new Error('Unable to load media.');
+  const items = await response.json();
+  let documents = [];
+  // Shared uploads appear in the media gallery too, but their stored filenames
+  // are document IDs. Preserve that identity for preview, download and delete.
+  if (items.some(item => item.sharedBy)) {
+    const uploaded = await fetch('/api/shared-docs');
+    if (!uploaded.ok) throw new Error('Unable to identify uploaded media.');
+    documents = await uploaded.json();
+  }
+  if (userId !== getCurrentUserId()) throw new Error('Account changed. Reopen this category.');
+  const mime = type === 'images' ? 'image/' : 'video/';
+  return items.map(item => {
+    const doc = item.sharedBy && documents.find(doc => doc.filename === item.filename && doc.uploadedBy === item.sharedBy && doc.mimeType?.startsWith(mime));
+    return { ...item, documentId: doc?.id, isOwn: doc ? doc.isOwn : !item.sharedBy || item.sharedBy === userId };
+  });
+}
+
+function desktopMediaDocument(item, type) {
+  return { ...item, id: item.documentId, _source: item.documentId ? 'document' : type === 'images' ? 'ai-image' : 'ai-video',
+    isOwn: item.isOwn ?? (!item.sharedBy || item.sharedBy === getCurrentUserId()), _sharedOwnerId: item.sharedBy };
+}
+
+function desktopMediaUrl(item, type, download = false) {
+  const token = encodeURIComponent(getMediaTokenSync());
+  return item.documentId
+    ? `/api/shared-docs/${encodeURIComponent(item.documentId)}/${download ? 'download' : 'view'}?token=${token}`
+    : `/api/desktop/${type}/${encodeURIComponent(item.filename)}?token=${token}`;
 }
 
 async function fetchTutorCount() {
@@ -110,6 +145,8 @@ async function loadDesktopCategories() {
 async function openDesktopCategory(type) {
   const cat = DESKTOP_CATEGORIES.find(c => c.type === type);
   if (!cat) return;
+  resetDesktopSelection();
+  const seq = _desktopCategorySeq;
 
   $('desktopCategories').style.display = 'none';
   $('desktopBoard').style.display = 'none';
@@ -122,6 +159,7 @@ async function openDesktopCategory(type) {
 
   try {
     const data = await cat.fetchCount();
+    if (seq !== _desktopCategorySeq) return;
     if (data.count === 0) {
       grid.innerHTML = `<div class="desktop-empty">
         <div class="empty-icon">${cat.icon}</div>
@@ -144,12 +182,161 @@ async function openDesktopCategory(type) {
 }
 
 function showDesktopCategories() {
+  resetDesktopSelection();
   $('desktopItems').style.display = 'none';
   $('desktopCategories').style.display = 'flex';
   $('desktopBoard').style.display = '';
   // Refresh counts + board
   loadDesktopCategories();
   loadDesktopBoard();
+}
+
+function resetDesktopSelection() {
+  ++_desktopCategorySeq;
+  _desktopSelection = null;
+  if ($('desktopSelectionBar')) $('desktopSelectionBar').hidden = true;
+}
+
+// Use the rendered order for ranges, including both endpoints. Previews remain
+// separate buttons so selecting files never requires opening a modal.
+function setupDesktopSelection(grid, type, items) {
+  const state = _desktopSelection = {
+    type, items, selected: new Set(), anchor: null, busy: false, status: '',
+    userId: getCurrentUserId(),
+  };
+  $('desktopSelectionBar').hidden = false;
+  [...grid.children].forEach((card, index) => {
+    const item = items[index];
+    card.dataset.desktopIndex = index;
+    const label = document.createElement('label');
+    label.className = 'desktop-item-select';
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.setAttribute('aria-label', `Select ${item.filename}`);
+    label.append(check, document.createTextNode(' Select'));
+    card.prepend(label);
+    check.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleDesktopItem(index, check.checked, event.shiftKey);
+    });
+    label.addEventListener('click', event => event.stopPropagation());
+    const action = card.dataset.action;
+    if (action) {
+      const button = document.createElement('button');
+      button.className = 'desktop-item-preview'; button.textContent = 'Preview';
+      button.dataset.action = action; button.dataset.args = card.dataset.args;
+      button.setAttribute('aria-label', `Preview ${item.filename}`);
+      card.append(button);
+    }
+    card.addEventListener('click', event => {
+      if (event.target.closest('button, a, input, label, audio')) return;
+      if (state.busy) { event.preventDefault(); event.stopPropagation(); return; }
+      if (event.shiftKey || event.ctrlKey || event.metaKey || state.selected.size) {
+        event.preventDefault(); event.stopPropagation();
+        toggleDesktopItem(index, !state.selected.has(index), event.shiftKey);
+      } else if (action) state.anchor = index;
+    });
+  });
+  syncDesktopSelection();
+}
+
+function toggleDesktopItem(index, checked, range = false) {
+  const state = _desktopSelection;
+  if (!state || state.busy || !state.items[index]) return;
+  if (range && state.anchor !== null) {
+    for (let i = Math.min(state.anchor, index); i <= Math.max(state.anchor, index); i++) if (state.items[i]) state.selected.add(i);
+  } else if (checked) state.selected.add(index); else state.selected.delete(index);
+  state.anchor = index; state.status = '';
+  syncDesktopSelection();
+}
+
+function selectAllDesktopItems(checked) {
+  const state = _desktopSelection;
+  if (!state || state.busy) return;
+  state.selected = new Set(checked ? state.items.flatMap((item, i) => item ? [i] : []) : []);
+  state.anchor = null; state.status = '';
+  syncDesktopSelection();
+}
+
+function clearDesktopSelection() { selectAllDesktopItems(false); }
+
+function syncDesktopSelection() {
+  const state = _desktopSelection;
+  if (!state) return;
+  const count = state.selected.size;
+  const available = state.items.filter(Boolean).length;
+  const shared = [...state.selected].some(i => !state.items[i].isOwn);
+  const all = $('desktopSelectAll');
+  all.checked = count > 0 && count === available;
+  all.indeterminate = count > 0 && count < available;
+  all.disabled = state.busy || !available;
+  $('desktopSelectionCount').textContent = `${count} selected`;
+  $('desktopDownloadSelected').disabled = state.busy || !count;
+  $('desktopDeleteSelected').disabled = state.busy || !count || shared;
+  $('desktopClearSelection').disabled = state.busy || !count;
+  $('desktopSelectionStatus').textContent = state.status || (shared
+    ? 'Shared files can be downloaded. Deselect them to delete your own files.'
+    : 'Use checkboxes to select files. Shift-click selects a range. Downloads are saved together in a ZIP.');
+  $('desktopSelectionBar').setAttribute('aria-busy', String(state.busy));
+  for (const card of $('desktopItemsGrid').children) {
+    const input = card.querySelector('.desktop-item-select input');
+    if (!input) continue;
+    input.checked = state.selected.has(Number(card.dataset.desktopIndex)); input.disabled = state.busy;
+    card.classList.toggle('desktop-item-selected', input.checked);
+    card.querySelectorAll('button').forEach(button => { button.disabled = state.busy; });
+  }
+}
+
+async function downloadSelectedDesktopItems() {
+  const state = _desktopSelection;
+  if (!state || state.busy || !state.selected.size) return;
+  const items = [...state.selected].map(i => state.items[i]);
+  state.busy = true; state.status = `Preparing ${items.length} selected items…`; syncDesktopSelection();
+  try {
+    const response = await fetch('/api/document-batches', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: items.map(item => ({ source: item._source, id: item.id, filename: item.filename, ownerId: item._sharedOwnerId })) }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Server error ${response.status}`);
+    if (state !== _desktopSelection || state.userId !== getCurrentUserId()) return;
+    const token = getMediaTokenSync();
+    _startBrowserDownload(`/api/document-batches/${encodeURIComponent(result.id)}/download${token ? '?token=' + encodeURIComponent(token) : ''}`, result.filename);
+    state.status = `ZIP download started for ${items.length} selected items.`;
+  } catch (error) { state.status = `Download failed: ${error.message}`; }
+  finally { state.busy = false; if (state === _desktopSelection) syncDesktopSelection(); }
+}
+
+async function deleteSelectedDesktopItems() {
+  const state = _desktopSelection;
+  if (!state || state.busy || !state.selected.size) return;
+  const indices = [...state.selected], items = indices.map(i => state.items[i]);
+  if (items.some(item => !item.isOwn)) return;
+  const names = items.slice(0, 8).map(item => item.filename).join('\n');
+  if (!confirm(`Delete ${items.length} selected item${items.length === 1 ? '' : 's'}?\n\n${names}${items.length > 8 ? '\n…' : ''}\n\nThis permanently removes the selected files, including any selected code projects and document history. This cannot be undone.`)) return;
+  state.busy = true; const failed = []; let deleted = 0;
+  try {
+    for (const index of indices) {
+      if (state !== _desktopSelection || state.userId !== getCurrentUserId()) return;
+      const item = state.items[index];
+      state.status = `Deleting ${deleted + failed.length + 1} of ${items.length}…`; syncDesktopSelection();
+      try {
+        const response = await fetch(_docDeleteUrl(item), { method: 'DELETE' });
+        if (state !== _desktopSelection || state.userId !== getCurrentUserId()) return;
+        if (!response.ok) {
+          let error = `Server error ${response.status}`;
+          try { error = (await response.json()).error || error; } catch {}
+          throw new Error(error);
+        }
+        state.selected.delete(index); deleted++;
+        // Keep indices stable for preview callbacks and for the remaining items.
+        state.items[index] = null;
+        $('desktopItemsGrid').querySelector(`[data-desktop-index="${index}"]`)?.remove();
+      } catch (error) { failed.push(`${item.filename}: ${error.message}`); }
+    }
+    state.anchor = null;
+    state.status = `Deleted ${deleted} of ${items.length} selected items.${failed.length ? ` ${failed.length} failed and remain selected. ${failed.slice(0, 3).join('; ')}` : ''}`;
+  } finally { state.busy = false; if (state === _desktopSelection) syncDesktopSelection(); }
 }
 
 // ── Render items: Documents ──────────────────────────────────────────────────
@@ -168,6 +355,7 @@ function renderDocumentItems(grid, items) {
       </div>
     </div>`;
   }).join('');
+  setupDesktopSelection(grid, 'documents', items.map(doc => ({ ...doc, _source: 'research', filename: doc.title || doc.filename || doc.id, isOwn: true })));
 }
 
 // ── Render items: Images ─────────────────────────────────────────────────────
@@ -176,13 +364,14 @@ function renderImageItems(grid, items) {
   _desktopImageCache = items;
   items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   grid.innerHTML = items.map((img, i) => {
-    const src = `/api/desktop/images/${encodeURIComponent(img.filename)}?agent=${encodeURIComponent(img.agentId)}&token=${encodeURIComponent(getMediaTokenSync())}`;
+    const src = desktopMediaUrl(img, 'images');
     const label = img.filename.replace(/\.\w+$/, '').replace(/_\d+$/, '').replace(/_/g, ' ');
     return `<div class="desktop-img-thumb" data-action="openDesktopItem" data-args='["images",${i}]'>
       <img src="${src}" alt="${escHtml(img.filename)}" loading="lazy">
       <div class="desktop-img-label">${escHtml(label)}</div>
     </div>`;
   }).join('');
+  setupDesktopSelection(grid, 'images', items.map(img => desktopMediaDocument(img, 'images')));
 }
 
 // ── Render items: Videos ─────────────────────────────────────────────────────
@@ -192,13 +381,14 @@ function renderVideoItems(grid, items) {
   items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   grid.className = 'desktop-items-grid gallery-mode';
   grid.innerHTML = items.map((vid, i) => {
-    const src = `/api/desktop/videos/${encodeURIComponent(vid.filename)}?token=${encodeURIComponent(getMediaTokenSync())}`;
+    const src = desktopMediaUrl(vid, 'videos');
     const label = vid.filename.replace(/\.\w+$/, '').replace(/_\d+$/, '').replace(/_/g, ' ');
     return `<div class="desktop-img-thumb" data-action="openDesktopItem" data-args='["videos",${i}]'>
       <video src="${src}" preload="metadata" style="width:100%;height:100%;object-fit:cover;border-radius:6px;pointer-events:none"></video>
       <div class="desktop-img-label">${escHtml(label)}</div>
     </div>`;
   }).join('');
+  setupDesktopSelection(grid, 'videos', items.map(vid => desktopMediaDocument(vid, 'videos')));
 }
 
 // ── Render items: Tutoring ───────────────────────────────────────────────────
@@ -264,24 +454,25 @@ async function deleteDesktopDoc(docId) {
 }
 
 async function deleteDesktopImage(idx) {
-  const img = _desktopImageCache[idx];
-  if (!img) return;
-  if (!confirm('Delete this image? This cannot be undone.')) return;
-  const params = new URLSearchParams({ agent: img.agentId || '' });
-  const res = await fetch(`/api/desktop/images/${encodeURIComponent(img.filename)}?${params}`, { method: 'DELETE' });
-  if (!res.ok) { alert('Failed to delete image.'); return; }
-  closeDesktopDetail();
-  openDesktopCategory('images');
+  await deleteDesktopMedia(_desktopImageCache[idx], 'images');
 }
 
 async function deleteDesktopVideo(idx) {
-  const vid = _desktopVideoCache[idx];
-  if (!vid) return;
-  if (!confirm('Delete this video? This cannot be undone.')) return;
-  const res = await fetch(`/api/desktop/videos/${encodeURIComponent(vid.filename)}`, { method: 'DELETE' });
-  if (!res.ok) { alert('Failed to delete video.'); return; }
-  closeDesktopDetail();
-  openDesktopCategory('videos');
+  await deleteDesktopMedia(_desktopVideoCache[idx], 'videos');
+}
+
+async function deleteDesktopMedia(item, type) {
+  if (!item || _desktopSelection?.busy) return;
+  const doc = desktopMediaDocument(item, type), userId = getCurrentUserId();
+  if (!doc.isOwn) { alert('Only the owner can delete this file.'); return; }
+  if (!confirm(`Delete "${item.filename}"? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(_docDeleteUrl(doc), { method: 'DELETE' });
+    if (!res.ok) throw new Error('The server could not delete this file. Refresh and try again.');
+    if (userId !== getCurrentUserId()) return;
+    closeDesktopDetail();
+    openDesktopCategory(type);
+  } catch (error) { alert(error.message); }
 }
 
 async function renderDocDetail(el, docId) {
@@ -304,7 +495,7 @@ async function renderDocDetail(el, docId) {
 function renderImageDetail(el, idx) {
   const img = _desktopImageCache[idx];
   if (!img) { el.innerHTML = '<div style="color:var(--red)">Image not found.</div>'; return; }
-  const src = `/api/desktop/images/${encodeURIComponent(img.filename)}?agent=${encodeURIComponent(img.agentId)}&token=${encodeURIComponent(getMediaTokenSync())}`;
+  const src = desktopMediaUrl(img, 'images');
   const label = img.filename.replace(/\.\w+$/, '').replace(/_\d+$/, '').replace(/_/g, ' ');
   const date = img.createdAt ? new Date(img.createdAt).toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' }) : '';
   const agentName = img.agentName || img.agentId || '';
@@ -313,10 +504,10 @@ function renderImageDetail(el, idx) {
     <div class="detail-meta">${date}${agentName ? ` · Created by ${escHtml(agentName)}` : ''}</div>
     <img class="detail-image" src="${src}" alt="${escHtml(img.filename)}">
     <div class="detail-actions">
-      <a href="${src}" download="${escHtml(img.filename)}" style="text-decoration:none">
+      <a href="${desktopMediaUrl(img, 'images', true)}" download="${escHtml(img.filename)}" style="text-decoration:none">
         <button>Download</button>
       </a>
-      <button class="detail-delete-btn" data-action="deleteDesktopImage" data-args='[${idx}]'>Delete</button>
+      ${desktopMediaDocument(img, 'images').isOwn ? `<button class="detail-delete-btn" data-action="deleteDesktopImage" data-args='[${idx}]'>Delete</button>` : '<span class="detail-meta">Shared with you · Only the owner can delete</span>'}
       <button data-action="closeDesktopDetail">Close</button>
     </div>`;
 }
@@ -324,7 +515,7 @@ function renderImageDetail(el, idx) {
 function renderVideoDetail(el, idx) {
   const vid = _desktopVideoCache[idx];
   if (!vid) { el.innerHTML = '<div style="color:var(--red)">Video not found.</div>'; return; }
-  const src = `/api/desktop/videos/${encodeURIComponent(vid.filename)}?token=${encodeURIComponent(getMediaTokenSync())}`;
+  const src = desktopMediaUrl(vid, 'videos');
   const label = vid.filename.replace(/\.\w+$/, '').replace(/_\d+$/, '').replace(/_/g, ' ');
   const date = vid.createdAt ? new Date(vid.createdAt).toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' }) : '';
   el.innerHTML = `
@@ -332,10 +523,10 @@ function renderVideoDetail(el, idx) {
     <div class="detail-meta">${date}</div>
     <video class="detail-image" src="${src}" controls style="max-width:100%;border-radius:8px;display:block"></video>
     <div class="detail-actions">
-      <a href="${src}" download="${escHtml(vid.filename)}" style="text-decoration:none">
+      <a href="${desktopMediaUrl(vid, 'videos', true)}" download="${escHtml(vid.filename)}" style="text-decoration:none">
         <button>Download</button>
       </a>
-      <button class="detail-delete-btn" data-action="deleteDesktopVideo" data-args='[${idx}]'>Delete</button>
+      ${desktopMediaDocument(vid, 'videos').isOwn ? `<button class="detail-delete-btn" data-action="deleteDesktopVideo" data-args='[${idx}]'>Delete</button>` : '<span class="detail-meta">Shared with you · Only the owner can delete</span>'}
       <button data-action="closeDesktopDetail">Close</button>
     </div>`;
 }

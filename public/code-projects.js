@@ -45,6 +45,7 @@ function renderCodeProjectItems(grid, items) {
       </div>
     </div>`;
   }).join('');
+  setupDesktopSelection(grid, 'code', sorted.map(project => ({ ...project, _source: 'code', filename: project.name, isOwn: true })));
 }
 
 async function deleteCodeProject(name) {

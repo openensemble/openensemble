@@ -1,4 +1,5 @@
 import { listDesktops, sendDesktopCommand } from '../../lib/desktop-bus.mjs';
+import { saveDesktopAttachment } from '../../lib/desktop-attachments.mjs';
 
 const DESKTOP_TOOLS = new Set([
   'desktop_list_sandboxes',
@@ -17,6 +18,10 @@ export async function executeSkillTool(name, args = {}, userId) {
     const clients = listDesktops(userId);
     if (!clients.length) return 'No OpenEnsemble Desktop clients are connected.';
     return JSON.stringify({ clients }, null, 2);
+  }
+
+  if (name === 'desktop_save_attachment') {
+    return JSON.stringify(await saveDesktopAttachment(userId, args), null, 2);
   }
 
   if (!DESKTOP_TOOLS.has(name)) return null;

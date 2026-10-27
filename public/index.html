@@ -333,6 +333,14 @@
           <button class="desktop-back-btn" data-action="showDesktopCategories"><i data-lucide="arrow-left" style="width:14px;height:14px"></i> Back</button>
           <span class="desktop-items-title" id="desktopItemsTitle"></span>
         </div>
+        <div id="desktopSelectionBar" class="desktop-selection-bar" hidden>
+          <label><input id="desktopSelectAll" type="checkbox" data-action="selectAllDesktopItems" data-args='["$checked"]'> Select all</label>
+          <span id="desktopSelectionCount" aria-live="polite">0 selected</span>
+          <button id="desktopDownloadSelected" data-action="downloadSelectedDesktopItems" disabled>Download selected</button>
+          <button id="desktopDeleteSelected" class="detail-delete-btn" data-action="deleteSelectedDesktopItems" disabled>Delete selected</button>
+          <button id="desktopClearSelection" data-action="clearDesktopSelection" disabled>Clear</button>
+          <p id="desktopSelectionStatus" role="status" aria-live="polite"></p>
+        </div>
         <div class="desktop-items-grid" id="desktopItemsGrid"></div>
       </div>
     </div>

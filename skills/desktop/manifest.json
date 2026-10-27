@@ -11,16 +11,18 @@
     "\\bdesktop\\s+(?:app|bridge|client)\\b",
     "\\blocal\\s+(?:computer|desktop|machine|folder|sandbox|file)\\b",
     "\\bsave\\s+(?:it|this|that|the\\s+file|image|video|download)\\s+(?:locally|to\\s+my\\s+computer|to\\s+my\\s+desktop)\\b",
-    "\\bdownload\\s+.+\\s+(?:locally|to\\s+my\\s+computer|to\\s+my\\s+desktop)\\b"
+    "\\bdownload\\s+.+\\s+(?:locally|to\\s+my\\s+computer|to\\s+my\\s+desktop)\\b",
+    "\\b(?:save|put|copy)\\b.+\\b(?:my|local|desktop)\\b.+\\b(?:images?|pictures?|folder)\\b"
   ],
   "intent_examples": [
     "list my desktop sandboxes",
     "save this generated image to my computer",
     "write that file into my local documents sandbox",
     "download this video into my desktop downloads folder",
-    "show connected desktop clients"
+    "show connected desktop clients",
+    "create an image of a cat and put it under my images folder"
   ],
-  "systemPromptAddition": "## Desktop Bridge\n\nThe desktop_* file tools access sandbox folders configured in the OpenEnsemble Desktop app. Use desktop_list_clients if you need to confirm a desktop client is connected, and desktop_list_sandboxes if you need the available sandbox names. Do not use desktop_run_command unless {{USER_NAME}} explicitly asks to run a local shell command. desktop_run_command runs as the desktop user's normal OS account with cwd set inside a sandbox; it is not a filesystem jail, network sandbox, container, or privilege boundary. Command execution may be disabled in the desktop app.",
+  "systemPromptAddition": "## Desktop Bridge\n\nThe desktop_* file tools access sandbox folders configured in the OpenEnsemble Desktop app. Use desktop_list_clients if you need to confirm a desktop client is connected, and desktop_list_sandboxes if you need the available sandbox names. Do not use desktop_run_command unless {{USER_NAME}} explicitly asks to run a local shell command. desktop_run_command runs as the desktop user's normal OS account with cwd set inside a sandbox; it is not a filesystem jail, network sandbox, container, or privilege boundary. Command execution may be disabled in the desktop app.\n\nTo save a generated image on the computer, call desktop_save_attachment with its exact images:filename attachment_id and the images sandbox. This copies the original binary attachment directly; do not request a public export URL or guess base64. Confirm success only after the desktop acknowledges the save. The Images folder is the folder configured in the desktop app, not necessarily Windows Pictures or the Windows Desktop folder. If multiple clients are connected, choose the intended clientId.",
   "tools": [
     {
       "type": "function",
@@ -114,6 +116,37 @@
             "encoding": { "type": "string", "enum": ["utf8", "base64"] }
           },
           "required": ["sandbox", "path", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_save_attachment",
+        "description": "Copy an existing generated image attachment into a folder on the connected computer. Use its exact images:filename ID; no URL, image regeneration, shell command, or model-supplied base64 is needed. Wait for the desktop to confirm the save.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "attachment_id": {
+              "type": "string",
+              "description": "Exact images:filename attachment ID returned by image generation."
+            },
+            "sandbox": {
+              "type": "string",
+              "description": "Configured desktop folder name. Defaults to images."
+            },
+            "path": {
+              "type": "string",
+              "description": "Optional relative filename in the desktop folder. Defaults to the attachment filename."
+            },
+            "clientId": {
+              "type": "string",
+              "description": "Desktop client id. Required if more than one desktop is connected."
+            }
+          },
+          "required": [
+            "attachment_id"
+          ]
         }
       }
     },

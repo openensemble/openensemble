@@ -6,6 +6,8 @@
 import fs from 'fs';
 import path from 'path';
 import { requireAuth, safeId as safeIdFn, BASE_DIR, getUserDir, readBody, withLock } from './_helpers.mjs';
+import { listDesktops } from '../lib/desktop-bus.mjs';
+import { saveDesktopAttachment } from '../lib/desktop-attachments.mjs';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 const VIDEO_EXTS  = new Set(['.mp4', '.webm', '.mov']);
 const AUDIO_EXTS  = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga', '.m4a', '.aac', '.opus']);
@@ -101,6 +103,27 @@ function discoverAgentParamTables(userId) {
 const MIME_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp' };
 
 export async function handle(req, res) {
+
+  if (req.url === '/api/desktop/clients' && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ clients: listDesktops(userId) }));
+    return true;
+  }
+
+  if (req.url === '/api/desktop/save-attachment' && req.method === 'POST') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    try {
+      const args = JSON.parse(await readBody(req));
+      const result = await saveDesktopAttachment(userId, args);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return true;
+  }
 
   // ── GET /api/desktop/images ── list all generated images across user's agents
   if (req.url === '/api/desktop/images' && req.method === 'GET') {

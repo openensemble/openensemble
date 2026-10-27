@@ -80,7 +80,13 @@ async function openGuideDrawer() {
   }
   const pending = _guidePendingTarget;
   _guidePendingTarget = null;
-  const slug = pending?.slug || _guideCurrent || _guideIndex.sections[0]?.pages[0]?.slug;
+  // Opening the Guide starts with release notes; explicit page links retain
+  // their destination, including links from chat and other guide pages.
+  const slug = pending?.slug || (_slugInIndex('whats-new') ? 'whats-new' : _guideIndex.sections[0]?.pages[0]?.slug);
+  if (!pending) {
+    if (search) search.value = '';
+    _searchGuide('');
+  }
   _renderGuideToc();
   if (slug) await _loadGuidePage(slug, pending?.anchor);
 }
