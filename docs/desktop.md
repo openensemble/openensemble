@@ -2,19 +2,19 @@
 title: Desktop app
 nav_order: 2.5
 permalink: /desktop/
-description: Download OpenEnsemble Desktop for Windows or Linux, with updates you choose when to install.
+description: Download OpenEnsemble Desktop Client for Windows or Linux, with updates you choose when to install.
 ---
 
-# OpenEnsemble Desktop
+# OpenEnsemble Desktop Client
 
 Chat with your OE server, work with local files, and copy files between this
 computer and your OE account. The desktop app connects to an existing server.
 
 <link rel="stylesheet" href="{{ site.baseurl }}/assets/desktop-downloads.css">
-<section class="desktop-download-card" data-desktop-downloads data-release-api="github" aria-label="Download OpenEnsemble Desktop">
+<section class="desktop-download-card" data-desktop-downloads data-release-api="github" aria-label="Download OpenEnsemble Desktop Client">
   <h3>Download the desktop app</h3>
   <p>Available for Windows and Linux x64 computers.</p>
-  <a href="https://github.com/openensemble/desktop/releases">View desktop releases</a>
+  <a href="https://github.com/openensemble/openensemble-desktop-client/releases">View desktop releases</a>
 </section>
 <script type="module" src="{{ site.baseurl }}/assets/desktop-downloads.js"></script>
 
@@ -43,4 +43,4 @@ Use **App updates → Check for updates** to check immediately. Source launches
 do not update themselves; on Linux, run the AppImage to enable updates.
 
 See the [desktop guide]({{ site.baseurl }}/guide/desktop-app/) for setup and
-troubleshooting, or [release notes](https://github.com/openensemble/desktop/releases).
+troubleshooting, or [release notes](https://github.com/openensemble/openensemble-desktop-client/releases).

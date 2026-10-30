@@ -1,7 +1,7 @@
 // Public release information only: no OE configuration, sessions or GitHub
 // credentials. Coalesce requests and cache responses to stay within GitHub's
 // unauthenticated API limit even on a busy OE server.
-const RELEASE_API = 'https://api.github.com/repos/openensemble/desktop/releases/latest';
+const RELEASE_API = 'https://api.github.com/repos/openensemble/openensemble-desktop-client/releases/latest';
 
 export function createDesktopDownloadsHandler({ fetchImpl = fetch, now = Date.now } = {}) {
   let cached = null;
