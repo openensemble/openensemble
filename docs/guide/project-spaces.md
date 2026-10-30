@@ -1,7 +1,7 @@
 ---
 title: "Projects and goals"
 parent: User guide
-nav_order: 16
+nav_order: 17
 permalink: /guide/project-spaces/
 ---
 

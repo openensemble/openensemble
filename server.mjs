@@ -56,6 +56,7 @@ import { handle as handleExpenses } from './routes/expenses.mjs';
 import { handle as handleResearch } from './routes/research.mjs';
 import { handle as handleDesktop }  from './routes/desktop.mjs';
 import { handle as handleDesktopSync } from './routes/desktop-sync.mjs';
+import { handle as handleDesktopDownloads } from './routes/desktop-downloads.mjs';
 import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleMobile }   from './routes/mobile.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
@@ -658,6 +659,7 @@ const httpServer = http.createServer(async (req, res) => {
 
   // Try each route module in order
   try {
+    if (await handleDesktopDownloads(req, res)) return;
     for (const handler of routeHandlers) {
       if (await handler(req, res)) return;
     }

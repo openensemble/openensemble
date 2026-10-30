@@ -15,11 +15,20 @@ agents, choose the LLM providers they use, and keep each user's data isolated
 on your own server.
 
 [Get started]({{ site.baseurl }}/getting-started){: .btn .btn-primary }
+[Desktop app]({{ site.baseurl }}/desktop/){: .btn }
 [User guide]({{ site.baseurl }}/guide/){: .btn }
 [Explore dashboards]({{ site.baseurl }}/dashboards){: .btn }
 [View on GitHub](https://github.com/openensemble/openensemble){: .btn }
 
 ![OpenEnsemble demo]({{ site.baseurl }}/demo.gif)
+
+<link rel="stylesheet" href="{{ site.baseurl }}/assets/desktop-downloads.css">
+<section class="desktop-download-card" data-desktop-downloads data-release-api="github" aria-label="Download OpenEnsemble Desktop">
+  <h3>OpenEnsemble Desktop</h3>
+  <p>Get the desktop app for Windows or Linux.</p>
+  <a href="https://github.com/openensemble/desktop/releases">View desktop releases</a>
+</section>
+<script type="module" src="{{ site.baseurl }}/assets/desktop-downloads.js"></script>
 
 ## What it is
 

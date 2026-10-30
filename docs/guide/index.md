@@ -21,6 +21,7 @@ New installation? Start with [installation](../getting-started), then
 - [Getting started](./getting-started/)
 - [Which model does what](./models-explained/)
 - [LLM providers](./providers/)
+- [Desktop app](./desktop-app/)
 
 ## Working with agents
 

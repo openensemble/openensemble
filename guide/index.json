@@ -18,6 +18,10 @@
         {
           "slug": "providers",
           "title": "LLM providers"
+        },
+        {
+          "slug": "desktop-app",
+          "title": "Desktop app"
         }
       ]
     },

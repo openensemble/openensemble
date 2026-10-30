@@ -1,7 +1,7 @@
 ---
 title: "The Coordinator"
 parent: User guide
-nav_order: 8
+nav_order: 9
 permalink: /guide/coordinator/
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Single assistant and ensembles"
 parent: User guide
-nav_order: 5
+nav_order: 6
 permalink: /guide/single-assistant/
 ---
 

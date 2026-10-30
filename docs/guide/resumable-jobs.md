@@ -1,7 +1,7 @@
 ---
 title: "Resumable agent jobs"
 parent: User guide
-nav_order: 9
+nav_order: 10
 permalink: /guide/resumable-jobs/
 ---
 

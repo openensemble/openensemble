@@ -1,7 +1,7 @@
 ---
 title: "What's new"
 parent: User guide
-nav_order: 41
+nav_order: 42
 permalink: /guide/whats-new/
 ---
 
@@ -14,6 +14,15 @@ A running log of user-visible changes shipped to OpenEnsemble. Newest at the top
 If you auto-update (`oe update`), you'll get these as they land. If not, run `oe update` in your install directory to pull the latest.
 
 ---
+
+## 2026-10-30
+
+**Desktop downloads and updates**
+The sign-in screen, **Settings → Profile**, and the public website now select
+a Windows or Linux desktop download for your browser. Both choices remain
+available. [Desktop app](../desktop-app/) explains installation, connecting to
+your server, and choosing **Update and restart** when a new release is ready.
+Downloads become available when the first GitHub desktop release is published.
 
 ## 2026-10-27
 

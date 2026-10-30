@@ -1,0 +1,12 @@
+.desktop-download-card { padding: 18px; border: 1px solid var(--border, #44434d); border-radius: 12px; background: var(--bg2, #27262b); color: var(--text, #eeedf1); text-align: left; }
+.desktop-download-card[hidden] { display: none !important; }
+.desktop-download-card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 600; line-height: 1.4; }
+.desktop-download-card p { margin: 8px 0 12px; font-size: 13px; line-height: 1.5; }
+.desktop-download-card a { color: var(--accent, #9aa5ff); text-decoration: none; }
+.desktop-download-card a:hover { text-decoration: underline; }
+.desktop-download-card a.desktop-download-primary { display: inline-flex; justify-content: center; align-items: center; min-height: 42px; padding: 8px 16px; border-radius: 8px; background: var(--accent, #6259df); color: #fff; font-size: 13px; font-weight: 600; box-sizing: border-box; text-decoration: none; }
+.desktop-download-card a:focus-visible, .desktop-download-card button:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; }
+.desktop-download-card .desktop-download-note { color: var(--muted, #b6b4c1); font-size: 12px; margin-bottom: 8px; }
+.desktop-download-choices { display: flex; flex-wrap: wrap; gap: 10px 16px; margin-top: 14px; font-size: 12px; }
+.desktop-download-retry { display: inline-block; margin: 8px 0 0 12px; padding: 8px; color: inherit; background: transparent; border: 1px solid var(--border, #44434d); border-radius: 6px; cursor: pointer; }
+.desktop-download-retry:disabled { opacity: .6; cursor: wait; }

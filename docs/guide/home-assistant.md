@@ -1,7 +1,7 @@
 ---
 title: "Home Assistant"
 parent: User guide
-nav_order: 25
+nav_order: 26
 permalink: /guide/home-assistant/
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Personalization"
 parent: User guide
-nav_order: 23
+nav_order: 24
 permalink: /guide/personalization/
 ---
 
