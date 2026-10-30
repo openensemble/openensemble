@@ -147,8 +147,11 @@ export async function racePendingIteratorNext(pendingNext, timeoutMs, signal = n
   }
 }
 
-/** Do not detach a tool a second time when a durable task already owns it. */
-export function autoBackgroundToolsInCurrentContext() {
+/** Keep interactive tools and tools already owned by a durable task attached. */
+export function autoBackgroundToolsInCurrentContext(toolDef = null) {
+  // A screen observation/action must return to the same loop for visual
+  // verification. Its desktop helper already enforces a bounded deadline.
+  if (toolDef?.foregroundOnly === true) return false;
   const scheduledCtx = getScheduledContext();
   return currentTaskContext() == null
     && getTurnContext()?.awaitSlowTools !== true

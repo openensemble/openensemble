@@ -71,18 +71,19 @@ export async function saveDesktopArtifact(userId, { source, sandbox, filename, b
 export function buildDesktopFoldersBlock(userId, source) {
   if (source !== 'desktop-app' || !userId) return '';
   const clients = listDesktops(userId);
-  const active = clients[0];
-  if (!active) {
+  if (!clients.length) {
     return '\n\n## Desktop Local Folders\nThis turn came from the OpenEnsemble Desktop app, but no desktop bridge is currently connected. Do not claim generated/downloaded files were saved locally unless a desktop_* tool call succeeds.';
   }
-  const sandboxes = Array.isArray(active.sandboxes) ? active.sandboxes : [];
-  const lines = sandboxes
-    .filter(s => s?.name)
-    .map(s => `- ${s.name}${s.path ? `: ${s.path}` : ' (configured on the desktop)'}`);
+  const folders = clients.map(client => ({
+    clientId: client.clientId,
+    sandboxes: (Array.isArray(client.sandboxes) ? client.sandboxes : [])
+      .filter(s => typeof s?.name === 'string')
+      .map(s => s.name),
+  }));
   return [
     '\n\n## Desktop Local Folders',
     'This turn came from the OpenEnsemble Desktop app. User-visible artifacts should go to the connected desktop sandboxes instead of the server .openensemble user folder.',
-    lines.length ? `Available local sandboxes:\n${lines.join('\n')}` : 'No sandbox folder list was reported by the desktop client.',
+    `Reported local sandbox names by client: ${JSON.stringify(folders)}. Use the intended clientId; do not assume the first connected computer is the one the user means.`,
     'Use desktop_* tools for files, downloads, generated assets, and code output when those tools are available. Prefer images for generated images, videos for generated videos, downloads for downloaded files, documents for documents, research for research outputs, and coder for source code.',
     'When an image generator returns an images:filename attachment ID and the user asks to save it on their computer, call desktop_save_attachment with that exact attachment_id and sandbox images. Request the desktop tool group if needed. The server transfers the original image bytes; do not search for an export URL, invent base64, or regenerate the image. Only report a local save after the desktop confirms success. The images sandbox is the folder configured in the app, which may differ from Windows Pictures or the Windows Desktop folder.',
   ].join('\n');

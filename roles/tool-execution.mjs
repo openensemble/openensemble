@@ -418,6 +418,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
     name,
     args: mergedArgs,
     advanceEpoch: advancesReplayEpoch,
+    volatileRead: owningToolDef?.replayPolicy === 'volatile-read',
     // A turn-retained action may have committed even when its transport reports
     // failure, so never retry the exact call automatically in this turn.
     retainCompleted: retainCompletedReplay,
@@ -484,7 +485,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
   // detaching learning/report work beyond the terminal frame.
   const AUTO_BG_MS = name === 'node_exec' && mergedArgs?.completion_check && !suppressLearning
     ? 0 : _autoBackgroundDelayMs(suppressLearning);
-  const AUTO_BG_ENABLED = autoBackgroundToolsInCurrentContext();
+  const AUTO_BG_ENABLED = autoBackgroundToolsInCurrentContext(owningToolDef);
   // Node agents have no exec-cancel protocol. A local abort would only stop
   // reading output while the remote process keeps running.
   const AUTO_BG_CANCELLABLE = name !== 'node_exec';
