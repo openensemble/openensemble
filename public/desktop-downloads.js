@@ -1,5 +1,8 @@
-export const DESKTOP_RELEASES = 'https://github.com/openensemble/desktop/releases';
-const GITHUB_API = 'https://api.github.com/repos/openensemble/desktop/releases/latest';
+export const DESKTOP_RELEASES = 'https://github.com/openensemble/openensemble-desktop-client/releases';
+const GITHUB_API = 'https://api.github.com/repos/openensemble/openensemble-desktop-client/releases/latest';
+// Cached metadata from before the repository rename remains valid. Always
+// offer the canonical URL, while accepting only these two known locations.
+const LEGACY_RELEASES = 'https://github.com/openensemble/desktop/releases';
 
 export function detectDesktopPlatform(nav = {}) {
   const ua = nav.userAgent || '';
@@ -21,9 +24,12 @@ export function parseDesktopRelease(release) {
   const version = release.tag_name.slice(1);
   const assets = Array.isArray(release.assets) ? release.assets : [];
   const base = `${DESKTOP_RELEASES}/download/${release.tag_name}/`;
+  const legacyBase = `${LEGACY_RELEASES}/download/${release.tag_name}/`;
   function asset(name) {
-    const found = assets.find(item => item?.name === name && item.browser_download_url === base + name && Number.isSafeInteger(item.size) && item.size > 0);
-    return found ? { url: found.browser_download_url, size: found.size } : null;
+    const found = assets.find(item => item?.name === name &&
+      [base + name, legacyBase + name].includes(item.browser_download_url) &&
+      Number.isSafeInteger(item.size) && item.size > 0);
+    return found ? { url: base + name, size: found.size } : null;
   }
   const windows = asset(`OpenEnsemble-Setup-${version}-x64.exe`);
   const linux = asset(`OpenEnsemble-${version}-x86_64.AppImage`);
@@ -75,7 +81,7 @@ export async function setupDesktopDownloads(root = document, nav = navigator, fe
     if (response.ok) release = parseDesktopRelease(await response.json());
   } catch { /* Keep a working release-page link when offline or rate limited. */ }
   for (const card of cards) {
-    const title = element('h3', 'OpenEnsemble Desktop');
+    const title = element('h3', 'OpenEnsemble Desktop Client');
     const description = element('p', 'Chat with OE and work with files on this computer. Connects to your existing OE server.');
     card.replaceChildren(title, description);
     if (!release) {

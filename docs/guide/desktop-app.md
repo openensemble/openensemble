@@ -9,7 +9,7 @@ permalink: /guide/desktop-app/
 {% raw %}
 # Desktop app
 
-OpenEnsemble Desktop connects to your existing OE server from Windows or Linux.
+OpenEnsemble Desktop Client connects to your existing OE server from Windows or Linux.
 It adds local file folders, file previews, and manual **Files & sync** transfers
 between this computer and your server account. Windows also has separate,
 optional administrator and computer-control permissions.
@@ -19,7 +19,7 @@ optional administrator and computer-control permissions.
 The OE sign-in screen and **Settings → Profile** offer the desktop download for
 your operating system. Both Windows and Linux choices remain available.
 The [public download page](https://openensemble.github.io/openensemble/desktop/)
-and [GitHub releases](https://github.com/openensemble/desktop/releases) also have
+and [GitHub releases](https://github.com/openensemble/openensemble-desktop-client/releases) also have
 the downloads. No GitHub login is required for published installers.
 
 1. On Windows, open the `.exe` installer and follow its steps. On Linux, save the

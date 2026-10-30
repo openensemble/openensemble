@@ -23,10 +23,10 @@ on your own server.
 ![OpenEnsemble demo]({{ site.baseurl }}/demo.gif)
 
 <link rel="stylesheet" href="{{ site.baseurl }}/assets/desktop-downloads.css">
-<section class="desktop-download-card" data-desktop-downloads data-release-api="github" aria-label="Download OpenEnsemble Desktop">
-  <h3>OpenEnsemble Desktop</h3>
+<section class="desktop-download-card" data-desktop-downloads data-release-api="github" aria-label="Download OpenEnsemble Desktop Client">
+  <h3>OpenEnsemble Desktop Client</h3>
   <p>Get the desktop app for Windows or Linux.</p>
-  <a href="https://github.com/openensemble/desktop/releases">View desktop releases</a>
+  <a href="https://github.com/openensemble/openensemble-desktop-client/releases">View desktop releases</a>
 </section>
 <script type="module" src="{{ site.baseurl }}/assets/desktop-downloads.js"></script>
 

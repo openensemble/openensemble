@@ -8,7 +8,7 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-10-30
 
-**OpenEnsemble Desktop for Windows and Linux**
+**OpenEnsemble Desktop Client for Windows and Linux**
 Desktop **0.7.0 is available now** from the sign-in screen,
 **Settings → Profile**, and the [OE download page](https://openensemble.github.io/openensemble/desktop/).
 The browser recommends the Windows x64 installer or Linux x64 AppImage for your
@@ -23,7 +23,7 @@ Checks do not download or install updates automatically. Your settings and
 sign-in are preserved. **App updates → Check for updates** checks immediately.
 
 See [Desktop app](desktop-app.md) for installation and setup, or the
-[0.7.0 release notes](https://github.com/openensemble/desktop/releases/tag/v0.7.0)
+[0.7.0 release notes](https://github.com/openensemble/openensemble-desktop-client/releases/tag/v0.7.0)
 for this release's details. The Windows installer is currently unsigned.
 
 ## 2026-10-27
