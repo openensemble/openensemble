@@ -30,6 +30,7 @@
 <link rel="stylesheet" href="/mail-workspace.css">
 <link rel="stylesheet" href="/needs-attention.css">
 <link rel="stylesheet" href="/work-search.css">
+<link rel="stylesheet" href="/desktop-downloads.css">
 </head>
 <body>
 
@@ -116,6 +117,11 @@
     <div class="login-setup" id="loginSetupLink" style="display:none">
       <a data-action="showSetupForm">+ Add new profile</a>
     </div>
+    <section class="desktop-download-card" data-desktop-downloads aria-label="Download OpenEnsemble Desktop">
+      <h3>OpenEnsemble Desktop</h3>
+      <p>Get the desktop app for Windows or Linux.</p>
+      <a href="https://github.com/openensemble/desktop/releases" target="_blank" rel="noopener noreferrer">View desktop releases</a>
+    </section>
   </div>
 </div>
 
@@ -1457,6 +1463,11 @@
 
         <!-- ── Profile tab ── -->
         <div class="stab-panel" id="stab-panel-profile">
+          <section class="desktop-download-card" data-desktop-downloads aria-label="Download OpenEnsemble Desktop" style="margin-bottom:16px">
+            <h3>OpenEnsemble Desktop</h3>
+            <p>Get the desktop app for Windows or Linux.</p>
+            <a href="https://github.com/openensemble/desktop/releases" target="_blank" rel="noopener noreferrer">View desktop releases</a>
+          </section>
           <div id="avatarPickerContainer" style="margin-bottom:16px"></div>
           <div id="profileInfoRow" style="font-size:13px;color:var(--muted);margin-bottom:8px"></div>
           <div id="profileRoleBadge" style="display:none;margin-bottom:10px"></div>
@@ -2013,6 +2024,7 @@
   <div id="projectSpaceMessage" class="project-space-message" role="status" aria-live="polite"></div>
 </dialog>
 <script src="/event-delegation.js"></script>
+<script type="module" src="/desktop-downloads.js"></script>
 <script src="/core.js"></script>
 <script src="/work-search.js"></script>
 <script src="/needs-attention.js"></script>

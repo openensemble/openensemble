@@ -6,6 +6,15 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-10-30
+
+**Desktop downloads and updates**
+The sign-in screen, **Settings → Profile**, and the public website now select
+a Windows or Linux desktop download for your browser. Both choices remain
+available. [Desktop app](desktop-app.md) explains installation, connecting to
+your server, and choosing **Update and restart** when a new release is ready.
+Downloads become available when the first GitHub desktop release is published.
+
 ## 2026-10-27
 
 **Reconnect shares after a slow server startup**

@@ -1,7 +1,7 @@
 ---
 title: "Tips & shortcuts"
 parent: User guide
-nav_order: 39
+nav_order: 40
 permalink: /guide/shortcuts/
 ---
 

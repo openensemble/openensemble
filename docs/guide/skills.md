@@ -1,7 +1,7 @@
 ---
 title: "Skills"
 parent: User guide
-nav_order: 10
+nav_order: 11
 permalink: /guide/skills/
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: "Backup, restore, auto-update"
 parent: User guide
-nav_order: 37
+nav_order: 38
 permalink: /guide/backup-update/
 ---
 

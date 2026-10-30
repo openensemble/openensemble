@@ -1,7 +1,7 @@
 ---
 title: "Email & calendar"
 parent: User guide
-nav_order: 24
+nav_order: 25
 permalink: /guide/email-calendar/
 ---
 

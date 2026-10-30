@@ -50,6 +50,16 @@ for (const section of index.sections) {
 }
 output.set('index.md', overview.join('\n'));
 let changed = 0;
+// Share the same OS detection and download UI with the public landing page.
+for (const name of ['desktop-downloads.js', 'desktop-downloads.css']) {
+  const source = fs.readFileSync(path.join(root, 'public', name), 'utf8');
+  const dest = path.join(root, 'docs', 'assets', name);
+  if (!fs.existsSync(dest) || fs.readFileSync(dest, 'utf8') !== source) {
+    changed++;
+    if (check) console.error('Desktop website asset is out of date: docs/assets/' + name);
+    else { fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.writeFileSync(dest, source); }
+  }
+}
 if (!check) fs.mkdirSync(outputDir, { recursive: true });
 for (const [name, body] of output) {
   const dest = path.join(outputDir, name);

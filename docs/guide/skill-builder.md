@@ -1,7 +1,7 @@
 ---
 title: "Building custom skills"
 parent: User guide
-nav_order: 11
+nav_order: 12
 permalink: /guide/skill-builder/
 ---
 

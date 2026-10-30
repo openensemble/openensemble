@@ -1,7 +1,7 @@
 ---
 title: "Remote nodes"
 parent: User guide
-nav_order: 29
+nav_order: 30
 permalink: /guide/nodes/
 ---
 

@@ -1,0 +1,56 @@
+# Desktop app
+
+OpenEnsemble Desktop connects to your existing OE server from Windows or Linux.
+It adds local file folders, file previews, and manual **Files & sync** transfers
+between this computer and your server account. Windows also has separate,
+optional administrator and computer-control permissions.
+
+## Download and connect
+
+The OE sign-in screen and **Settings → Profile** offer the desktop download for
+your operating system. Both Windows and Linux choices remain available.
+The [public download page](https://openensemble.github.io/openensemble/desktop/)
+and [GitHub releases](https://github.com/openensemble/desktop/releases) also have
+the downloads. No GitHub login is required for published installers.
+
+1. On Windows, open the `.exe` installer and follow its steps. On Linux, save the
+   `.AppImage` in a folder you own, allow it to run as a program in its Properties,
+   and open it. The current downloads are for x64 computers.
+2. Choose your server from the network search, or enter its HTTPS address.
+   `localhost` works only when the OE server is on the same computer.
+3. Sign in with your OE account. In **Files & sync**, choose which files to copy
+   and review the destination before starting.
+
+The desktop download installs the client; you still need access to an OE server.
+
+## Update in place
+
+The installed app checks 15 seconds after startup and every six hours. A banner
+appears when a newer stable release is available. Save your work, then select
+**Update and restart**. The app downloads and verifies the release, installs it,
+and reopens. **App updates → Check for updates** checks immediately.
+
+Checking never downloads or installs an update. Closing the app without choosing
+the update leaves the current version installed. Settings, login storage, and
+local files retain their locations. On Linux, keep the AppImage in a writable
+folder; its path remains the same so your shortcuts continue working.
+
+Version 0.1.0 needs a one-time manual installation of a current release. Existing
+Windows versions from 0.2.0 onward already use this GitHub update channel. Linux
+source launches need a one-time switch to the AppImage for in-app updates.
+
+## If a download or update fails
+
+- If no release is published yet, the webpage says so. If GitHub is unreachable
+  or rate limited, use **View desktop releases** or **Try again**.
+- A failed download or checksum check does not install anything. Reconnect and
+  check again. Linux replacement failures leave the existing AppImage intact.
+- Windows installers are currently unsigned; Windows may show an unknown
+  publisher or SmartScreen notice. Check the release source before opening.
+- Linux requires a desktop environment and AppImage/FUSE support. Follow your
+  distribution's AppImage setup guidance if it cannot mount the file. Keep
+  Electron's sandbox enabled.
+- macOS, phones, Chromebooks and unsupported architectures keep the browser
+  experience. Detection does not start a download by itself.
+
+Desktop updates are separate from [server updates and backups](backup-update.md).

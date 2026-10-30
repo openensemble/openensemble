@@ -1,7 +1,7 @@
 ---
 title: "Troubleshooting"
 parent: User guide
-nav_order: 35
+nav_order: 36
 permalink: /guide/troubleshooting/
 ---
 

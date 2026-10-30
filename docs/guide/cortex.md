@@ -1,7 +1,7 @@
 ---
 title: "Cortex (local models)"
 parent: User guide
-nav_order: 22
+nav_order: 23
 permalink: /guide/cortex/
 ---
 

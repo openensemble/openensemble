@@ -1,7 +1,7 @@
 ---
 title: "Service profiles"
 parent: User guide
-nav_order: 30
+nav_order: 31
 permalink: /guide/services/
 ---
 
