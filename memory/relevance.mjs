@@ -80,9 +80,16 @@ export async function filterContextRelevance(query, rows, { userId, agentId, bud
     // affirmative generation cannot rescue a weak or missing query match.
     if (!Number.isFinite(row.semantic_score)
       || row.semantic_score < CORTEX_RELEVANCE_SIMILARITY_THRESHOLD) continue;
+    // Signal storage adds CORRECTION: as bookkeeping, not part of the fact.
+    // Classifying that marker can make an unrelated change request look
+    // relevant. Keep the stored/prompt text intact; compare its content here.
+    const storedText = String(row.text || row.statement || '');
+    const memoryText = row.source === 'correction'
+      ? storedText.replace(/^(?:\s*CORRECTION:\s*)+/i, '') : storedText;
+    if (!memoryText.trim()) continue;
     const remaining = deadline - Date.now();
     if (remaining <= 0) { unavailable += rows.length - index; break; }
-    const body = `Query: "${clean(query).slice(0, 500)}" Memory: "${clean(row.text || row.statement).slice(0, 1000)}"`;
+    const body = `Query: "${clean(query).slice(0, 500)}" Memory: "${clean(memoryText).slice(0, 1000)}"`;
     const controller = new AbortController();
     let timer;
     let raw;
