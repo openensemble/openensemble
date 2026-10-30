@@ -1025,7 +1025,7 @@ export function onConnection(ws, req) {
             if (ws.readyState === ws.OPEN) {
               ws.send(JSON.stringify({
                 type: 'dashboard_data',
-                greeting: null, alarms: [], announcements: [], now_playing: null, weather: null,
+                greeting: null, alarms: [], announcements: [], weather: null,
               }));
             }
           } catch {}

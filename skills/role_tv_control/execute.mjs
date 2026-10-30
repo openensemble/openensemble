@@ -22,7 +22,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { sendTvCommand, getTvState } from '../../lib/tv-commands.mjs';
+import { sendTvCommand } from '../../lib/tv-commands.mjs';
 import { listTvDevices } from '../../lib/voice-devices.mjs';
 import { isDeviceOnline } from '../../ws-handler.mjs';
 import { getVoiceContext } from '../../lib/voice-context.mjs';
@@ -35,7 +35,6 @@ const MEDIA_KEYS = new Set(['play_pause', 'play', 'pause', 'stop', 'next', 'prev
 const DEFAULT_SHOW_SECONDS = 15;
 const MIN_SHOW_SECONDS = 3;
 const MAX_SHOW_SECONDS = 120;
-const STATE_FRESH_MS = 60_000;
 const WAKE_TIMEOUT_MS = 3000;
 
 // Video-library source admin (tv_video_* / tv_videos_save) — talks to the
@@ -159,17 +158,6 @@ function tvErrorMessage(res, deviceName, actionDesc) {
   return `Couldn't ${actionDesc} on ${deviceName}${res.error ? `: ${res.error}` : ''}.`;
 }
 
-function formatNowPlaying(foregroundApp, nowPlaying, screenOn, deviceName) {
-  if (screenOn === false) return `${deviceName}'s screen is off right now.`;
-  let out = foregroundApp ? `${deviceName} is on ${foregroundApp}` : `${deviceName} is on`;
-  if (nowPlaying && typeof nowPlaying === 'object' && (nowPlaying.title || nowPlaying.state)) {
-    const state = nowPlaying.state || 'playing';
-    out += nowPlaying.title ? `, ${state} "${nowPlaying.title}"` : `, ${state}`;
-  } else {
-    out += ', nothing is playing';
-  }
-  return `${out}.`;
-}
 
 export async function executeSkillTool(name, args, userId) {
   if (args?.__validate) return '';
@@ -452,17 +440,9 @@ export async function executeSkillTool(name, args, userId) {
       return `Saved ${basename} into ${src.name}${subNote}.`;
     }
 
-    if (name === 'tv_now_playing') {
-      const target = resolveTvTarget(userId, args);
-      if (target.error) return target.error;
-      const cached = getTvState(target.deviceId);
-      if (cached && (Date.now() - cached.updatedAt) < STATE_FRESH_MS) {
-        return formatNowPlaying(cached.foregroundApp, cached.nowPlaying, cached.screenOn, target.deviceName);
-      }
-      const res = await runTvCommand(target.deviceId, 'get_state', {});
-      if (!res.ok) return tvErrorMessage(res, target.deviceName, "check what's playing");
-      const d = res.data || {};
-      return formatNowPlaying(d.foreground_app, d.now_playing, d.screen_on, target.deviceName);
+    // A previously loaded chat may still try the removed tool names.
+    if (name === 'tv_recommendations' || name === 'tv_now_playing') {
+      return 'TV playback reporting and history-based recommendations have been removed. OE does not receive what is playing.';
     }
 
     return null;

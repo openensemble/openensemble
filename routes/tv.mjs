@@ -30,6 +30,7 @@ import path from 'path';
 import { requireAuth, getSessionMeta, getAuthToken, isPrivileged, readBody, BASE_DIR } from './_helpers.mjs';
 import { getHaConfig, haRequestBinary } from '../lib/ha-client.mjs';
 import { log } from '../logger.mjs';
+import { handleTvPersonalization } from './tv-personalization.mjs';
 
 const CAMERA_ENTITY_RE = /^camera\.[a-z0-9_]+$/i;
 const WAKEWORD_ID_RE = /^[a-z0-9_]+$/;
@@ -48,6 +49,7 @@ const VIDEO_SOURCES_TIMEOUT_MS = 5_000;
 const VIDEO_SOURCES_ADD_TIMEOUT_MS = 20_000;
 
 export async function handle(req, res) {
+  if (await handleTvPersonalization(req, res)) return true;
   const url = req.url.split('?')[0];
 
   // GET /api/tv/camera/:entityId — snapshot proxy, binary passthrough.
