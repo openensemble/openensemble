@@ -77,6 +77,11 @@ async function ensureMediaToken() {
 // within the page it's already injected into).
 const _origFetch = window.fetch.bind(window);
 window.fetch = (url, opts = {}) => {
+  // Installer discovery is public and must keep working on the sign-in screen,
+  // including after logout or an expired session. Never send account cookies.
+  if (url === '/api/desktop/releases' && ['GET', 'HEAD'].includes((opts.method || 'GET').toUpperCase())) {
+    return _origFetch(url, { ...opts, credentials: 'omit' });
+  }
   const generation = _authGeneration;
   if (_authSuspended && typeof url === 'string' && url.startsWith('/api')) {
     return Promise.reject(new DOMException('Sign in to continue.', 'AbortError'));
