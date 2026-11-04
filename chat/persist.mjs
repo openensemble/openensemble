@@ -126,7 +126,7 @@ export function documentArtifactContent(request, artifact, fallback = '') {
   return `[Document ${artifact.action}: ${artifact.filename || request?.filename || 'document'}${artifact.version ? ` (v${artifact.version})` : ''}]`;
 }
 
-export async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], toolIdentityAnomalies = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, excludeHiddenUserFromModel = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false, memoryRefs = [] } = {}) {
+export async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], toolIdentityAnomalies = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, excludeHiddenUserFromModel = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false, memoryRefs = [], completedTurn = false } = {}) {
   // Detached task workers are deliberately non-learning. Their completed
   // report is persisted by the owner-continuation path; writing a second
   // ephemeral session here is unnecessary, and proceeding below would also
@@ -305,6 +305,17 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
   // or memory signals can treat hostile page text as user intent.
   if (readOnlyTurn || suppressLearning) return;
 
+  // Await the small local write so the very next request can reuse the call.
+  // Failed/interrupted, hidden, or attachment-dependent turns cannot teach it.
+  let learnedHaFastpath = false;
+  if (completedTurn && !hiddenUser && !hideTurn && !attachments.length
+      && !compactToolIdentityAnomalies.length && toolsUsed.some(tool => tool.name === 'ha_call_service')) {
+    try {
+      const { learnHaFastpathFromTurn } = await import('../lib/ha-fastpath-learning.mjs');
+      learnedHaFastpath = await learnHaFastpathFromTurn({ userId, userMessage: sessionText, toolsUsed });
+    } catch (e) { console.warn('[ha-fastpath] learning failed:', e.message); }
+  }
+
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
   // toolsUsed, before any other gate. It's about repeat-detection, not
   // preference inference, so the existing signal-suppression rules don't
@@ -336,7 +347,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
   // resolves an ambiguous "turn off X" via ha_call_service — that turn is
   // exactly the alias-learning signal we want. Keyed by userId because the
   // FLUSH happens on the coordinator's next turn (different agentId).
-  import('../lib/routine-proposer.mjs')
+  if (!learnedHaFastpath) import('../lib/routine-proposer.mjs')
     .then(m => m.maybeProposeRoutine({
       userId, agentId: agent.id, agentName: agent.name,
       userMessage: sessionText, toolsUsed, voiceCtx,

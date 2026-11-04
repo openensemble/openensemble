@@ -59,7 +59,7 @@ async function persistFastpath(sessionKey, messages, onEvent, agentId, label) {
 // verbs go in classifyHaIntent → executeHaIntent.
 
 const HA_VERB_RE      = /^(turn\s+on|turn\s+off|toggle|activate|run|lock|unlock|open|close)\s+(.+?)\s*$/i;
-const HA_SET_PCT_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:%|percent)\s*$/i;
+const HA_SET_PCT_RE   = /^set\s+(.+?)\s+(?:to\s+)?(\d+)\s*(?:%|percent)?\s*$/i;
 const HA_SET_DEG_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:degrees?|deg)\s*$/i;
 const HA_SET_MODE_RE  = /^set\s+(.+?)\s+to\s+(fan(?:[\s_-]+only)?|cool(?:ing)?|heat(?:ing)?|dry|auto|off)(?:\s+mode)?\s*$/i;
 
@@ -196,11 +196,12 @@ async function classifyHaIntent(text, userId, suppressLearning = false) {
     return { entity_id, domain, friendly_name, verb, serviceDomain, service, data };
   }
 
-  // "set X to N%" — light brightness or fan percentage.
+  // "set X [to] N[%]" — the resolved entity must support a percentage.
   const pm = trimmed.match(HA_SET_PCT_RE);
   if (pm) {
     const phrase = pm[1];
-    const pct = Math.max(0, Math.min(100, Number(pm[2])));
+    const pct = Number(pm[2]);
+    if (pct > 100) return null;
     const hit = await resolvePhrase(phrase, userId, suppressLearning);
     if (!hit) return null;
     const { entity_id, domain, friendly_name } = hit;
@@ -309,7 +310,7 @@ async function executeHaIntent(intent) {
   else if (intent.data?.temperature != null)          confirm = `${intent.friendly_name} set to ${intent.data.temperature}°.`;
   else if (intent.data?.hvac_mode != null)             confirm = `${intent.friendly_name} set to ${intent.data.hvac_mode === 'fan_only' ? 'fan' : intent.data.hvac_mode} mode.`;
   else                                                confirm = `Done.`;
-  return { text: confirm };
+  return { text: confirm, completed: true };
 }
 
 /**
@@ -378,6 +379,13 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent, suppre
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', content: result.text, ts: Date.now() }
     ], onEvent, agentId, 'ha-fastpath')) return { handled: true, trace };
+    if (!bound && !suppressLearning && result.completed) {
+      try {
+        const { learnHaFastpathFromTurn } = await import('../lib/ha-fastpath-learning.mjs');
+        await learnHaFastpathFromTurn({ userId, userMessage: userText,
+          toolsUsed: [{ name: HA_SERVICE_TOOL, args: trace.args, completed: true }] });
+      } catch (e) { console.warn('[ha-fastpath] learning failed:', e.message); }
+    }
     onEvent({ type: 'token', text: result.text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     console.log(`[chat] ha-fastpath: ${haIntent.verb} ${haIntent.entity_id}`);

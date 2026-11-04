@@ -171,7 +171,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
   const inheritedLabVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
     && getTurnContext()?.suppressLearning === true;
   const labVerifierTurn = inheritedLabVerifierTurn;
-  const suppressLearning = scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId || !!chatId || !!getShareDeletionApproval(userId);
+  const suppressLearning = turnOpts?.suppressLearning === true || scheduledLedgerRun || readOnlyTurn || labVerifierTurn || !!projectId || !!chatId || !!getShareDeletionApproval(userId);
   // Foreground verifier turns honor the dispatcher-authenticated 1..4 cap.
   // Detached verifier work gets two bounded extra rounds so a multi-step task
   // can correct one lookup and still produce a final answer.
@@ -1794,6 +1794,7 @@ async function* streamChatInTurn(agent, userText, signal, emit, userId, attachme
       await persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
         withSignalWordsGate, toolsUsed, toolEvents, toolIdentityAnomalies, voiceCtx, hideTurn, hideTaskId,
         memoryRefs: ctx?._meta?.injectedMemoryIds || [],
+        completedTurn: true,
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
         excludeHiddenUserFromModel: turnOpts?.excludeHiddenUserFromModel === true,
         readOnlyTurn,

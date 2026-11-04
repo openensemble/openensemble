@@ -63,7 +63,16 @@ see [Trigger a routine from Home Assistant](../home-assistant/#trigger-a-routine
 ## Saved fast paths
 
 Open **Routines → Saved fast paths** to review and delete saved device phrases,
-device aliases, and learned tool phrases. Ask the assistant to save a precise
+device aliases, and learned tool phrases. With learning enabled, a successful,
+standalone Home Assistant command automatically saves its exact phrase, device,
+service, and settings after the first completion. Repeating the phrase calls
+Home Assistant directly and checks the result again. Short requests such as
+“kitchen 100” are learned when the named device and requested value match the
+completed call. Failed or pending calls,
+relative or contextual requests such as “turn it off,” and turns with multiple
+actions are not saved automatically. Existing saved bindings are preserved.
+
+Ask the assistant to save a precise
 mapping, for example “When I say check the deals, run my store skill,” or ask it
 to forget a phrase.
 

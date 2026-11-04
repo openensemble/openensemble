@@ -15,6 +15,15 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-11-04
+
+**Home Assistant learns completed commands**
+With learning enabled, successful standalone device commands now save the exact
+phrase and HA call after the first completion, including brightness and other
+settings. Repeated phrases reuse the saved call without another model turn.
+“Set kitchen to 100” and “set kitchen 100” also work without saying “percent.”
+Review or remove these in [Saved fast paths](../routines/#saved-fast-paths).
+
 ## 2026-10-30
 
 **OpenEnsemble Desktop Client for Windows and Linux**
