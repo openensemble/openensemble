@@ -1,21 +1,26 @@
 # Wake verification configuration
 
-This optional operator configuration connects an already-installed local wake
-verifier to paired voice devices. Ordinary STT and first-chat setup do not
-require it. Configure it only when that verifier service is available.
+Wake verification runs inside OpenEnsemble. Enable it with
+`verifyGateEnabled: true` and configure speech-to-text in OE's settings.
+Verification uses the currently selected local or remote STT provider on every
+new wake. Switching STT therefore also switches wake verification automatically.
+There is no separate verifier service, model selection, URL, or shared secret
+to configure. Legacy `verifyGateUpstreamUrl`, `verifyGateClientSecret`,
+`OE_VERIFY_GATE_URL`, and `OE_VERIFY_GATE_SECRET` settings are no longer used.
 
-Wake verification is enabled with `verifyGateEnabled: true`.
-`verifyGateUpstreamUrl` (or `OE_VERIFY_GATE_URL`) must be the numeric loopback
-verifier endpoint, normally `http://127.0.0.1:5390/v1/verify`, and
-`verifyGateClientSecret` (or `OE_VERIFY_GATE_SECRET`) must match the gate's
-32+ character internal secret. The secret is encrypted at rest. Neither value
-is sent to a voice device: `server_caps` advertises only the fixed
-`/api/voice-gate/v1/verify` path.
+The voice device detects a possible wake locally and sends the short audio clip
+to OE at `/api/voice-gate/v1/verify`. OE transcribes the clip without prompting
+STT with the expected word, then checks for the wake phrase or an accepted stock
+spelling. Custom phrases use whole-word matching without fuzzy matching.
+Silence, unrelated speech, low confidence, errors, and timeouts reject the wake.
+OE keeps clips and transcripts in memory only; they are not saved by the
+verifier. A remote STT selection sends the clip to that configured provider,
+just as regular transcription does.
 
 Voice-device firmware resolves that path against its already-paired OE origin
-and never accepts a free-form gate URL or sends its bearer to the loopback
-service. Plain HTTP is allowed only when the paired origin is a numeric private
-IPv4 address. OE independently requires the request's raw socket peer to be
+and never accepts a free-form gate URL. Plain HTTP is allowed only when the
+paired origin is a numeric private IPv4 address. OE independently requires the
+request's raw socket peer to be
 private/loopback and rejects proxy/CDN forwarding headers, so this endpoint is
 not supported through a tunnel, reverse proxy, or public/WAN address.
 

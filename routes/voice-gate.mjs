@@ -1,41 +1,37 @@
 /**
  * Authenticated direct-LAN ingress for voice-device wake verification.
  *
- * The Python verifier remains loopback-only. Devices authenticate here with
- * their existing OE voice-device session; this route derives the canonical
- * device id, rebuilds the multipart body, and forwards no bearer/cookie data.
+ * Devices authenticate with their existing OE voice-device session. OE derives
+ * the canonical device id, transcribes with its selected STT provider, and
+ * makes the verification decision in-process. No separate verifier is needed.
  */
 
 import busboy from 'busboy';
-import { randomBytes, timingSafeEqual } from 'crypto';
 import { isIP } from 'node:net';
 import {
   getSessionMeta, loadConfig,
 } from './_helpers.mjs';
 import { getDevice } from '../lib/voice-devices.mjs';
-import { transcribeAudio } from '../lib/stt.mjs';
-import { localSttProvider, probeLocalStt } from '../lib/local-stt.mjs';
+import { verifyWakeAudio } from '../lib/wakeword-verifier.mjs';
 
 export const VOICE_GATE_PATH = '/api/voice-gate/v1/verify';
-export const VOICE_GATE_STT_PATH = '/api/voice-gate/v1/transcribe';
-export const INTERNAL_VERIFY_PATH = '/v1/verify';
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_FILE_BYTES = 96 * 1024;
-const MAX_RESPONSE_BYTES = 8 * 1024;
-const MAX_ACTIVE_UPSTREAM = 2;
+const MAX_ACTIVE_VERIFICATIONS = 2;
 const MAX_ACTIVE_INGRESS = 8;
 const MAX_DEVICE_INGRESS = 2;
 const MAX_DEVICE_REQUESTS_PER_MINUTE = 20;
-const UPSTREAM_TIMEOUT_MS = 1_500;
+const SESSION_TTL_MS = 300_000;
+const MAX_CACHED_SESSIONS = 512;
 const INGRESS_BODY_TIMEOUT_MS = 1_000;
 
 const activeByKey = new Map();
 const activeDevice = new Map();
 const ingressByDevice = new Map();
 const deviceRate = new Map();
-let activeUpstream = 0;
+let activeVerifications = 0;
 let activeIngress = 0;
-let activeTranscriptions = 0;
+const completedSessions = new Map();
 
 function json(res, status, body, headers = {}) {
   res.writeHead(status, {
@@ -99,43 +95,11 @@ export function isDirectPrivateLanRequest(req) {
   return isPrivateLanAddress(req.socket?.remoteAddress);
 }
 
-/**
- * The private verifier must never be an arbitrary network target. Requiring a
- * numeric loopback literal avoids DNS rebinding and accidental LAN exposure.
- */
-export function normalizeLoopbackGateUrl(value) {
-  if (typeof value !== 'string' || !value.trim()) return '';
-  try {
-    const url = new URL(value.trim());
-    const host = url.hostname.toLowerCase();
-    if (url.protocol !== 'http:') return '';
-    if (host !== '127.0.0.1' && host !== '[::1]' && host !== '::1') return '';
-    if (url.username || url.password || url.search || url.hash) return '';
-    const path = url.pathname.replace(/\/+$/, '');
-    if (path && path !== INTERNAL_VERIFY_PATH) return '';
-    url.pathname = INTERNAL_VERIFY_PATH;
-    return url.toString();
-  } catch {
-    return '';
-  }
-}
-
 export function voiceGateConfigured(config = {}) {
   return config.verifyGateEnabled === true;
 }
 
-function gateProxyConfig(config) {
-  const url = normalizeLoopbackGateUrl(config.verifyGateUpstreamUrl);
-  const secret = typeof config.verifyGateClientSecret === 'string'
-    ? config.verifyGateClientSecret
-    : '';
-  const secretBytes = Buffer.byteLength(secret, 'utf8');
-  if (!url || secretBytes < 32 || secretBytes > 512
-      || /[\x00-\x20\x7f]/.test(secret)) return null;
-  return { url, secret };
-}
-
-function parseVerifyMultipart(req, verification = true) {
+function parseVerifyMultipart(req) {
   return new Promise((resolve, reject) => {
     let bb;
     try {
@@ -154,9 +118,9 @@ function parseVerifyMultipart(req, verification = true) {
       return;
     }
 
-    const allowedFields = new Set(verification ? [
+    const allowedFields = new Set([
       'session_id', 'device_id', 'wake_words', 'detector_score', 'fired_at',
-    ] : ['response_format', 'language', 'temperature']);
+    ]);
     const fields = {};
     const fileChunks = [];
     let fileBytes = 0;
@@ -182,7 +146,10 @@ function parseVerifyMultipart(req, verification = true) {
       cleanup();
       req.unpipe(bb);
       req.resume();
-      if (!bb.destroyed) bb.destroy();
+      // Busboy still updates its current file after emitting limit/field
+      // events. Destroying it inside that callback can null the active stream
+      // mid-parse and throw outside this promise. Tear it down after the event.
+      queueMicrotask(() => { if (!bb.destroyed) bb.destroy(); });
       reject(error instanceof Error ? error : new Error(String(error)));
     };
     const succeed = value => {
@@ -202,6 +169,7 @@ function parseVerifyMultipart(req, verification = true) {
     timer.unref?.();
 
     bb.on('field', (name, value, info) => {
+      if (settled) return;
       if (!allowedFields.has(name) || Object.hasOwn(fields, name)) {
         fail(new Error('unexpected or duplicate field'));
         return;
@@ -214,6 +182,8 @@ function parseVerifyMultipart(req, verification = true) {
     });
 
     bb.on('file', (name, stream, info) => {
+      stream.on('error', fail);
+      if (settled) { stream.resume(); return; }
       if (name !== 'file' || sawFile) {
         stream.resume();
         fail(new Error('unexpected or duplicate file'));
@@ -235,7 +205,6 @@ function parseVerifyMultipart(req, verification = true) {
         }
         fileChunks.push(chunk);
       });
-      stream.on('error', fail);
     });
 
     bb.on('filesLimit', () => fail(new Error('too many files')));
@@ -249,17 +218,8 @@ function parseVerifyMultipart(req, verification = true) {
         fail(new Error('missing file'));
         return;
       }
-      if (!verification) {
-        if ((fields.response_format != null && fields.response_format !== 'json')
-            || (fields.language != null && fields.language !== 'en')
-            || (fields.temperature != null && fields.temperature !== '0')) {
-          fail(new Error('invalid transcription options'));
-          return;
-        }
-        succeed({ file });
-        return;
-      }
-      if (!noControls(fields.session_id, 64)) {
+      if (!noControls(fields.session_id, 64)
+          || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(fields.session_id)) {
         fail(new Error('invalid session_id'));
         return;
       }
@@ -296,7 +256,7 @@ function parseVerifyMultipart(req, verification = true) {
       succeed({
         file,
         sessionId: fields.session_id,
-        wakeWords: JSON.stringify(wakeWords),
+        wakeWords,
         detectorScore,
         firedAt: fields.fired_at || '',
       });
@@ -306,41 +266,11 @@ function parseVerifyMultipart(req, verification = true) {
   });
 }
 
-function buildInternalMultipart(deviceId, parsed) {
-  const boundary = `----oevoicegate${randomBytes(24).toString('hex')}`;
-  const chunks = [];
-  const addField = (name, value) => {
-    chunks.push(Buffer.from(
-      `--${boundary}\r\n`
-      + `Content-Disposition: form-data; name="${name}"\r\n\r\n`
-      + `${value}\r\n`,
-      'utf8',
-    ));
-  };
-
-  addField('session_id', parsed.sessionId);
-  addField('device_id', deviceId);
-  addField('wake_words', parsed.wakeWords);
-  if (parsed.detectorScore != null) {
-    addField('detector_score', String(parsed.detectorScore));
-  }
-  if (parsed.firedAt) addField('fired_at', parsed.firedAt);
-  chunks.push(Buffer.from(
-    `--${boundary}\r\n`
-    + 'Content-Disposition: form-data; name="file"; filename="wake.wav"\r\n'
-    + 'Content-Type: audio/wav\r\n\r\n',
-    'utf8',
-  ));
-  chunks.push(parsed.file);
-  chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
-  return {
-    body: Buffer.concat(chunks),
-    contentType: `multipart/form-data; boundary=${boundary}`,
-  };
-}
-
 function takeDeviceRate(deviceId) {
   const now = Date.now();
+  for (const [key, entry] of deviceRate) {
+    if (now >= entry.resetAt) deviceRate.delete(key);
+  }
   let entry = deviceRate.get(deviceId);
   if (!entry || now >= entry.resetAt) {
     entry = { count: 0, resetAt: now + 60_000 };
@@ -352,199 +282,54 @@ function takeDeviceRate(deviceId) {
     : Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
 }
 
-function sanitizeGateResponse(value, deviceId, sessionId) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (value.device_id !== deviceId || value.session_id !== sessionId) return null;
-  if (value.verdict !== 'accept' && value.verdict !== 'reject') return null;
-  if (value.effective !== 'accept' && value.effective !== 'reject') return null;
-  if (value.mode !== 'shadow' && value.mode !== 'enforce') return null;
-  const expectedEffective = value.mode === 'shadow' ? 'accept' : value.verdict;
-  if (value.effective !== expectedEffective) return null;
-  const reasons = Array.isArray(value.reasons)
-    ? value.reasons.filter(v => typeof v === 'string').slice(0, 16)
-    : [];
-  return {
-    device_id: deviceId,
-    session_id: sessionId,
-    verdict: value.verdict,
-    effective: value.effective,
-    matched_variant: typeof value.matched_variant === 'string'
-      ? value.matched_variant.slice(0, 128)
-      : null,
-    match_method: typeof value.match_method === 'string'
-      ? value.match_method.slice(0, 32)
-      : null,
-    mode: value.mode,
-    latency_ms: Number.isFinite(value.latency_ms) ? value.latency_ms : null,
-    reasons,
-  };
+function cacheResult(key, result) {
+  const now = Date.now();
+  for (const [id, entry] of completedSessions) {
+    if (now >= entry.expiresAt) completedSessions.delete(id);
+  }
+  completedSessions.set(key, { result, expiresAt: now + SESSION_TTL_MS });
+  while (completedSessions.size > MAX_CACHED_SESSIONS) {
+    completedSessions.delete(completedSessions.keys().next().value);
+  }
 }
 
-async function callInternalGate(config, deviceId, parsed) {
-  const proxy = gateProxyConfig(config);
-  if (!proxy) return { status: 503, body: { error: 'Wake verification unavailable' } };
-  const multipart = buildInternalMultipart(deviceId, parsed);
-
-  let response;
-  try {
-    response = await fetch(proxy.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': multipart.contentType,
-        'Content-Length': String(multipart.body.length),
-        'X-OE-Gate-Secret': proxy.secret,
-        'X-OE-Device-ID': deviceId,
-      },
-      body: multipart.body,
-      redirect: 'error',
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    });
-  } catch {
-    return { status: 503, body: { error: 'Wake verification unavailable' } };
-  }
-
-  const declared = Number(response.headers.get('content-length') || 0);
-  if (declared > MAX_RESPONSE_BYTES) {
-    await response.body?.cancel().catch(() => {});
-    return { status: 502, body: { error: 'Invalid verifier response' } };
-  }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {});
-    const status = response.status === 429 ? 429 : 503;
-    return { status, body: { error: 'Wake verification unavailable' } };
-  }
-  if (!/^application\/json(?:;|$)/i.test(
-    response.headers.get('content-type') || '',
-  )) {
-    await response.body?.cancel().catch(() => {});
-    return { status: 502, body: { error: 'Invalid verifier response' } };
-  }
-  const reader = response.body?.getReader();
-  if (!reader) {
-    return { status: 502, body: { error: 'Invalid verifier response' } };
-  }
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) {
-        await reader.cancel();
-        return { status: 502, body: { error: 'Invalid verifier response' } };
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } catch {
-    return { status: 502, body: { error: 'Invalid verifier response' } };
-  }
-  const bytes = Buffer.concat(chunks, total);
-  let decoded;
-  try {
-    decoded = JSON.parse(bytes.toString('utf8'));
-  } catch {
-    return { status: 502, body: { error: 'Invalid verifier response' } };
-  }
-  const clean = sanitizeGateResponse(decoded, deviceId, parsed.sessionId);
-  return clean
-    ? { status: 200, body: clean }
-    : { status: 502, body: { error: 'Invalid verifier response' } };
-}
-
-async function runBounded(config, deviceId, parsed) {
+async function runBounded(deviceId, parsed) {
   const key = `${deviceId}\0${parsed.sessionId}`;
+  const cached = completedSessions.get(key);
+  if (cached && Date.now() < cached.expiresAt) {
+    completedSessions.delete(key);
+    completedSessions.set(key, cached);
+    return cached.result;
+  }
+  completedSessions.delete(key);
   const duplicate = activeByKey.get(key);
   if (duplicate) return duplicate;
   if (activeDevice.has(deviceId)) {
     return { status: 429, body: { error: 'Device verification already active' } };
   }
-  if (activeUpstream >= MAX_ACTIVE_UPSTREAM) {
+  if (activeVerifications >= MAX_ACTIVE_VERIFICATIONS) {
     return { status: 503, body: { error: 'Wake verifier busy' } };
   }
 
-  activeUpstream += 1;
+  activeVerifications += 1;
   activeDevice.set(deviceId, key);
-  const promise = callInternalGate(config, deviceId, parsed);
+  const promise = verifyWakeAudio({ ...parsed, deviceId }).then(body => {
+    const result = { status: 200, body };
+    cacheResult(key, result);
+    return result;
+  }).catch(() => ({ status: 503, body: { error: 'Wake verification unavailable' } }));
   activeByKey.set(key, promise);
   try {
     return await promise;
   } finally {
     activeByKey.delete(key);
     if (activeDevice.get(deviceId) === key) activeDevice.delete(deviceId);
-    activeUpstream -= 1;
+    activeVerifications -= 1;
   }
-}
-
-// The private verifier calls this stable endpoint instead of retaining a model's
-// port. The shared STT core reads the current selection on every request; remote
-// provider credentials remain in OE and never reach the verifier or the TV.
-async function handleVerifierTranscription(req, res) {
-  const peer = String(req.socket?.remoteAddress || '').replace(/^::ffff:/i, '');
-  if (!['127.0.0.1', '::1'].includes(peer) || !isDirectPrivateLanRequest(req)) {
-    return json(res, 403, { error: 'Direct loopback connection required' });
-  }
-  const config = loadConfig();
-  const proxy = gateProxyConfig(config);
-  const supplied = req.headers['x-oe-gate-secret'];
-  const actual = Buffer.from(typeof supplied === 'string' ? supplied : '');
-  const expected = Buffer.from(proxy?.secret || '');
-  if (!voiceGateConfigured(config) || !proxy || actual.length !== expected.length
-      || !timingSafeEqual(actual, expected)) {
-    return json(res, 401, { error: 'Unauthorized' });
-  }
-  if (req.method === 'GET') {
-    const local = config.sttMode === 'local';
-    const ready = local ? await probeLocalStt(localSttProvider(config))
-      : Boolean(config.sttApiUrl && config.sttApiKey);
-    return json(res, ready ? 200 : 503, {
-      ready, mode: local ? 'local' : 'remote',
-      provider: local ? localSttProvider(config).id : 'remote',
-    });
-  }
-  if (req.method !== 'POST') {
-    return json(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, POST' });
-  }
-  if (!/^multipart\/form-data;\s*boundary=/i.test(String(req.headers['content-type'] || ''))) {
-    return json(res, 415, { error: 'Expected multipart/form-data' });
-  }
-  const length = String(req.headers['content-length'] || '');
-  if (req.headers['transfer-encoding'] || !/^[1-9]\d*$/.test(length)) {
-    return json(res, 411, { error: 'Content-Length required' });
-  }
-  if (!Number.isSafeInteger(Number(length)) || Number(length) > MAX_REQUEST_BYTES) {
-    return json(res, 413, { error: 'Request body too large' });
-  }
-  if (activeTranscriptions >= MAX_ACTIVE_UPSTREAM) {
-    return json(res, 503, { error: 'Wake transcription busy' });
-  }
-  activeTranscriptions += 1;
-  try {
-    let parsed;
-    try { parsed = await parseVerifyMultipart(req, false); }
-    catch { return json(res, 400, { error: 'Invalid transcription request' }); }
-    try {
-      const { transcript, raw } = await transcribeAudio(parsed.file, {
-        name: 'wake.wav', lang: 'en', timeoutMs: 900,
-        temperature: 0, responseFormat: 'json', redirect: 'error',
-      });
-      if (typeof transcript !== 'string' || transcript.length > 4096) {
-        throw new Error('Invalid transcription');
-      }
-      const segments = Array.isArray(raw?.segments) ? raw.segments.slice(0, 64).map(s => ({
-        ...(Number.isFinite(s?.no_speech_prob) ? { no_speech_prob: s.no_speech_prob } : {}),
-        ...(Number.isFinite(s?.avg_logprob) ? { avg_logprob: s.avg_logprob } : {}),
-      })) : [];
-      return json(res, 200, { text: transcript, segments });
-    } catch {
-      return json(res, 503, { error: 'Wake transcription unavailable' });
-    }
-  } finally { activeTranscriptions -= 1; }
 }
 
 export async function handle(req, res) {
   const path = String(req.url || '').split('?', 1)[0];
-  if (path === VOICE_GATE_STT_PATH) return handleVerifierTranscription(req, res);
   if (path !== VOICE_GATE_PATH) return false;
   if (req.method !== 'POST') {
     return json(res, 405, { error: 'Method not allowed' }, { Allow: 'POST' });
@@ -564,9 +349,6 @@ export async function handle(req, res) {
 
   const config = loadConfig();
   if (!voiceGateConfigured(config)) {
-    return json(res, 503, { error: 'Wake verification unavailable' });
-  }
-  if (!gateProxyConfig(config)) {
     return json(res, 503, { error: 'Wake verification unavailable' });
   }
 
@@ -623,7 +405,7 @@ export async function handle(req, res) {
       );
     }
 
-    const result = await runBounded(config, meta.deviceId, parsed);
+    const result = await runBounded(meta.deviceId, parsed);
     return json(res, result.status, result.body);
   } finally {
     activeIngress -= 1;
@@ -638,7 +420,7 @@ export function resetVoiceGateStateForTests() {
   activeDevice.clear();
   ingressByDevice.clear();
   deviceRate.clear();
-  activeUpstream = 0;
+  activeVerifications = 0;
   activeIngress = 0;
-  activeTranscriptions = 0;
+  completedSessions.clear();
 }

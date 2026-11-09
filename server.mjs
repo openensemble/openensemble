@@ -88,7 +88,7 @@ import { handle as handleAdmission }    from './routes/admission.mjs';
 import { handle as handleBrowserPairing } from './routes/browser-pairing.mjs';
 import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
-import { handle as handleVoiceGate, VOICE_GATE_STT_PATH } from './routes/voice-gate.mjs';
+import { handle as handleVoiceGate, VOICE_GATE_PATH } from './routes/voice-gate.mjs';
 import { handle as handleNetworkShares } from './routes/network-shares.mjs';
 import { stopShareMounts } from './lib/network-share-mounts.mjs';
 import { restoreNetworkSharesAtStartup } from './lib/network-share-startup.mjs';
@@ -463,9 +463,8 @@ const httpServer = http.createServer(async (req, res) => {
     aliveResponse(res);
     return;
   }
-  // The authenticated verifier adapter deliberately uses a numeric loopback
-  // origin and refuses redirects carrying its shared secret.
-  if (host.startsWith('127.0.0.1') && req.url.split('?', 1)[0] !== VOICE_GATE_STT_PATH) {
+  // Wake uploads keep their paired origin and bearer; do not redirect a POST.
+  if (host.startsWith('127.0.0.1') && req.url.split('?', 1)[0] !== VOICE_GATE_PATH) {
     res.writeHead(302, { Location: `http://localhost:${host.split(':')[1] || PORT}${req.url}` });
     res.end();
     return;

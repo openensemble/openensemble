@@ -289,13 +289,6 @@ function reconcileVoiceDeviceState(ws) {
       deviceId: ws._deviceId,
       config: _capsCfg,
     });
-    if (_capsCfg.verifyGateEnabled === true &&
-        (!String(_capsCfg.verifyGateUpstreamUrl || '').trim()
-          || !String(_capsCfg.verifyGateClientSecret || '').trim())) {
-      // Keep advertising the fixed proxy path so a configured device fails
-      // closed through OE (503) instead of silently reverting to ungated wake.
-      log.warn('voice', 'wake gate enabled but internal upstream/secret is incomplete; requests will fail closed');
-    }
     sendToDevice(ws._deviceId, serverCaps);
     if (d.name) sendToDevice(ws._deviceId, { type: 'set_device_name', name: d.name });
     sendToDevice(ws._deviceId, { type: 'set_headphone_mode', enabled: !!d.headphone_mode });
