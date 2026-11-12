@@ -20,9 +20,9 @@ verifies local files and does not access the network.
 - `voice-device/` contains the ESP32-S3 OpenEnsemble voice-device build. Its
   source is [openensemble/voice-device-firmware](https://github.com/openensemble/voice-device-firmware),
   licensed AGPL-3.0 with separately licensed third-party components documented
-  by that project. The application binary reports `0.2.93-portalhdr`; its
+  by that project. The application binary reports `0.2.95-wake-timeout`; its
   corresponding source snapshot is commit
-  `40084e1508870b3cd899e2f02f6c3566a7f1249e`. Supporting images are pinned
+  `8c308a98b0e9c69bd84ad6b15fff6f66ea2f501b`. Supporting images are pinned
   independently by the manifest hashes.
 - `xvf3800/xvf_ha_v1_0_7.bin` is compiled Seeed/XMOS XVF3800 firmware, variant
   `ha_inthost_lr48_sqr_i2c`, distributed by the

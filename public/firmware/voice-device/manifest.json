@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.94-reliability",
+  "version": "0.2.95-wake-timeout",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -12,7 +12,7 @@
       "name": "bootloader",
       "offset": "0x0",
       "file": "bootloader.bin",
-      "sha256": "b93ee7d46351383632d90823f5db0d067e10005c0ef20b54ab2d67f54a7530cf"
+      "sha256": "b032e3be5239ffe4758f38bd6275eb095735299424fb7dd6bc466f830ce17bf3"
     },
     {
       "name": "partition-table",
@@ -30,7 +30,7 @@
       "name": "app",
       "offset": "0x20000",
       "file": "oe_voice_device.bin",
-      "sha256": "67131cf197561c8c269139fe7f0b1df9966c356984cf31f726cad39702be2825"
+      "sha256": "f179132ea4c5014018131091716c1f98725fed6e5745bd34ee9f48ff54e84a12"
     },
     {
       "name": "wakewords",

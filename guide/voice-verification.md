@@ -4,6 +4,10 @@ Wake verification runs inside OpenEnsemble. Enable it with
 `verifyGateEnabled: true` and configure speech-to-text in OE's settings.
 Verification uses the currently selected local or remote STT provider on every
 new wake. Switching STT therefore also switches wake verification automatically.
+Local STT has a 900 ms verification timeout; remote APIs have 2.5 seconds to
+allow for network delay. Responses are used as soon as they arrive. Voice-device
+firmware 0.2.95-wake-timeout or newer allows 3.5 seconds for the OE request;
+update older devices to use the full remote API allowance.
 There is no separate verifier service, model selection, URL, or shared secret
 to configure. Legacy `verifyGateUpstreamUrl`, `verifyGateClientSecret`,
 `OE_VERIFY_GATE_URL`, and `OE_VERIFY_GATE_SECRET` settings are no longer used.
